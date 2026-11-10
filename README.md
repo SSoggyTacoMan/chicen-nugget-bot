@@ -32,6 +32,7 @@ admin clicks Approve ──▶ bot invites member to private channel ──▶ D
 2. Pick your workspace.
 3. Paste the contents of [`slack-app-manifest.json`](slack-app-manifest.json). The app/bot name is set to `Chicen Nugget Bot`; edit it if you like.
 4. Create the app, then **Install to Workspace** and allow it.
+5. Open **App Home → Messages Tab** and check **Allow users to send messages from the Messages tab**. The manifest enables it, but apps created before that setting was added need the toggle flipped manually. Without it Slack says *Sending messages to this app has been turned off*.
 
 If you change the name, also set `BOT_NAME` in `.env` (and optionally change the app name in Slack later).
 
@@ -436,6 +437,7 @@ gh run watch
 
 | symptom | fix |
 |---|---|
+| `Sending messages to this app has been turned off` | **App Home → Messages Tab** → enable **Allow users to send messages from the Messages tab** (also in the manifest as `features.app_home.messages_tab_enabled`). |
 | `missing_scope` | add the scope in **OAuth & Permissions**, reinstall the app, restart. The manifest already includes what the built-in features need. |
 | `/imagine` says `missing_scope` | the app was installed before `files:write` was added; reinstall from the manifest. |
 | AI says budget used up (`402`) | Hack Club AI's daily limit reset at 00:00 UTC, or use a different endpoint/key. |
