@@ -1,0 +1,6 @@
+slack-bolt[async]>=1.21,<2
+aiohttp>=3.9,<4
+slack-sdk>=3.35,<4
+python-dotenv>=1.0,<2
+openai>=1.60,<2
+httpx>=0.28,<1
