@@ -17,6 +17,7 @@ admin clicks Approve ──▶ bot invites member to private channel ──▶ D
 - **Usergroup helpers** — DMs anyone who replies in a thread under a usergroup ping (replies re-ping the whole group), and posts a “thread here!” anchor when a ping includes 🧵 (or offers yes/no buttons when it doesn't).
 - **Daily recap** — a scheduled public prompt asks how your day went. Marking it done links your reply, adds ✨, optionally pings a usergroup, and can open a second private recap.
 - **Personal AI agent** — DM it (owner/admins only) or mention it in a channel. It has conversation memory in SQLite and tools for weather, dice, reminders, Slack search, channel history, DMs, notes, stats, URLs and optional web search. It also powers `/nugget ask`, `/nugget summarize` and `/nugget imagine`.
+- **Jev gate** — in channels listed in `AI_AMBIENT_CHANNELS`, the bot reads every message and asks `typesafe/jev-router` one yes/no question: should it reply? Only a yes runs the expensive agent turn, so it can chime in on questions and help without replying to every message.
 - **One slash command** — everything lives under `/nugget`, so it never collides with other apps: `/nugget help`, `/nugget ping`, `/nugget roll 2d6`, `/nugget poll ...`, `/nugget ask ...`, `/nugget imagine ...`, `/nugget pinggroup`, and more.
 - **Reminders & scheduled messages** — one-off and recurring (`10m`, `tomorrow 09:00`, `daily 08:30`, `weekly mon 18:00`, `every 2h`), delivered by DM or posted to a channel by an admin.
 - **Polls** — `/nugget poll "question" "a" "b"` posts live button tallies with bars; click another option to change your vote.
@@ -137,12 +138,28 @@ The agent is wired for **Hack Club AI** by default, and also works with any **Op
 ```dotenv
 AI_API_KEY=sk-hc-v1-...
 AI_BASE_URL=https://ai.hackclub.com/proxy/v1
-AI_MODEL=openai/gpt-oss-20b
-AI_FALLBACK_MODEL=qwen/qwen3-32b
+AI_MODEL=openai/gpt-5.5
+AI_FALLBACK_MODEL=openai/gpt-5.4-mini
 AI_RATE_LIMIT_PER_MINUTE=12
 ```
 
 Get a key from <https://ai.hackclub.com/dashboard>. The fallback model is tried automatically when the primary model errors or times out. `AI_RATE_LIMIT_PER_MINUTE=0` disables the per-user limit.
+
+### The jev gate
+
+In a busy channel a bot that answers everything is noise. `typesafe/jev-router` is a decision-only model: the bot asks it "should I reply to this?" and only a `YES` triggers a real agent turn.
+
+```dotenv
+AI_GATE_ENABLED=true
+AI_GATE_MODEL=typesafe/jev-router
+AI_GATE_TIMEOUT=8
+# channels where the bot listens to every message; empty = off
+AI_AMBIENT_CHANNELS=C0C83BAUZCK
+# minimum seconds between unprompted replies in one channel
+AI_AMBIENT_COOLDOWN=120
+```
+
+Mentions and DMs always skip the gate. If the gate errors or times out it fails closed (no reply), so a broken gate never turns into spam. Set `AI_AMBIENT_CHANNELS=*` to let it do this everywhere.
 
 Other endpoints still work:
 
@@ -161,6 +178,7 @@ Who can use it:
 
 - **DMs:** owner always; admins too when `AI_ALLOW_ADMINS=true`. Other users are silently ignored.
 - **Channels:** anyone can mention the bot in a channel allowed by `AI_CHANNELS` (`*` = every channel the bot is in). It replies in a thread. Once it has replied in a thread, it keeps following that thread without a fresh mention.
+- **Ambient:** in channels listed in `AI_AMBIENT_CHANNELS` it also listens to unaddressed messages and replies only when the jev gate says yes, at most once per `AI_AMBIENT_COOLDOWN` seconds.
 - **Commands:** `/ask` and `/summarize` follow `AI_CHANNELS`; `/imagine` and `/forget` in channels are admin-only.
 
 Conversation history and notes are stored in `data/bot.db`. Nothing is sent anywhere except your Slack workspace, your chosen AI endpoint, and the optional tools you enable.
@@ -298,13 +316,18 @@ Times use `TIMEZONE`. The first time expression is removed from the front; every
 | `RECAP_PRIVATE_PING` | — | usergroup id to ping when the private recap is done |
 | `AI_API_KEY` | — | enables the AI agent |
 | `AI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
-| `AI_MODEL` | `gpt-4o-mini` | model id (must support tools) |
-| `AI_FALLBACK_MODEL` | — | retried automatically when the primary model fails |
+| `AI_MODEL` | `openai/gpt-5.5` | model id (must support tools) |
+| `AI_FALLBACK_MODEL` | `openai/gpt-5.4-mini` | retried automatically when the primary model fails |
 | `AI_MAX_TOKENS` | `1200` | max reply length |
 | `AI_HISTORY_LIMIT` | `24` | conversation turns loaded per reply |
 | `AI_CHANNELS` | `*` | channels where mentions and `/ask` are answered |
 | `AI_ALLOW_ADMINS` | `true` | let admins DM the agent too |
 | `AI_RATE_LIMIT_PER_MINUTE` | `12` | per-user AI request cap; `0` disables |
+| `AI_GATE_ENABLED` | `true` | ask jev whether to reply in ambient channels |
+| `AI_GATE_MODEL` | `typesafe/jev-router` | decision-only routing model |
+| `AI_GATE_TIMEOUT` | `8` | seconds before the gate fails closed |
+| `AI_AMBIENT_CHANNELS` | — | channels where the bot may reply unprompted; `*` = all |
+| `AI_AMBIENT_COOLDOWN` | `120` | min seconds between unprompted replies per channel |
 | `IMAGINE_MODEL` | `google/gemini-3.1-flash-lite-image` | image model for `/imagine`; empty disables |
 | `IMAGINE_FALLBACK_MODEL` | `google/gemini-2.5-flash-image` | retried when image generation fails |
 | `DAILY_DIGEST_TIME` | — | `HH:MM` in `TIMEZONE`; empty disables |
