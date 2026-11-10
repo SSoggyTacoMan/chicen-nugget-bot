@@ -10,6 +10,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from bot.runtime import runtime
 from bot.ai.agent import Agent
+from bot.ai.gate import Gate
 from bot.ai.limits import RateLimiter
 from bot.config import settings
 from bot.db import Database
@@ -74,6 +75,19 @@ async def run() -> None:
                 settings.ai_model,
                 f" (fallback {settings.ai_fallback_model})" if settings.ai_fallback_model else "",
             )
+            if settings.ai_gate_enabled:
+                runtime.gate = Gate(settings)
+                channels = (
+                    "everywhere"
+                    if "*" in settings.ai_ambient_channels
+                    else ", ".join(sorted(settings.ai_ambient_channels)) or "nowhere"
+                )
+                logger.info(
+                    "gate enabled with %s; ambient replies in %s (cooldown %ss)",
+                    settings.ai_gate_model,
+                    channels,
+                    settings.ai_ambient_cooldown,
+                )
         except Exception:  # noqa: BLE001
             logger.exception("failed to initialise the ai agent; continuing without it")
             runtime.agent = None

@@ -38,6 +38,16 @@ def _bool(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "y", "on"}
 
 
+def _float(name: str, default: float) -> float:
+    raw = _str(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _list(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     raw = _str(name)
     if not raw:
@@ -74,6 +84,11 @@ class Settings:
     ai_channels: frozenset[str]
     ai_allow_admins: bool
     ai_rate_limit_per_minute: int
+    ai_gate_enabled: bool
+    ai_gate_model: str
+    ai_gate_timeout: float
+    ai_ambient_channels: frozenset[str]
+    ai_ambient_cooldown: int
     imagine_model: str | None
     imagine_fallback_model: str | None
 
@@ -163,6 +178,12 @@ class Settings:
             return False
         return self.ai_everywhere or channel_id in self.ai_channels
 
+    def ambient_allowed(self, channel_id: str | None) -> bool:
+        """May the bot listen in this channel and decide on its own to reply?"""
+        if not channel_id or not self.ai_gate_enabled:
+            return False
+        return "*" in self.ai_ambient_channels or channel_id in self.ai_ambient_channels
+
     def missing_required(self) -> list[str]:
         problems: list[str] = []
         if not self.slack_bot_token or not self.slack_bot_token.startswith("xoxb-"):
@@ -209,6 +230,11 @@ def load_settings() -> Settings:
         ai_channels=frozenset(_list("AI_CHANNELS", ("*",))),
         ai_allow_admins=_bool("AI_ALLOW_ADMINS", True),
         ai_rate_limit_per_minute=max(0, _int("AI_RATE_LIMIT_PER_MINUTE", 12)),
+        ai_gate_enabled=_bool("AI_GATE_ENABLED", True),
+        ai_gate_model=_str("AI_GATE_MODEL", "typesafe/jev-router") or "typesafe/jev-router",
+        ai_gate_timeout=_float("AI_GATE_TIMEOUT", 8.0),
+        ai_ambient_channels=frozenset(_list("AI_AMBIENT_CHANNELS")),
+        ai_ambient_cooldown=max(0, _int("AI_AMBIENT_COOLDOWN", 120)),
         imagine_model=_str("IMAGINE_MODEL") or None,
         imagine_fallback_model=_str("IMAGINE_FALLBACK_MODEL") or None,
         watched_channel_ids=frozenset(_list("WATCHED_CHANNEL_IDS")),

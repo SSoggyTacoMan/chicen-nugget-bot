@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from bot.runtime import runtime
 from bot.ai.limits import user_retry_after
-from bot.slack_api import post, post_ephemeral, react, unreact
-from bot.utils.text import chunk_text, strip_mentions
+from bot.slack_api import channel_info, post, post_ephemeral, react, unreact, user_info
+from bot.utils.text import chunk_text, display_name, strip_mentions
 
 logger = logging.getLogger(__name__)
+
+# channel_id -> monotonic time of the last unprompted reply, so the gate saying
+# yes five times in a row doesn't turn into five replies in a row.
+_last_ambient: dict[str, float] = {}
+_names: dict[str, str] = {}
 
 
 async def on_message(event: dict[str, Any], client) -> None:
@@ -26,6 +32,7 @@ async def on_message(event: dict[str, Any], client) -> None:
         return
     if channel_type in {"channel", "group"}:
         await _handle_thread_continuation(event, client)
+        await _maybe_ambient(event, client)
 
 
 async def on_app_mention(event: dict[str, Any], client) -> None:
@@ -98,6 +105,62 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
     if f"<@{runtime.bot_user_id}>" in text:
         return  # app_mention owns this one
     await _handle_channel(event, client, text=text, thread_ts=thread_ts)
+
+
+async def _maybe_ambient(event: dict[str, Any], client) -> None:
+    """Let jev decide whether an unaddressed channel message deserves a reply."""
+    settings = runtime.settings
+    channel = event.get("channel")
+    user_id = event.get("user")
+    text = (event.get("text") or "").strip()
+
+    if not channel or not user_id or not text:
+        return
+    if runtime.agent is None or runtime.gate is None or not settings.ai_enabled:
+        return
+    if not settings.ai_allowed(channel) or not settings.ambient_allowed(channel):
+        return
+    # mentions are handled by app_mention, threads by _handle_thread_continuation
+    if event.get("thread_ts"):
+        return
+    if f"<@{runtime.bot_user_id}>" in text:
+        return
+    if len(text) < 4:
+        return
+    if user_retry_after(user_id):
+        return
+
+    cooldown = settings.ai_ambient_cooldown
+    last = _last_ambient.get(channel, 0.0)
+    if cooldown and time.monotonic() - last < cooldown:
+        return
+
+    user_name = await _user_name(client, user_id)
+    channel_name = await _channel_name(client, channel)
+    if not await runtime.gate.should_reply(
+        text=text, channel_name=channel_name, user_name=user_name
+    ):
+        return
+
+    _last_ambient[channel] = time.monotonic()
+    logger.info("gate let %s through in %s", user_id, channel)
+    await _handle_channel(
+        event, client, text=strip_mentions(text) or text, thread_ts=event.get("ts")
+    )
+
+
+async def _user_name(client, user_id: str) -> str:
+    if user_id not in _names:
+        _names[user_id] = display_name(await user_info(client, user_id))
+    return _names[user_id]
+
+
+async def _channel_name(client, channel_id: str) -> str:
+    key = f"ch:{channel_id}"
+    if key not in _names:
+        info = await channel_info(client, channel_id) or {}
+        _names[key] = f"#{info.get('name')}" if info.get("name") else "a channel"
+    return _names[key]
 
 
 async def _handle_channel(
