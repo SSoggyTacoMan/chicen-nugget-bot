@@ -53,6 +53,8 @@ PRICES: dict[str, Price] = {
     "openai/gpt-5.4": Price(2.50, 15.00),
     "x-ai/grok-4.5": Price(2.00, 6.00),
     "x-ai/grok-4.3": Price(1.25, 2.50),
+    "perplexity/sonar": Price(1.00, 1.00),
+    "perplexity/sonar-pro": Price(3.00, 15.00),
     "jev-latest": Price(0.042, 0.0),
     "jev-": Price(0.042, 0.0),
 }
