@@ -380,6 +380,28 @@ User=nugget
 WantedBy=multi-user.target
 ```
 
+### Deploying with GitHub Actions
+
+`.github/workflows/deploy.yml` rsyncs the repo to the host, writes `.env` from the
+`ENV_FILE` secret, installs requirements and restarts the unit. It runs on every
+push to `main`, and on demand:
+
+```bash
+gh workflow run deploy.yml
+gh run watch
+```
+
+Secrets it needs: `SSH_PRIVATE_KEY` (a key that can log in to the host) and
+`ENV_FILE` (the full contents of `.env`). This is handy when your network blocks
+outbound SSH — the runner connects for you.
+
+To read the log from anywhere, `.github/workflows/logs.yml` tails it the same way:
+
+```bash
+gh workflow run logs.yml -f lines=200
+gh run watch
+```
+
 ## Data & privacy
 
 - Everything is stored locally in `data/bot.db` (SQLite): members/join stats, access requests, reminders, polls, AI conversation turns and notes.
