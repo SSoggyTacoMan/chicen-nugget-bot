@@ -20,6 +20,16 @@ PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system.md"
 MAX_TOOL_ROUNDS = 6
 MAX_TOOL_RESULT = 7000
 
+# How this turn started, in words the persona can act on. The model can't tell
+# a mention from an ambient chiming-in otherwise, because mentions are stripped
+# before they reach it.
+TRIGGER_TEXT = {
+    "dm": "this is a direct message to you.",
+    "mention": "you were @mentioned in the latest message.",
+    "thread_followup": "someone replied in a thread you are already part of.",
+    "ambient": "nobody addressed you. you chose to chime in on the latest message because you thought you could help.",
+}
+
 
 class Agent:
     def __init__(
@@ -54,6 +64,7 @@ class Agent:
         channel_id: str | None,
         thread_ts: str | None,
         is_dm: bool,
+        trigger: str = "mention",
     ) -> str:
         """Run one agent turn (with tools) and persist both sides of it."""
         if not self.settings.ai_enabled:
@@ -67,8 +78,10 @@ class Agent:
             .replace("{now}", format_now(self.settings))
             .replace("{user_id}", user_id)
             .replace("{is_owner}", "yes" if role == "owner" else "no")
+            .replace("{is_admin}", "yes" if self.settings.is_admin(user_id) else "no")
             .replace("{owner_id}", self.settings.owner_user_id)
             .replace("{location}", location)
+            .replace("{trigger}", TRIGGER_TEXT.get(trigger, TRIGGER_TEXT["mention"]))
         )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]

@@ -44,7 +44,9 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
         return
     if not runtime.settings.ai_allowed(channel):
         return
-    await _handle_channel(event, client, text=strip_mentions(event.get("text") or ""))
+    await _handle_channel(
+        event, client, text=strip_mentions(event.get("text") or ""), trigger="mention"
+    )
 
 
 async def _handle_dm(event: dict[str, Any], client) -> None:
@@ -82,6 +84,7 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
                 channel_id=event.get("channel"),
                 thread_ts=None,
                 is_dm=True,
+                trigger="dm",
             )
         except Exception:  # noqa: BLE001
             logger.exception("dm agent turn failed")
@@ -104,7 +107,9 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         return
     if f"<@{runtime.bot_user_id}>" in text:
         return  # app_mention owns this one
-    await _handle_channel(event, client, text=text, thread_ts=thread_ts)
+    await _handle_channel(
+        event, client, text=text, thread_ts=thread_ts, trigger="thread_followup"
+    )
 
 
 async def _maybe_ambient(event: dict[str, Any], client) -> None:
@@ -145,7 +150,11 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
     _last_ambient[channel] = time.monotonic()
     logger.info("gate let %s through in %s", user_id, channel)
     await _handle_channel(
-        event, client, text=strip_mentions(text) or text, thread_ts=event.get("ts")
+        event,
+        client,
+        text=strip_mentions(text) or text,
+        thread_ts=event.get("ts"),
+        trigger="ambient",
     )
 
 
@@ -164,7 +173,12 @@ async def _channel_name(client, channel_id: str) -> str:
 
 
 async def _handle_channel(
-    event: dict[str, Any], client, *, text: str, thread_ts: str | None = None
+    event: dict[str, Any],
+    client,
+    *,
+    text: str,
+    thread_ts: str | None = None,
+    trigger: str = "mention",
 ) -> None:
     settings = runtime.settings
     channel = event.get("channel")
@@ -197,6 +211,7 @@ async def _handle_channel(
                 channel_id=channel,
                 thread_ts=root_ts,
                 is_dm=False,
+                trigger=trigger,
             )
         for chunk in chunk_text(answer):
             await post(client, channel, chunk, thread_ts=root_ts)
