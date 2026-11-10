@@ -100,6 +100,9 @@ def test_toolbox_has_expanded_tools():
     assert "public_holidays" in names
     assert "search_web" in names
     assert "fetch_url" in names
+    assert "check_emails" in names
+    assert "hackatime_stats" in names
+    assert "github_info" in names
 
 
 def test_owner_only_tools_guard():
@@ -132,7 +135,48 @@ def test_owner_only_tools_guard():
         res3 = await box.execute("ocr_document", {"url": "https://example.com/doc.pdf"}, ctx)
         assert "only the owner/admin" in res3
 
+        res4 = await box.execute("check_emails", {}, ctx)
+        assert "only the owner/admin" in res4
+
     asyncio.run(run())
+
+
+def test_email_helpers_and_unconfigured():
+    import asyncio
+    from email.message import EmailMessage
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.ai.tools import Toolbox, ToolContext, _decode_mime, _extract_mime_body
+
+    assert _decode_mime("=?utf-8?B?SGVsbG8gV29ybGQ=?=") == "Hello World"
+    assert _decode_mime("plain text") == "plain text"
+
+    msg = EmailMessage()
+    msg["Subject"] = "Test"
+    msg.set_content("Hello from test email!")
+    assert _extract_mime_body(msg) == "Hello from test email!"
+
+    # Unconfigured settings return clear message
+    settings = MagicMock()
+    settings.imap_host = None
+    settings.imap_user = None
+    settings.imap_password = None
+    box = Toolbox(settings)
+    ctx = ToolContext(
+        db=MagicMock(),
+        settings=settings,
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="C1",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+    )
+    res = asyncio.run(box.execute("check_emails", {}, ctx))
+    assert "email credentials not configured" in res
+
 
 
 

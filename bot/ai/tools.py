@@ -7,7 +7,10 @@ checked here against the real Slack sender, not just the prompt.
 from __future__ import annotations
 
 import asyncio
+import email
+import email.header
 import html
+import imaplib
 import ipaddress
 import json
 import logging
@@ -103,6 +106,143 @@ class _TextExtractor(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self.skip:
             self.parts.append(data)
+
+
+def _decode_mime(val: str | None) -> str:
+    if not val:
+        return ""
+    try:
+        parts = email.header.decode_header(val)
+        out = []
+        for b, enc in parts:
+            if isinstance(b, bytes):
+                out.append(b.decode(enc or "utf-8", errors="replace"))
+            else:
+                out.append(str(b))
+        return "".join(out)
+    except Exception:
+        return str(val)
+
+
+def _extract_mime_body(msg: email.message.Message, max_len: int = 2000) -> str:
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            cdisp = str(part.get("Content-Disposition") or "")
+            if ctype == "text/plain" and "attachment" not in cdisp:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    charset = part.get_content_charset() or "utf-8"
+                    body = payload.decode(charset, errors="replace")
+                    break
+        if not body:
+            for part in msg.walk():
+                if part.get_content_type() == "text/html":
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        charset = part.get_content_charset() or "utf-8"
+                        raw_html = payload.decode(charset, errors="replace")
+                        parser = _TextExtractor()
+                        parser.feed(raw_html[:30000])
+                        body = "".join(parser.parts)
+                        break
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            body = payload.decode(charset, errors="replace")
+
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    return "\n".join(lines)[:max_len]
+
+
+def _sync_imap_op(
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    folder: str,
+    action: str,
+    query: str,
+    email_id: str,
+    limit: int,
+) -> str:
+    try:
+        client = imaplib.IMAP4_SSL(host, port, timeout=15)
+    except Exception as exc:
+        return _error(f"failed to connect to imap server {host}:{port}: {exc}")
+
+    try:
+        typ, _ = client.login(user, password)
+        if typ != "OK":
+            return _error("imap login failed (check credentials or app password)")
+        typ, _ = client.select(folder or "INBOX", readonly=True)
+        if typ != "OK":
+            return _error(f"could not open mailbox folder {folder or 'INBOX'}")
+
+        if action == "read" or email_id:
+            target_id = email_id or query
+            if not target_id:
+                return _error("email_id is required to read email")
+            typ, data = client.fetch(target_id, "(RFC822)")
+            if typ != "OK" or not data or not data[0] or not isinstance(data[0], tuple):
+                return _error(f"email #{target_id} not found")
+            msg = email.message_from_bytes(data[0][1])
+            info = {
+                "id": target_id,
+                "from": _decode_mime(msg.get("From")),
+                "to": _decode_mime(msg.get("To")),
+                "subject": _decode_mime(msg.get("Subject")),
+                "date": msg.get("Date"),
+                "body": _extract_mime_body(msg, max_len=4000),
+            }
+            return _json(info)
+
+        if action == "search" and query:
+            safe_q = query.replace('"', "")
+            criterion = f'(TEXT "{safe_q}")'
+        elif action == "recent":
+            criterion = "ALL"
+        else:
+            criterion = "UNSEEN"
+
+        typ, data = client.search(None, criterion)
+        if typ != "OK":
+            return _error("imap search failed")
+
+        msg_nums = data[0].split()
+        if not msg_nums:
+            desc = "unread" if criterion == "UNSEEN" else f"matching '{query}'" if query else "recent"
+            return f"no {desc} emails found in {folder or 'INBOX'}."
+
+        selected = msg_nums[-limit:]
+        selected.reverse()
+
+        emails = []
+        for num in selected:
+            typ, fetch_data = client.fetch(num, "(RFC822)")
+            if typ == "OK" and fetch_data and isinstance(fetch_data[0], tuple):
+                msg = email.message_from_bytes(fetch_data[0][1])
+                emails.append(
+                    {
+                        "id": num.decode("ascii", errors="replace"),
+                        "from": _decode_mime(msg.get("From")),
+                        "subject": _decode_mime(msg.get("Subject")),
+                        "date": msg.get("Date"),
+                        "snippet": _extract_mime_body(msg, max_len=250),
+                    }
+                )
+
+        return _json(emails)
+    except Exception as exc:
+        return _error(f"imap error: {exc}")
+    finally:
+        try:
+            client.close()
+            client.logout()
+        except Exception:
+            pass
 
 
 def _json(value: Any) -> str:
@@ -379,6 +519,49 @@ class Toolbox:
                     "year": {"type": "integer", "description": "Optional 4-digit calendar year."},
                 },
                 [],
+            ),
+            tool(
+                "check_emails",
+                "Check recent or unread emails via IMAP, search your inbox, or read a specific email. Owner/admin only.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["unread", "recent", "search", "read"],
+                        "description": "What to do: 'unread' (default), 'recent', 'search', or 'read'.",
+                    },
+                    "query": {"type": "string", "description": "Search keyword or sender for action='search'."},
+                    "email_id": {"type": "string", "description": "Email ID/number to read full content for action='read'."},
+                    "folder": {"type": "string", "description": "Mailbox folder, default 'INBOX'."},
+                    "limit": {"type": "integer", "description": "How many emails to return, 1-20. Default 5."},
+                },
+                [],
+            ),
+            tool(
+                "hackatime_stats",
+                "Look up Hack Club Hackatime coding time, streak, and top languages for a user.",
+                {
+                    "username": {
+                        "type": "string",
+                        "description": "Hackatime/GitHub username. Defaults to maaren (SSoggyTacoMan).",
+                    },
+                },
+                [],
+            ),
+            tool(
+                "github_info",
+                "Look up a GitHub user profile, repository details, recent commits, or latest release.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["user", "repo", "commits", "release"],
+                        "description": "Action: 'user', 'repo', 'commits', or 'release'.",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Username (for 'user') or 'owner/repo' (for 'repo', 'commits', 'release').",
+                    },
+                },
+                ["action", "target"],
             ),
         ]
         return tools
@@ -1129,6 +1312,113 @@ class Toolbox:
             return "\n".join(lines)
         except Exception as exc:  # noqa: BLE001
             return _error(f"failed to fetch holidays: {exc}")
+
+    async def _tool_check_emails(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can check emails")
+        host = self.settings.imap_host
+        user = self.settings.imap_user
+        password = self.settings.imap_password
+        port = self.settings.imap_port or 993
+        if not host or not user or not password:
+            return (
+                "email credentials not configured. "
+                "Set IMAP_HOST, IMAP_USER, and IMAP_PASSWORD in .env (for Gmail/Fastmail, use an App Password)."
+            )
+        action = str(args.get("action") or "unread").lower().strip()
+        query = str(args.get("query") or "").strip()
+        email_id = str(args.get("email_id") or "").strip()
+        folder = str(args.get("folder") or "INBOX").strip()
+        limit = max(1, min(20, int(args.get("limit") or 5)))
+        return await asyncio.to_thread(
+            _sync_imap_op, host, port, user, password, folder, action, query, email_id, limit
+        )
+
+    async def _tool_hackatime_stats(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        username = str(args.get("username") or "SSoggyTacoMan").strip()
+        url = f"https://hackatime.hackclub.com/api/v1/users/{quote(username)}/stats"
+        try:
+            async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "chicen-nugget-bot"}) as http:
+                resp = await http.get(url)
+                if resp.status_code == 404:
+                    return f"no hackatime profile found for {username}"
+                resp.raise_for_status()
+                data = resp.json().get("data") or {}
+            out = {
+                "username": data.get("username") or username,
+                "total_time": data.get("human_readable_total"),
+                "daily_average": data.get("human_readable_daily_average"),
+                "streak": data.get("streak"),
+                "languages": [f"{l['name']}: {l.get('text', '')}" for l in (data.get("languages") or [])[:5]],
+            }
+            return _json(out)
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"failed to fetch hackatime stats: {exc}")
+
+    async def _tool_github_info(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        action = str(args.get("action") or "repo").lower().strip()
+        target = str(args.get("target") or "SSoggyTacoMan/chicen-nugget-bot").strip()
+        headers = {"User-Agent": "chicen-nugget-bot"}
+        try:
+            async with httpx.AsyncClient(timeout=12, headers=headers) as http:
+                if action == "user":
+                    resp = await http.get(f"https://api.github.com/users/{quote(target)}")
+                    if resp.status_code == 404:
+                        return f"github user '{target}' not found"
+                    resp.raise_for_status()
+                    u = resp.json()
+                    return _json({
+                        "login": u.get("login"),
+                        "name": u.get("name"),
+                        "bio": u.get("bio"),
+                        "public_repos": u.get("public_repos"),
+                        "followers": u.get("followers"),
+                        "url": u.get("html_url"),
+                    })
+                if action == "commits":
+                    resp = await http.get(f"https://api.github.com/repos/{target}/commits?per_page=5")
+                    if resp.status_code == 404:
+                        return f"github repo '{target}' not found"
+                    resp.raise_for_status()
+                    commits = [
+                        {
+                            "sha": c["sha"][:7],
+                            "author": (c.get("commit", {}).get("author", {}) or {}).get("name"),
+                            "message": (c.get("commit", {}).get("message") or "").splitlines()[0],
+                        }
+                        for c in (resp.json() or [])[:5]
+                    ]
+                    return _json(commits)
+                if action == "release":
+                    resp = await http.get(f"https://api.github.com/repos/{target}/releases/latest")
+                    if resp.status_code == 404:
+                        return f"no releases found for '{target}'"
+                    resp.raise_for_status()
+                    rel = resp.json()
+                    return _json({
+                        "tag": rel.get("tag_name"),
+                        "name": rel.get("name"),
+                        "published_at": rel.get("published_at"),
+                        "body": (rel.get("body") or "")[:500],
+                    })
+                # default action == "repo"
+                resp = await http.get(f"https://api.github.com/repos/{target}")
+                if resp.status_code == 404:
+                    return f"github repo '{target}' not found"
+                resp.raise_for_status()
+                r = resp.json()
+                return _json({
+                    "full_name": r.get("full_name"),
+                    "description": r.get("description"),
+                    "stars": r.get("stargazers_count"),
+                    "forks": r.get("forks_count"),
+                    "open_issues": r.get("open_issues_count"),
+                    "language": r.get("language"),
+                    "default_branch": r.get("default_branch"),
+                    "updated_at": r.get("updated_at"),
+                })
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"github api error: {exc}")
 
     # ---------------------------------------------------------------- helpers
     async def _resolve_channel(self, ctx: ToolContext, value: str) -> str | None:

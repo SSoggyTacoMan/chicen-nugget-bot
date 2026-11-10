@@ -143,6 +143,12 @@ class Settings:
     max_reminders: int
     repo_url: str
 
+    # email (imap)
+    imap_host: str | None = None
+    imap_port: int = 993
+    imap_user: str | None = None
+    imap_password: str | None = None
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "bot.db"
@@ -301,6 +307,10 @@ def load_settings() -> Settings:
         tavily_api_key=_str("TAVILY_API_KEY") or None,
         max_reminders=max(1, _int("MAX_REMINDERS", 200)),
         repo_url=_str("REPO_URL", "https://github.com/SSoggyTacoMan/chicen-nugget-bot"),
+        imap_host=_str("IMAP_HOST") or None,
+        imap_port=_int("IMAP_PORT", 993),
+        imap_user=_str("IMAP_USER") or None,
+        imap_password=_str("IMAP_PASSWORD") or None,
     )
 
 
