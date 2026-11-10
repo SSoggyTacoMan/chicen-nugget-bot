@@ -112,6 +112,8 @@ class Agent:
             .replace("{location}", location)
             .replace("{trigger}", TRIGGER_TEXT.get(trigger, TRIGGER_TEXT["mention"]))
             .replace("{jev}", jev or "no extra classification")
+            .replace("{ai_model}", self.settings.ai_model)
+            .replace("{repo_url}", self.settings.repo_url)
         )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]

@@ -141,6 +141,7 @@ class Settings:
     weather_default_location: str | None
     tavily_api_key: str | None
     max_reminders: int
+    repo_url: str
 
     @property
     def db_path(self) -> Path:
@@ -232,8 +233,8 @@ def load_settings() -> Settings:
         log_dir=_path("LOG_DIR", "logs"),
         ai_api_key=_str("AI_API_KEY") or None,
         ai_base_url=_str("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
-        ai_model=_str("AI_MODEL", "gpt-4o-mini"),
-        ai_fallback_model=_str("AI_FALLBACK_MODEL") or None,
+        ai_model=_str("AI_MODEL", "anthropic/claude-haiku-5.5"),
+        ai_fallback_model=_str("AI_FALLBACK_MODEL", "google/gemini-2.5-flash") or None,
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),
         ai_history_limit=_int("AI_HISTORY_LIMIT", 24),
         ai_channels=frozenset(_list("AI_CHANNELS", ("*",))),
@@ -299,6 +300,7 @@ def load_settings() -> Settings:
         weather_default_location=_str("WEATHER_DEFAULT_LOCATION") or None,
         tavily_api_key=_str("TAVILY_API_KEY") or None,
         max_reminders=max(1, _int("MAX_REMINDERS", 200)),
+        repo_url=_str("REPO_URL", "https://github.com/SSoggyTacoMan/chicen-nugget-bot"),
     )
 
 
