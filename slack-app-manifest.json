@@ -1,8 +1,8 @@
 {
   "display_information": {
     "name": "Chicen Nugget Bot",
-    "description": "friendly workspace bot: welcomer, tier 2 access, AI agent, image gen, daily recaps, polls and reminders",
-    "background_color": "#B88518"
+    "description": "@SSoggyTacoMan bot for stuff and yap",
+    "background_color": "#A17D30"
   },
   "features": {
     "bot_user": {
@@ -12,7 +12,7 @@
     "slash_commands": [
       {
         "command": "/nugget",
-        "description": "chicen nugget bot \u2014 try /nugget help",
+        "description": "everything: try /nugget help",
         "usage_hint": "[help|ping|roll|poll|ask|imagine|...]",
         "should_escape": false
       }
@@ -20,6 +20,11 @@
   },
   "oauth_config": {
     "scopes": {
+      "user": [
+        "search:read",
+        "usergroups:read",
+        "usergroups:write"
+      ],
       "bot": [
         "app_mentions:read",
         "channels:history",
@@ -40,13 +45,9 @@
         "team:read",
         "users:read",
         "users:read.email"
-      ],
-      "user": [
-        "search:read",
-        "usergroups:read",
-        "usergroups:write"
       ]
-    }
+    },
+    "pkce_enabled": false
   },
   "settings": {
     "event_subscriptions": {
@@ -64,6 +65,8 @@
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": true,
-    "token_rotation_enabled": false
+    "is_mcp_enabled": false,
+    "token_rotation_enabled": false,
+    "app_level_token_rotation_enabled": false
   }
 }
