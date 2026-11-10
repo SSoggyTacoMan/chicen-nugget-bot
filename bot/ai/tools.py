@@ -14,8 +14,10 @@ import imaplib
 import ipaddress
 import json
 import logging
+import random
 import re
 import socket
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -562,6 +564,49 @@ class Toolbox:
                     },
                 },
                 ["action", "target"],
+            ),
+            tool(
+                "run_code",
+                "Execute a Python code snippet in a sandboxed subprocess and return stdout/stderr. Owner/admin only.",
+                {"code": {"type": "string", "description": "Python 3 code to execute."}},
+                ["code"],
+            ),
+            tool(
+                "hacker_news",
+                "Fetch top stories, discussions, and links from Hacker News (top, new, best, ask, show). Owner/admin only.",
+                {
+                    "category": {
+                        "type": "string",
+                        "enum": ["top", "new", "best", "ask", "show"],
+                        "description": "Category: 'top' (default), 'new', 'best', 'ask', or 'show'.",
+                    },
+                    "limit": {"type": "integer", "description": "Number of stories, 1-10. Default 5."},
+                },
+                [],
+            ),
+            tool(
+                "http_status",
+                "Inspect a website, host or API: check response status, latency, headers, and redirect chains. Owner/admin only.",
+                {"url": {"type": "string", "description": "URL or domain name to test."}},
+                ["url"],
+            ),
+            tool(
+                "dog_fact",
+                "Get a random real dog fact for the doggy taco fellas.",
+                {},
+                [],
+            ),
+            tool(
+                "taco_recipe",
+                "Generate a creative taco recipe or delicious taco inspiration for the doggy taco fellas.",
+                {"theme": {"type": "string", "description": "Optional theme: 'spicy', 'breakfast', 'crispy', 'street', 'birria', 'vegan'."}},
+                [],
+            ),
+            tool(
+                "urban_dict",
+                "Look up modern slang, terms, or internet memes on Urban Dictionary with definitions and examples.",
+                {"term": {"type": "string", "description": "The word or phrase to look up."}},
+                ["term"],
             ),
         ]
         return tools
@@ -1419,6 +1464,183 @@ class Toolbox:
                 })
         except Exception as exc:  # noqa: BLE001
             return _error(f"github api error: {exc}")
+
+    async def _tool_run_code(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can run code")
+        code = str(args.get("code") or "").strip()
+        if not code:
+            return _error("code is required")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                code,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            stdout = stdout_bytes.decode(errors="replace").strip()
+            stderr = stderr_bytes.decode(errors="replace").strip()
+            if proc.returncode != 0:
+                err_msg = stderr or stdout or f"exited with code {proc.returncode}"
+                return f"execution failed (exit {proc.returncode}):\n{err_msg}"[:MAX_TOOL_RESULT]
+            output = stdout or "(finished with no output)"
+            return output[:MAX_TOOL_RESULT]
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return _error("code execution timed out after 5.0 seconds")
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"execution failed: {exc}")
+
+    async def _tool_hacker_news(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can browse hacker news")
+        category = str(args.get("category") or "top").lower().strip()
+        if category not in {"top", "new", "best", "ask", "show"}:
+            category = "top"
+        limit = max(1, min(10, int(args.get("limit") or 5)))
+        try:
+            async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "chicen-nugget-bot"}) as http:
+                resp = await http.get(f"https://hacker-news.firebaseio.com/v0/{category}stories.json")
+                resp.raise_for_status()
+                ids = (resp.json() or [])[:limit]
+                tasks = [http.get(f"https://hacker-news.firebaseio.com/v0/item/{item_id}.json") for item_id in ids]
+                item_resps = await asyncio.gather(*tasks, return_exceptions=True)
+                stories = []
+                for res in item_resps:
+                    if isinstance(res, httpx.Response) and res.status_code == 200:
+                        d = res.json()
+                        if d and not d.get("deleted"):
+                            stories.append({
+                                "title": d.get("title"),
+                                "score": d.get("score"),
+                                "by": d.get("by"),
+                                "url": d.get("url") or f"https://news.ycombinator.com/item?id={d.get('id')}",
+                                "comments_url": f"https://news.ycombinator.com/item?id={d.get('id')}",
+                                "descendants": d.get("descendants", 0),
+                            })
+                return _json(stories)
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"failed to fetch hacker news: {exc}")
+
+    async def _tool_http_status(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can inspect http status")
+        raw = str(args.get("url") or "").strip()
+        if not raw:
+            return _error("url is required")
+        if not raw.startswith(("http://", "https://")):
+            raw = f"https://{raw}"
+        parsed = urlparse(raw)
+        if not parsed.hostname:
+            return _error("invalid url or hostname")
+        if await self._is_private_host(parsed.hostname):
+            return _error("private IP addresses are blocked")
+        try:
+            start = time.perf_counter()
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": "chicen-nugget-bot/1.0"}) as http:
+                resp = await http.get(raw)
+            duration_ms = round((time.perf_counter() - start) * 1000)
+            return _json({
+                "url": raw,
+                "final_url": str(resp.url),
+                "status_code": resp.status_code,
+                "latency_ms": duration_ms,
+                "server": resp.headers.get("server"),
+                "content_type": resp.headers.get("content-type"),
+                "content_length": resp.headers.get("content-length") or len(resp.content),
+                "redirects": len(resp.history),
+            })
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"http check failed: {exc}")
+
+    async def _tool_dog_fact(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        try:
+            async with httpx.AsyncClient(timeout=8, headers={"User-Agent": "chicen-nugget-bot"}) as http:
+                resp = await http.get("https://dogapi.dog/api/v2/facts")
+                resp.raise_for_status()
+                data = resp.json()
+                facts = data.get("data") or []
+                if facts:
+                    fact = facts[0].get("attributes", {}).get("body", "")
+                    if fact:
+                        return f":dog: dog fact: {fact}"
+            return "dogs are loyal, intelligent, and awesome companions."
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"failed to fetch dog fact: {exc}")
+
+    async def _tool_taco_recipe(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        theme = str(args.get("theme") or "").lower().strip()
+        shells = [
+            "charred white corn tortilla",
+            "crispy yellow corn shell",
+            "warm handmade flour tortilla",
+            "parmesan cheese shell",
+            "crispy blue corn tortilla",
+        ]
+        proteins = {
+            "spicy": ("Ghost Pepper Barbacoa", "slow-braised chipotle shredded beef infused with roasted ghost pepper"),
+            "breakfast": ("Morning Chorizo Crunch", "crispy chorizo, fluffy scrambled eggs, diced hash browns"),
+            "birria": ("Guajillo Birria de Res", "slow-cooked beef shank bathed in dried chiles with a cup of rich consommé for dipping"),
+            "crispy": ("Baja Crispy Beer-Battered Cod", "crispy golden fish fillet with sea salt and fresh Mexican oregano"),
+            "vegan": ("Charred Adobo Jackfruit & Black Bean", "smoky shredded jackfruit simmered in citrus adobo and cumin black beans"),
+            "street": ("Classic Citrus Carnitas", "pork shoulder confited in lard with orange peel, mexican cinnamon, and bay leaves"),
+        }
+        name, filling = proteins.get(theme, random.choice(list(proteins.values())))
+        salsas = [
+            "Charred Habanero & Pineapple Salsa",
+            "Roasted Tomatillo Salsa Verde",
+            "Creamy Chipotle Crema",
+            "Smoky Salsa Roja",
+            "Avocado Cilantro Crema",
+        ]
+        toppings = [
+            "finely diced white onion & cilantro",
+            "crumbled cotija cheese",
+            "pickled red onions",
+            "radish wheels",
+            "crushed chicharrones",
+            "squeeze of fresh key lime",
+        ]
+        chosen_shell = random.choice(shells)
+        chosen_salsa = random.choice(salsas)
+        chosen_toppings = random.sample(toppings, 3)
+        return (
+            f":taco: *{name}*\n"
+            f"- *Shell:* {chosen_shell}\n"
+            f"- *Filling:* {filling}\n"
+            f"- *Salsa:* {chosen_salsa}\n"
+            f"- *Toppings:* {', '.join(chosen_toppings)}\n"
+            f"- *Pro Tip:* Toast your tortillas on a smoking hot comal with a splash of beef fat or lime juice."
+        )
+
+    async def _tool_urban_dict(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        term = str(args.get("term") or "").strip()
+        if not term:
+            return _error("term is required")
+        try:
+            async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "chicen-nugget-bot"}) as http:
+                resp = await http.get(f"https://api.urbandictionary.com/v0/define?term={quote(term)}")
+                resp.raise_for_status()
+                data = resp.json()
+            entries = data.get("list") or []
+            if not entries:
+                return f"no urban dictionary definitions found for '{term}'"
+            top = entries[0]
+            defn = re.sub(r"[\[\]]", "", top.get("definition") or "")
+            example = re.sub(r"[\[\]]", "", top.get("example") or "")
+            thumbs_up = top.get("thumbs_up", 0)
+            thumbs_down = top.get("thumbs_down", 0)
+            res = f"*Urban Dictionary: {top.get('word')}* (+{thumbs_up}/-{thumbs_down})\n\n{defn}"
+            if example:
+                res += f"\n\n*Example:*\n_{example}_"
+            return res[:MAX_TOOL_RESULT]
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"urban dictionary lookup failed: {exc}")
 
     # ---------------------------------------------------------------- helpers
     async def _resolve_channel(self, ctx: ToolContext, value: str) -> str | None:
