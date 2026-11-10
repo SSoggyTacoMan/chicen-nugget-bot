@@ -38,3 +38,11 @@ def test_summary_limit():
 def test_nugget_facts_exist():
     assert len(FACTS) >= 20
     assert all(fact.strip() for fact in FACTS)
+
+
+def test_chunk_text_empty_on_blank():
+    from bot.utils.text import chunk_text
+
+    assert chunk_text("") == []
+    assert chunk_text("   ") == []
+    assert chunk_text(None) == []

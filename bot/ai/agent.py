@@ -184,9 +184,12 @@ class Agent:
             logger.exception("agent completion failed")
             answer = self._friendly_error(exc)
 
-        if answer:
+        if answer and answer.strip() not in {"[NO_REPLY]", "NO_REPLY"}:
             self.db.add_message(conversation, "assistant", self.bot_user_id, answer)
-        return answer or "hmm, i blanked. try again?"
+            return answer
+        if trigger == "mention" and not answer:
+            return "hmm, i blanked. try again?"
+        return ""
 
     async def complete(
         self,
