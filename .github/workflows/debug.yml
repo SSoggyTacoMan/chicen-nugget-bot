@@ -1,0 +1,40 @@
+name: debug
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SSH_OPTS: -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+    steps:
+      - name: configure ssh
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H hackclub.app >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: secret size
+        env:
+          ENV_FILE: ${{ secrets.ENV_FILE }}
+        run: |
+          printf 'env bytes: %s\n' "$(printf '%s' "$ENV_FILE" | wc -c)"
+          printf 'env lines: %s\n' "$(printf '%s' "$ENV_FILE" | wc -l)"
+
+      - name: remote diagnostics
+        run: |
+          set -x
+          ssh $SSH_OPTS maaren@hackclub.app 'set -x; id; pwd; ls -ld ~ ~/slackbot; ls -l ~/slackbot/.env || true; df -h ~; df -i ~; systemctl is-active chicen-nugget-bot || true; touch ~/slackbot/.env.test && echo write_ok; rm -f ~/slackbot/.env.test'
+
+      - name: write via pipe
+        run: |
+          set -x
+          printf 'TEST=1\n' | ssh $SSH_OPTS maaren@hackclub.app 'cat > ~/slackbot/.env.test && chmod 600 ~/slackbot/.env.test && echo pipe_ok && wc -c ~/slackbot/.env.test && rm -f ~/slackbot/.env.test'
