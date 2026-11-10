@@ -139,12 +139,16 @@ The agent is wired for **Hack Club AI** by default, and also works with any **Op
 ```dotenv
 AI_API_KEY=sk-hc-v1-...
 AI_BASE_URL=https://ai.hackclub.com/proxy/v1
-AI_MODEL=openai/gpt-5.5
-AI_FALLBACK_MODEL=openai/gpt-5.4-mini
+AI_MODEL=openai/gpt-5.6-luna
+AI_FALLBACK_MODEL=anthropic/claude-haiku-5.5
 AI_RATE_LIMIT_PER_MINUTE=12
+AI_GLOBAL_RATE_LIMIT_PER_MINUTE=30
+AI_DAILY_BUDGET_USD=2.50
 ```
 
 Get a key from <https://ai.hackclub.com/dashboard>. The fallback model is tried automatically when the primary model errors or times out. `AI_RATE_LIMIT_PER_MINUTE=0` disables the per-user limit.
+
+`gpt-5.6-luna` is the default because it matched `gpt-5.5` on tool calls and Slack-style answers in testing, at about 1/25th the price and roughly the same latency. `claude-haiku-5.5` is the fallback: a different provider, faster, and cheap enough that a bad day doesn't matter. Both handle function calling.
 
 ### The jev gate
 
@@ -175,6 +179,25 @@ AI_AMBIENT_COOLDOWN=120
 ```
 
 Mentions and DMs always skip the gate. If Jev errors or times out, the gate fails closed (no reply), so a broken gate never turns into spam. Set `AI_AMBIENT_CHANNELS=*` to let it do this everywhere. The gate needs a Jev-capable endpoint; the rest of the bot still works with any OpenAI-compatible one.
+
+### Spend limits
+
+The bot tracks every completion it makes — chat, Jev decisions, and `/imagine` — in `data/bot.db` and prices it from a small table. When the UTC-day total reaches `AI_DAILY_BUDGET_USD` it stops starting new calls and replies with a friendly "budget used up" message. The day resets at 00:00 UTC, the same as Hack Club AI.
+
+```dotenv
+AI_DAILY_BUDGET_USD=2.50   # 0 disables the stop
+AI_GLOBAL_RATE_LIMIT_PER_MINUTE=30
+AI_MAX_CONTEXT_CHARS=24000
+AI_IMAGE_COST_USD=0.04
+```
+
+Three limits work together:
+
+- per-user cap (`AI_RATE_LIMIT_PER_MINUTE`) stops one person from spamming;
+- workspace cap (`AI_GLOBAL_RATE_LIMIT_PER_MINUTE`) stops a burst across the whole server;
+- daily budget stops the day from disappearing.
+
+The tracker only knows what the bot itself spent. Usage from other apps on the same key is invisible here, so keep `AI_DAILY_BUDGET_USD` below the account allowance. `/nugget budget` shows today's spend, remaining budget, and a per-model breakdown. Unknown models are priced pessimistically ($1/$5 per million) so a typo can't under-count.
 
 Other endpoints still work:
 
@@ -268,6 +291,7 @@ Everything is a subcommand of `/nugget`.
 | `/nugget roll 2d6+3` | dice | anyone |
 | `/nugget choose a \| b \| c` | random pick | anyone |
 | `/nugget stats` | workspace stats | admin |
+| `/nugget budget` | today's AI spend, remaining budget, and limits | admin |
 | `/nugget digest` | build the daily digest now | admin |
 | `/nugget recap` | post the daily recap prompt now | admin |
 | `/nugget ask <question>` | one-shot AI answer | anyone in `AI_CHANNELS` |
@@ -335,13 +359,16 @@ Times use `TIMEZONE`. The first time expression is removed from the front; every
 | `RECAP_PRIVATE_PING` | — | usergroup id to ping when the private recap is done |
 | `AI_API_KEY` | — | enables the AI agent |
 | `AI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
-| `AI_MODEL` | `openai/gpt-5.5` | model id (must support tools) |
-| `AI_FALLBACK_MODEL` | `openai/gpt-5.4-mini` | retried automatically when the primary model fails |
+| `AI_MODEL` | `openai/gpt-5.6-luna` | model id (must support tools) |
+| `AI_FALLBACK_MODEL` | `anthropic/claude-haiku-5.5` | retried automatically when the primary model fails |
 | `AI_MAX_TOKENS` | `1200` | max reply length |
 | `AI_HISTORY_LIMIT` | `24` | conversation turns loaded per reply |
+| `AI_MAX_CONTEXT_CHARS` | `24000` | trim older turns above this size |
 | `AI_CHANNELS` | `*` | channels where mentions and `/ask` are answered |
 | `AI_ALLOW_ADMINS` | `true` | let admins DM the agent too |
 | `AI_RATE_LIMIT_PER_MINUTE` | `12` | per-user AI request cap; `0` disables |
+| `AI_GLOBAL_RATE_LIMIT_PER_MINUTE` | `30` | workspace-wide AI request cap; `0` disables |
+| `AI_DAILY_BUDGET_USD` | `2.50` | stop starting AI calls at this UTC-day spend; `0` disables |
 | `AI_GATE_ENABLED` | `true` | ask jev whether to reply in ambient channels |
 | `AI_GATE_MODEL` | `jev-latest` | System One model used for gate decisions |
 | `AI_GATE_TIMEOUT` | `8` | seconds before the gate fails closed |
@@ -353,6 +380,7 @@ Times use `TIMEZONE`. The first time expression is removed from the front; every
 | `AI_AMBIENT_COOLDOWN` | `120` | min seconds between unprompted replies per channel |
 | `IMAGINE_MODEL` | `google/gemini-3.1-flash-lite-image` | image model for `/imagine`; empty disables |
 | `IMAGINE_FALLBACK_MODEL` | `google/gemini-2.5-flash-image` | retried when image generation fails |
+| `AI_IMAGE_COST_USD` | `0.04` | rough per-image charge recorded against the daily budget |
 | `DAILY_DIGEST_TIME` | — | `HH:MM` in `TIMEZONE`; empty disables |
 | `WEATHER_DEFAULT_LOCATION` | — | default place for the weather tool |
 | `TAVILY_API_KEY` | — | enables `search_web` |
@@ -468,6 +496,7 @@ bot/
   slack_api.py              resilient Slack Web API wrappers
   ai/
     agent.py                OpenAI-compatible tool loop + memory
+    budget.py               daily spend tracking and hard stops
     gate.py                 jev decisions: reply, addressed, spam, kind
     jev.py                  typed System One client (/jev/systemone)
     limits.py               per-user AI rate limiter
