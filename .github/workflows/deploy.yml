@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      SSH_OPTS: -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
     steps:
       - uses: actions/checkout@v4
 
@@ -29,46 +31,80 @@ jobs:
           chmod 600 ~/.ssh/known_hosts
 
       - name: test ssh
-        run: ssh -o BatchMode=yes -o ConnectTimeout=20 maaren@hackclub.app 'echo SSH_OK; hostname'
+        run: |
+          set -uo pipefail
+          for i in 1 2 3 4 5; do
+            if ssh $SSH_OPTS maaren@hackclub.app 'echo SSH_OK'; then
+              echo "ssh ok"
+              exit 0
+            fi
+            echo "ssh attempt $i failed; retrying in 5s"
+            sleep 5
+          done
+          exit 1
 
       - name: sync files
         run: |
-          set -euo pipefail
-          rsync -az \
-            -e "ssh -o BatchMode=yes" \
-            --exclude '.git/' \
-            --exclude '.github/' \
-            --exclude '.env' \
-            --exclude '.venv/' \
-            --exclude '__pycache__/' \
-            --exclude '.pytest_cache/' \
-            --exclude '.ruff_cache/' \
-            --exclude 'data/' \
-            --exclude 'logs/' \
-            --exclude '*.db' \
-            --exclude '*.db-wal' \
-            --exclude '*.db-shm' \
-            ./ maaren@hackclub.app:slackbot/
+          set -uo pipefail
+          for i in 1 2 3 4; do
+            if rsync -az --partial \
+              -e "ssh $SSH_OPTS" \
+              --exclude '.git/' \
+              --exclude '.github/' \
+              --exclude '.env' \
+              --exclude '.venv/' \
+              --exclude '__pycache__/' \
+              --exclude '.pytest_cache/' \
+              --exclude '.ruff_cache/' \
+              --exclude 'data/' \
+              --exclude 'logs/' \
+              --exclude '*.db' \
+              --exclude '*.db-wal' \
+              --exclude '*.db-shm' \
+              ./ maaren@hackclub.app:slackbot/; then
+              echo "sync ok"
+              exit 0
+            fi
+            echo "rsync attempt $i failed; retrying in 5s"
+            sleep 5
+          done
+          exit 1
 
       - name: write env
         env:
           ENV_FILE: ${{ secrets.ENV_FILE }}
         run: |
-          set -euo pipefail
-          printf '%s\n' "$ENV_FILE" | ssh -o BatchMode=yes maaren@hackclub.app 'cat > ~/slackbot/.env && chmod 600 ~/slackbot/.env'
+          set -uo pipefail
+          for i in 1 2 3 4; do
+            if printf '%s\n' "$ENV_FILE" | ssh $SSH_OPTS maaren@hackclub.app 'cat > ~/slackbot/.env && chmod 600 ~/slackbot/.env'; then
+              echo "env ok"
+              exit 0
+            fi
+            echo "env attempt $i failed; retrying in 5s"
+            sleep 5
+          done
+          exit 1
 
       - name: install and restart
         run: |
-          set -euo pipefail
-          ssh -o BatchMode=yes maaren@hackclub.app 'set -e
-            cd slackbot
-            mkdir -p logs data
-            if command -v python3.13 >/dev/null; then PY=python3.13; else PY=python3; fi
-            $PY -m venv .venv
-            .venv/bin/pip install -q --upgrade pip
-            .venv/bin/pip install -q -r requirements.txt
-            systemctl restart chicen-nugget-bot
-            sleep 3
-            systemctl --no-pager --full status chicen-nugget-bot | head -15
-            echo "--- log ---"
-            tail -20 logs/bot.log || true'
+          set -uo pipefail
+          for i in 1 2 3 4; do
+            if ssh $SSH_OPTS maaren@hackclub.app 'set -e
+              cd slackbot
+              mkdir -p logs data
+              if command -v python3.13 >/dev/null; then PY=python3.13; else PY=python3; fi
+              $PY -m venv .venv
+              .venv/bin/pip install -q --upgrade pip
+              .venv/bin/pip install -q -r requirements.txt
+              systemctl restart chicen-nugget-bot
+              sleep 3
+              systemctl --no-pager --full status chicen-nugget-bot | head -15
+              echo "--- log ---"
+              tail -20 logs/bot.log || true'; then
+              echo "deploy ok"
+              exit 0
+            fi
+            echo "deploy attempt $i failed; retrying in 10s"
+            sleep 10
+          done
+          exit 1
