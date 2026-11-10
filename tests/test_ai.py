@@ -416,5 +416,74 @@ def test_agent_reply_with_images(tmp_path):
     asyncio.run(run())
 
 
+def test_fetch_slack_images_from_text_urls():
+    import asyncio
+    from unittest.mock import MagicMock, patch
+    import httpx
+    from bot.slack_api import fetch_slack_images
+
+    event = {
+        "text": "check out <https://example.com/cat.png> and https://images.org/dog.jpg"
+    }
+
+    async def mock_get(url, *args, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.content = b"fake_png_data"
+        resp.headers = {"content-type": "image/png"}
+        return resp
+
+    async def run():
+        with patch.object(httpx.AsyncClient, "get", new=mock_get):
+            urls = await fetch_slack_images(event, "xoxb-test")
+            assert len(urls) == 2
+            assert all(u.startswith("data:image/") for u in urls)
+
+    asyncio.run(run())
+
+
+def test_cmd_config(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from bot.db import Database
+    from bot.features.commands import cmd_config
+    from bot.runtime import runtime
+
+    db = Database(str(tmp_path / "cmd_cfg.db"))
+    db.init()
+    runtime.db = db
+
+    captured = []
+
+    async def mock_say(client, command, text, ephemeral=True):
+        captured.append(text)
+
+    async def run():
+        with patch("bot.features.commands._say", new=mock_say):
+            # Non-admin
+            await cmd_config(AsyncMock(), {"user_id": "U_GUEST", "text": "list", "channel_id": "C1"}, AsyncMock())
+            assert "only admins" in captured[-1]
+
+            # Admin list
+            await cmd_config(AsyncMock(), {"user_id": runtime.settings.owner_user_id or "U_ADMIN", "text": "list", "channel_id": "C1"}, AsyncMock())
+            assert "bot runtime settings" in captured[-1]
+
+            # Set recap off
+            await cmd_config(AsyncMock(), {"user_id": runtime.settings.owner_user_id or "U_ADMIN", "text": "recaps off", "channel_id": "C1"}, AsyncMock())
+            assert "daily recaps disabled" in captured[-1]
+            assert db.kv_get("config:recaps") == "false"
+
+            # Get recap
+            await cmd_config(AsyncMock(), {"user_id": runtime.settings.owner_user_id or "U_ADMIN", "text": "get recaps", "channel_id": "C1"}, AsyncMock())
+            assert "`false`" in captured[-1]
+
+            # Reset recap
+            await cmd_config(AsyncMock(), {"user_id": runtime.settings.owner_user_id or "U_ADMIN", "text": "reset recaps", "channel_id": "C1"}, AsyncMock())
+            assert "reset *recaps* to default" in captured[-1]
+            assert db.kv_get("config:recaps") is None
+
+    asyncio.run(run())
+
+
 
 

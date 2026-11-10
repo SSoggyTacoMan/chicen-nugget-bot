@@ -57,14 +57,11 @@ HELP = """*{bot} — everything lives under `/nugget`*
 • `/nugget budget` — admin: today's ai spend and limits
 • `/nugget forget` — wipe stored ai memory (DM or channel)
 
-*fun / info*
-• `/nugget pinggroup [join|leave]` — manage the ping group
-• `/nugget poll "question" "option a" "option b"` — 2-5 options
-• `/nugget pollclose <id>`
-• `/nugget roll 2d6+3`
-• `/nugget choose pizza | tacos | sushi`
+*admin / config*
+• `/nugget config` — view or change runtime settings (recaps, tier2, welcomer, etc.)
 • `/nugget stats` — admin workspace stats
 • `/nugget digest` — admin: daily digest now
+• `/nugget budget` — admin: today's ai spend and limits
 
 or just DM me / mention me and talk to my AI brain."""
 
@@ -104,6 +101,12 @@ async def cmd_id(ack, command, client) -> None:
     channel = command.get("channel_id")
     info = await channel_info(client, channel)
     name = f"#{info.get('name')}" if info else channel
+    recap_val = runtime.db.kv_get("config:recaps") if runtime.db else None
+    if recap_val is not None:
+        recap_status = f"{recap_val} (override)"
+    else:
+        recap_status = str(settings.recaps_enabled).lower()
+
     lines = [
         "*ids*",
         f"• channel: `{channel}` ({name})",
@@ -114,11 +117,12 @@ async def cmd_id(ack, command, client) -> None:
         f"• welcomer watches here: `{str(settings.watches(channel)).lower()}`",
         f"• thread helper: `{str(settings.thread_helper).lower()}` · "
         f"ping guard: `{str(settings.usergroup_guard).lower()}`",
-        f"• recaps: `{str(settings.recaps_enabled).lower()}`",
+        f"• recaps: `{recap_status}`",
         f"• timezone: `{settings.timezone}`",
     ]
-    if settings.access_enabled:
-        lines.append(f"• tier 2 channel: `{settings.access_channel_id}`")
+    from bot.features.access import access_channel_id, access_enabled
+    if access_enabled():
+        lines.append(f"• tier 2 channel: `{access_channel_id()}`")
     await _say(client, command, "\n".join(lines), ephemeral=True)
 
 
@@ -384,6 +388,140 @@ async def cmd_digest(ack, command, client) -> None:
         await _say(client, command, "only admins can build the digest.", ephemeral=True)
         return
     await _say(client, command, build_digest(runtime.db, runtime.settings, tzinfo()), ephemeral=True)
+
+
+async def cmd_config(ack, command, client) -> None:
+    await ack()
+    user = command.get("user_id")
+    if not runtime.settings.is_admin(user):
+        await _say(client, command, "only admins can view or change bot settings.", ephemeral=True)
+        return
+    text = (command.get("text") or "").strip()
+    parts = text.split()
+    action = parts[0].lower() if parts else "list"
+
+    key_aliases = {
+        "recap": "recaps",
+        "daily_recap": "recaps",
+        "daily_recaps": "recaps",
+        "digest": "daily_digest",
+        "access": "tier2",
+        "tier2_channel": "access_channel_id",
+        "access_channel": "access_channel_id",
+        "ambient": "ambient_ai",
+        "weather": "weather_location",
+    }
+    known_keys = [
+        "recaps",
+        "daily_digest",
+        "welcomer",
+        "tier2",
+        "access_channel_id",
+        "ambient_ai",
+        "weather_location",
+    ]
+
+    if action in {"list", "show"} or not parts:
+        lines = ["*bot runtime settings*"]
+        for k in known_keys:
+            val = runtime.db.kv_get(f"config:{k}") if runtime.db else None
+            status = f"`{val}`" if val is not None else "_(default)_"
+            lines.append(f"• *{k}*: {status}")
+        lines.append("\n_use `/nugget config <key> <value>` or `/nugget config reset <key>`_")
+        await _say(client, command, "\n".join(lines), ephemeral=True)
+        return
+
+    if action == "reset":
+        if len(parts) < 2:
+            await _say(client, command, "usage: `/nugget config reset <key>`", ephemeral=True)
+            return
+        raw_key = parts[1].lower()
+        key = key_aliases.get(raw_key, raw_key)
+        if runtime.db:
+            runtime.db.kv_del(f"config:{key}")
+        if key == "recaps":
+            try:
+                from bot.features import scheduler
+                scheduler._ensure_recap_jobs()
+            except Exception:
+                pass
+        elif key == "daily_digest":
+            try:
+                from bot.features import scheduler
+                scheduler._ensure_digest_job()
+            except Exception:
+                pass
+        await _say(client, command, f":white_check_mark: reset *{key}* to default.", ephemeral=True)
+        return
+
+    if action == "get":
+        if len(parts) < 2:
+            await _say(client, command, "usage: `/nugget config get <key>`", ephemeral=True)
+            return
+        raw_key = parts[1].lower()
+        key = key_aliases.get(raw_key, raw_key)
+        val = runtime.db.kv_get(f"config:{key}") if runtime.db else None
+        status = f"`{val}`" if val is not None else "_(default)_"
+        await _say(client, command, f"• *{key}*: {status}", ephemeral=True)
+        return
+
+    if action == "set":
+        if len(parts) < 3:
+            await _say(client, command, "usage: `/nugget config set <key> <value>`", ephemeral=True)
+            return
+        raw_key, raw_val = parts[1].lower(), parts[2]
+    else:
+        if len(parts) < 2:
+            await _say(client, command, "usage: `/nugget config <key> <value>`", ephemeral=True)
+            return
+        raw_key, raw_val = parts[0].lower(), parts[1]
+
+    key = key_aliases.get(raw_key, raw_key)
+    val_lower = raw_val.lower()
+    if val_lower in {"off", "false", "no", "disable", "disabled", "0"}:
+        norm = "false"
+    elif val_lower in {"on", "true", "yes", "enable", "enabled", "1"}:
+        norm = "true"
+    else:
+        if key == "access_channel_id":
+            m = re.search(r"C[A-Z0-9]{8,}", raw_val)
+            norm = m.group(0) if m else raw_val.strip("#")
+        else:
+            norm = raw_val
+
+    if runtime.db:
+        runtime.db.kv_set(f"config:{key}", norm)
+
+    if key == "recaps":
+        if norm == "false":
+            if runtime.db:
+                runtime.db.cancel_reminders_by_kind("recap_public")
+                runtime.db.cancel_reminders_by_kind("recap_reminder")
+            await _say(client, command, ":white_check_mark: daily recaps disabled and pending reminders cancelled.", ephemeral=True)
+            return
+        try:
+            from bot.features import scheduler
+            scheduler._ensure_recap_jobs()
+        except Exception:
+            pass
+        await _say(client, command, ":white_check_mark: daily recaps enabled.", ephemeral=True)
+        return
+
+    if key == "daily_digest":
+        if norm == "false":
+            if runtime.db:
+                runtime.db.cancel_reminders_by_kind("digest")
+            await _say(client, command, ":white_check_mark: daily digest disabled and pending jobs cancelled.", ephemeral=True)
+            return
+        try:
+            from bot.features import scheduler
+            scheduler._ensure_digest_job()
+        except Exception:
+            pass
+        await _say(client, command, ":white_check_mark: daily digest enabled.", ephemeral=True)
+        return
+
+    await _say(client, command, f":white_check_mark: updated *{key}* to `{norm}`.", ephemeral=True)
 
 
 # ------------------------------------------------------------------- helpers

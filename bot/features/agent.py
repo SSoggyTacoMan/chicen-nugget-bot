@@ -91,24 +91,31 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
     if retry:
         await post(client, event["channel"], f"slow down a lil — try again in {retry}s :3")
         return
+    message_ts = event.get("ts")
+    if message_ts:
+        await react(client, event["channel"], message_ts, "eyes")
     conversation = f"dm:{user_id}"
-    async with runtime.lock(conversation):
-        try:
-            answer = await runtime.agent.reply(
-                conversation=conversation,
-                user_id=user_id,
-                text=text,
-                channel_id=event.get("channel"),
-                thread_ts=None,
-                is_dm=True,
-                trigger="dm",
-                images=images,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("dm agent turn failed")
-            answer = "something broke on my side. check my logs?"
-    for chunk in chunk_text(answer):
-        await post(client, event["channel"], chunk)
+    try:
+        async with runtime.lock(conversation):
+            try:
+                answer = await runtime.agent.reply(
+                    conversation=conversation,
+                    user_id=user_id,
+                    text=text,
+                    channel_id=event.get("channel"),
+                    thread_ts=None,
+                    is_dm=True,
+                    trigger="dm",
+                    images=images,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("dm agent turn failed")
+                answer = "something broke on my side. check my logs?"
+        for chunk in chunk_text(answer):
+            await post(client, event["channel"], chunk)
+    finally:
+        if message_ts:
+            await unreact(client, event["channel"], message_ts, "eyes")
 
 
 async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
@@ -135,7 +142,8 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         return
 
     jev_hint = ""
-    if runtime.gate is not None and runtime.settings.ai_gate_enabled:
+    is_owner = user_id == runtime.settings.owner_user_id
+    if not is_owner and not images and runtime.gate is not None and runtime.settings.ai_gate_enabled:
         user_name = await _user_name(client, user_id)
         channel_name = await _channel_name(client, channel)
         decision = await runtime.gate.decide(
@@ -253,7 +261,7 @@ async def _handle_channel(
     conversation = f"ch:{channel}:{root_ts}"
     message_ts = event.get("ts")
 
-    if message_ts and trigger == "mention":
+    if message_ts and trigger in {"mention", "thread_followup"}:
         await react(client, channel, message_ts, "eyes")
     try:
         async with runtime.lock(conversation):
@@ -282,5 +290,5 @@ async def _handle_channel(
             thread_ts=root_ts,
         )
     finally:
-        if message_ts and trigger == "mention":
+        if message_ts and trigger in {"mention", "thread_followup"}:
             await unreact(client, channel, message_ts, "eyes")
