@@ -1,0 +1,74 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure ssh
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H hackclub.app >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: test ssh
+        run: ssh -o BatchMode=yes -o ConnectTimeout=20 maaren@hackclub.app 'echo SSH_OK; hostname'
+
+      - name: sync files
+        run: |
+          set -euo pipefail
+          rsync -az \
+            -e "ssh -o BatchMode=yes" \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.env' \
+            --exclude '.venv/' \
+            --exclude '__pycache__/' \
+            --exclude '.pytest_cache/' \
+            --exclude '.ruff_cache/' \
+            --exclude 'data/' \
+            --exclude 'logs/' \
+            --exclude '*.db' \
+            --exclude '*.db-wal' \
+            --exclude '*.db-shm' \
+            ./ maaren@hackclub.app:slackbot/
+
+      - name: write env
+        env:
+          ENV_FILE: ${{ secrets.ENV_FILE }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$ENV_FILE" | ssh -o BatchMode=yes maaren@hackclub.app 'cat > ~/slackbot/.env && chmod 600 ~/slackbot/.env'
+
+      - name: install and restart
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes maaren@hackclub.app 'set -e
+            cd slackbot
+            mkdir -p logs data
+            if command -v python3.13 >/dev/null; then PY=python3.13; else PY=python3; fi
+            $PY -m venv .venv
+            .venv/bin/pip install -q --upgrade pip
+            .venv/bin/pip install -q -r requirements.txt
+            systemctl restart chicen-nugget-bot
+            sleep 3
+            systemctl --no-pager --full status chicen-nugget-bot | head -15
+            echo "--- log ---"
+            tail -20 logs/bot.log || true'
