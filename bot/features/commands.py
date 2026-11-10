@@ -54,6 +54,7 @@ HELP = """*{bot} — everything lives under `/nugget`*
 • `/nugget ask <question>` — one-shot ai answer
 • `/nugget summarize [n]` — ai catch-up for this channel
 • `/nugget imagine <prompt> [--wide|--tall|--ratio 4:3]` — admin image generation
+• `/nugget budget` — admin: today's ai spend and limits
 • `/nugget forget` — wipe stored ai memory (DM or channel)
 
 *fun / info*
@@ -323,6 +324,43 @@ async def cmd_stats(ack, command, client) -> None:
         await _say(client, command, "only admins can see workspace stats.", ephemeral=True)
         return
     await _say(client, command, format_stats(runtime.db.stats()), ephemeral=True)
+
+
+async def cmd_budget(ack, command, client) -> None:
+    await ack()
+    settings = runtime.settings
+    if not settings.is_admin(command.get("user_id")):
+        await _say(client, command, "only admins can see the ai budget.", ephemeral=True)
+        return
+    budget = runtime.budget
+    if budget is None:
+        await _say(client, command, "ai is off, so there's no budget to show.", ephemeral=True)
+        return
+    status = budget.status()
+    limit = f"${status.limit:.2f}" if status.limit > 0 else "no limit"
+    remaining = "unlimited" if status.limit <= 0 else f"${status.remaining:.2f}"
+    lines = [
+        "*ai budget — today (UTC)*",
+        f"• spent: *${status.spent:.4f}* of *{limit}* · *{status.calls}* calls",
+        f"• remaining: *{remaining}*",
+        "• resets at 00:00 UTC",
+        "",
+        "*limits*",
+        f"• per user: *{settings.ai_rate_limit_per_minute or 'off'}* calls/min",
+        f"• workspace: *{settings.ai_global_rate_limit_per_minute or 'off'}* calls/min",
+        f"• context: *{settings.ai_max_context_chars:,}* chars per request",
+        f"• models: `{settings.ai_model}` → `{settings.ai_fallback_model or 'no fallback'}`",
+    ]
+    rows = runtime.db.ai_usage(status.day)
+    if rows:
+        lines.append("")
+        lines.append("*breakdown*")
+        for row in rows[:8]:
+            lines.append(
+                f"• `{row['kind']}` · `{row['model']}` — {row['calls']} calls · "
+                f"${row['cost_usd']:.4f}"
+            )
+    await _say(client, command, "\n".join(lines), ephemeral=True)
 
 
 async def cmd_digest(ack, command, client) -> None:

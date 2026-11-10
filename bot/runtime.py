@@ -17,6 +17,7 @@ from bot.db import Database
 
 if TYPE_CHECKING:  # pragma: no cover
     from bot.ai.agent import Agent
+    from bot.ai.budget import Budget
     from bot.ai.gate import Gate
     from bot.ai.limits import RateLimiter
     from slack_bolt.async_app import AsyncApp
@@ -33,7 +34,9 @@ class Runtime:
     bot_id: str = ""
     agent: "Agent | None" = None
     gate: "Gate | None" = None
+    budget: "Budget | None" = None
     ai_limiter: "RateLimiter | None" = None
+    ai_global_limiter: "RateLimiter | None" = None
     locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     started_at: float = 0.0
 

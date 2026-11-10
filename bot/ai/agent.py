@@ -7,6 +7,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens
 from bot.ai.tools import ToolContext, Toolbox, format_now
 from bot.config import Settings
 from bot.db import Database
@@ -40,12 +41,14 @@ class Agent:
         client,
         user_client=None,
         bot_user_id: str,
+        budget: Budget | None = None,
     ) -> None:
         self.settings = settings
         self.db = db
         self.client = client
         self.user_client = user_client
         self.bot_user_id = bot_user_id
+        self.budget = budget or Budget(settings, db)
         self.llm = AsyncOpenAI(
             api_key=settings.ai_api_key,
             base_url=settings.ai_base_url,
@@ -87,10 +90,8 @@ class Agent:
         )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-        for item in history:
-            if item["role"] in {"user", "assistant"}:
-                messages.append({"role": item["role"], "content": item["text"]})
-        messages.append({"role": "user", "content": text})
+        messages.extend(fit_history(history, text, self.settings.ai_max_context_chars))
+        messages.append({"role": "user", "content": text[: self.settings.ai_max_context_chars]})
         self.db.add_message(conversation, "user", user_id, text)
 
         ctx = ToolContext(
@@ -149,6 +150,9 @@ class Agent:
                 break
             else:
                 answer = "i got stuck in a tool loop. try asking again, maybe a little smaller."
+        except BudgetExceeded as exc:
+            logger.warning("ai budget exhausted: %s", exc)
+            answer = _budget_text(exc.status)
         except Exception as exc:  # noqa: BLE001
             logger.exception("agent completion failed")
             answer = self._friendly_error(exc)
@@ -165,7 +169,7 @@ class Agent:
             return "my ai brain isn't configured yet."
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": text},
+            {"role": "user", "content": text[: self.settings.ai_max_context_chars]},
         ]
         try:
             response = await self._chat(
@@ -175,6 +179,9 @@ class Agent:
                 max_tokens=max_tokens or self.settings.ai_max_tokens,
             )
             return (response.choices[0].message.content or "").strip() or "i blanked. try again?"
+        except BudgetExceeded as exc:
+            logger.warning("ai budget exhausted: %s", exc)
+            return _budget_text(exc.status)
         except Exception as exc:  # noqa: BLE001
             logger.exception("one-shot completion failed")
             return self._friendly_error(exc)
@@ -203,23 +210,21 @@ class Agent:
 
         last_error: Exception | None = None
         for index, model in enumerate(models):
+            if self.budget is not None:
+                status = self.budget.status()
+                if status.exhausted:
+                    raise BudgetExceeded(status)
             try:
                 response = await self.llm.chat.completions.create(model=model, **kwargs)
-                usage = getattr(response, "usage", None)
-                if usage:
-                    logger.info(
-                        "ai usage model=%s prompt=%s completion=%s total=%s",
-                        model,
-                        getattr(usage, "prompt_tokens", "?"),
-                        getattr(usage, "completion_tokens", "?"),
-                        getattr(usage, "total_tokens", "?"),
-                    )
+                message = response.choices[0].message
                 if index:
                     logger.info("ai answered with fallback model %s", model)
-                message = response.choices[0].message
+                self._record_usage(model, messages, message, response)
                 if not (message.content or "").strip() and not (message.tool_calls or []):
                     raise RuntimeError("empty response")
                 return response
+            except BudgetExceeded:
+                raise
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if index + 1 < len(models):
@@ -232,6 +237,25 @@ class Agent:
                     continue
                 raise
         raise last_error or RuntimeError("no ai model configured")
+
+    def _record_usage(self, model, messages, message, response) -> None:
+        if self.budget is None:
+            return
+        usage = getattr(response, "usage", None)
+        if usage is not None and getattr(usage, "prompt_tokens", None) is not None:
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        else:
+            prompt_tokens = estimate_tokens(
+                "".join(str(item.get("content") or "") for item in messages)
+            )
+            completion_tokens = estimate_tokens((message.content or "") if message else "")
+        self.budget.record(
+            kind="chat",
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
 
     async def _location(self, channel_id: str | None, is_dm: bool) -> str:
         if is_dm:
@@ -271,9 +295,36 @@ class Agent:
         return f"my ai brain hiccuped: {text[:300]}"
 
 
+def _budget_text(status) -> str:
+    return (
+        f"i've used up my ai budget for today (${status.spent:.2f} of ${status.limit:.2f}). "
+        "it resets at 00:00 UTC."
+    )
+
+
+def fit_history(
+    history: list[dict[str, Any]], text: str, max_chars: int
+) -> list[dict[str, Any]]:
+    """Keep the newest turns that fit, so a long thread can't balloon input cost."""
+    room = max(0, max_chars - len(text))
+    kept: list[dict[str, Any]] = []
+    for item in reversed(history):
+        if item["role"] not in {"user", "assistant"}:
+            continue
+        content = (item["text"] or "").strip()
+        if not content:
+            continue
+        if len(content) > room:
+            break
+        kept.append({"role": item["role"], "content": content})
+        room -= len(content)
+    kept.reverse()
+    return kept
+
+
 async def owner_label(client, user_id: str) -> str:
     user = await user_info(client, user_id)
     return display_name(user)
 
 
-__all__ = ["Agent", "owner_label", "tzinfo"]
+__all__ = ["Agent", "fit_history", "owner_label", "tzinfo"]

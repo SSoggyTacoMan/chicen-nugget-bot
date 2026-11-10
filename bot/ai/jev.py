@@ -40,6 +40,16 @@ class Answer:
         return self.confidence
 
 
+@dataclass(frozen=True)
+class JevResult:
+    """Answers plus what the call cost, so the gate can record usage."""
+
+    answers: dict[str, Answer]
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
 def parse_answers(payload: dict[str, Any] | None) -> dict[str, Answer]:
     """Turn a raw Jev response into Answer objects, skipping anything unexpected."""
     if not isinstance(payload, dict):
@@ -107,7 +117,7 @@ class Jev:
         state: str,
         questions: dict[str, dict[str, Any]],
         timeout: float | None = None,
-    ) -> dict[str, Answer] | None:
+    ) -> JevResult | None:
         """Ask Jev every question at once. Returns None on any failure."""
         body = {
             "model": self.settings.ai_gate_model,
@@ -126,10 +136,24 @@ class Jev:
                     "jev returned %s: %s", response.status_code, response.text[:200]
                 )
                 return None
-            return parse_answers(response.json())
+            payload = response.json()
+            usage = payload.get("usage") or {}
+            return JevResult(
+                answers=parse_answers(payload),
+                model=str(payload.get("model") or self.settings.ai_gate_model),
+                prompt_tokens=_as_int(usage.get("input_tokens")),
+                completion_tokens=_as_int(usage.get("output_tokens")),
+            )
         except Exception as exc:  # noqa: BLE001 - callers fail closed
             logger.warning("jev request failed: %s", exc)
             return None
 
 
-__all__ = ["Answer", "Jev", "parse_answers"]
+def _as_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+__all__ = ["Answer", "Jev", "JevResult", "parse_answers"]

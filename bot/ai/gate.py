@@ -19,7 +19,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from bot.ai.jev import Answer, Jev
+from bot.ai.budget import Budget
+from bot.ai.jev import Jev, JevResult
 from bot.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -100,9 +101,15 @@ class GateDecision:
 
 
 class Gate:
-    def __init__(self, settings: Settings, jev: Jev | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        jev: Jev | None = None,
+        budget: Budget | None = None,
+    ) -> None:
         self.settings = settings
         self.jev = jev or Jev(settings)
+        self.budget = budget
 
     async def decide(
         self,
@@ -114,21 +121,32 @@ class Gate:
     ) -> GateDecision:
         if not self.settings.ai_gate_enabled or not text.strip():
             return GateDecision(reply=False, error="gate disabled")
+        if self.budget is not None and self.budget.exhausted():
+            return GateDecision(reply=False, error="daily ai budget exhausted")
 
         state = _state(text, channel_name, user_name, recent)
-        answers: dict[str, Answer] | None = None
+        result: JevResult | None = None
         for attempt in (1, 2):
             try:
                 async with asyncio.timeout(self.settings.ai_gate_timeout + 1):
-                    answers = await self.jev.ask(state=state, questions=QUESTIONS)
+                    result = await self.jev.ask(state=state, questions=QUESTIONS)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("jev gate attempt %s failed: %s", attempt, exc)
-                answers = None
-            if answers is not None:
+                result = None
+            if result is not None:
                 break
             if attempt == 1:
                 await asyncio.sleep(0.3)
 
+        if result is not None and self.budget is not None:
+            self.budget.record(
+                kind="jev",
+                model=result.model or self.settings.ai_gate_model,
+                prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+            )
+
+        answers = result.answers if result is not None else None
         if not answers:
             return GateDecision(reply=False, error="jev unavailable")
 

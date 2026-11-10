@@ -106,6 +106,18 @@ CREATE TABLE IF NOT EXISTS bot_threads (
     PRIMARY KEY (channel_id, thread_ts)
 );
 
+CREATE TABLE IF NOT EXISTS ai_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_day ON ai_usage (day, kind);
+
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -489,6 +501,52 @@ class Database:
             (poll_id, user_id),
         )
         return row["option_index"] if row else None
+
+    # ---------------------------------------------------------------- ai usage
+    def record_ai_usage(
+        self,
+        *,
+        day: str,
+        kind: str,
+        model: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        cost_usd: float = 0.0,
+    ) -> None:
+        self._write(
+            "INSERT INTO ai_usage (day, created_at, kind, model, prompt_tokens, "
+            "completion_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                day,
+                iso(),
+                kind,
+                model,
+                max(0, int(prompt_tokens)),
+                max(0, int(completion_tokens)),
+                max(0.0, float(cost_usd)),
+            ),
+        )
+
+    def ai_spend(self, day: str) -> float:
+        row = self._one(
+            "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM ai_usage WHERE day = ?",
+            (day,),
+        )
+        return float(row["total"]) if row else 0.0
+
+    def ai_calls(self, day: str) -> int:
+        row = self._one("SELECT COUNT(*) AS n FROM ai_usage WHERE day = ?", (day,))
+        return int(row["n"]) if row else 0
+
+    def ai_usage(self, day: str) -> list[dict[str, Any]]:
+        return self._all(
+            "SELECT kind, model, COUNT(*) AS calls, "
+            "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
+            "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
+            "COALESCE(SUM(cost_usd), 0) AS cost_usd "
+            "FROM ai_usage WHERE day = ? GROUP BY kind, model ORDER BY cost_usd DESC",
+            (day,),
+        )
 
     # ---------------------------------------------------------------- threads
     def mark_thread(self, channel_id: str, thread_ts: str) -> None:
