@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from slack_sdk.errors import SlackApiError
@@ -254,8 +256,6 @@ async def fetch_slack_images(event: dict[str, Any], token: str, max_images: int 
     files = event.get("files") or []
     if not files and isinstance(event.get("message"), dict):
         files = event["message"].get("files") or []
-    if not files or not token:
-        return []
 
     images = [
         f
@@ -265,25 +265,50 @@ async def fetch_slack_images(event: dict[str, Any], token: str, max_images: int 
         and "svg" not in str(f.get("mimetype", ""))
     ][:max_images]
 
-    if not images:
-        return []
-
     data_urls: list[str] = []
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as http:
-        for f in images:
-            url = f.get("url_private_download") or f.get("url_private")
-            mimetype = f.get("mimetype", "image/png")
-            size = f.get("size", 0)
-            if not url or (size and size > 15 * 1024 * 1024):
-                continue
-            try:
-                resp = await http.get(url, headers={"Authorization": f"Bearer {token}"})
-                if resp.status_code == 200 and resp.content:
-                    b64 = base64.b64encode(resp.content).decode("ascii")
-                    data_urls.append(f"data:{mimetype};base64,{b64}")
-                else:
-                    logger.warning("failed to fetch slack image %s: HTTP %s", url, resp.status_code)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("exception fetching slack image %s: %s", url, exc)
+    if images and token:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as http:
+            for f in images:
+                url = f.get("url_private_download") or f.get("url_private")
+                mimetype = f.get("mimetype", "image/png")
+                size = f.get("size", 0)
+                if not url or (size and size > 15 * 1024 * 1024):
+                    continue
+                try:
+                    resp = await http.get(url, headers={"Authorization": f"Bearer {token}"})
+                    if resp.status_code == 200 and resp.content:
+                        b64 = base64.b64encode(resp.content).decode("ascii")
+                        data_urls.append(f"data:{mimetype};base64,{b64}")
+                    else:
+                        logger.warning("failed to fetch slack image %s: HTTP %s", url, resp.status_code)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("exception fetching slack image %s: %s", url, exc)
+
+    if not data_urls:
+        text = event.get("text") or ""
+        if not text and isinstance(event.get("message"), dict):
+            text = event["message"].get("text") or ""
+        img_pattern = r'https?://[^\s<>\"\'\)\|]+\.(?:png|jpg|jpeg|webp|gif)(?:\?[^\s<>\"\'\)\|]*)?'
+        found_urls = re.findall(img_pattern, text, re.IGNORECASE)[:max_images]
+        if found_urls:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as http:
+                for img_url in found_urls:
+                    parsed = urlparse(img_url)
+                    host = (parsed.hostname or "").lower()
+                    if not host or host in {"localhost", "127.0.0.1", "::1"}:
+                        continue
+                    try:
+                        resp = await http.get(img_url)
+                        if resp.status_code == 200 and resp.content and len(resp.content) <= 10 * 1024 * 1024:
+                            ctype = resp.headers.get("content-type", "").split(";")[0].strip()
+                            if not ctype.startswith("image/"):
+                                ext = parsed.path.rsplit(".", 1)[-1].lower()
+                                ctype = f"image/{ext}" if ext in {"png", "jpg", "jpeg", "webp", "gif"} else "image/png"
+                                if ctype == "image/jpg":
+                                    ctype = "image/jpeg"
+                            b64 = base64.b64encode(resp.content).decode("ascii")
+                            data_urls.append(f"data:{ctype};base64,{b64}")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("exception fetching image url %s: %s", img_url, exc)
 
     return data_urls
