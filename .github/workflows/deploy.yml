@@ -34,11 +34,14 @@ jobs:
         run: |
           set -uo pipefail
           for i in 1 2 3 4 5; do
-            if ssh $SSH_OPTS maaren@hackclub.app 'echo SSH_OK'; then
-              echo "ssh ok"
+            out=$(ssh $SSH_OPTS maaren@hackclub.app 'echo SSH_OK' 2>&1)
+            code=$?
+            printf '%s\n' "$out"
+            if [ "$code" -eq 0 ] || printf '%s' "$out" | grep -q SSH_OK; then
+              echo "ssh ok (ssh exit $code)"
               exit 0
             fi
-            echo "ssh attempt $i failed; retrying in 5s"
+            echo "ssh attempt $i failed (ssh exit $code); retrying in 5s"
             sleep 5
           done
           exit 1
@@ -76,12 +79,15 @@ jobs:
         run: |
           set -uo pipefail
           for i in 1 2 3 4; do
-            if printf '%s\n' "$ENV_FILE" | ssh $SSH_OPTS maaren@hackclub.app 'cat > ~/slackbot/.env && chmod 600 ~/slackbot/.env'; then
-              echo "env ok"
+            out=$(printf '%s\n' "$ENV_FILE" | ssh $SSH_OPTS maaren@hackclub.app 'cat > ~/slackbot/.env && chmod 600 ~/slackbot/.env && echo ENV_OK' 2>&1)
+            code=$?
+            printf '%s\n' "$out"
+            if [ "$code" -eq 0 ] || printf '%s' "$out" | grep -q ENV_OK; then
+              echo "env ok (ssh exit $code)"
               exit 0
             fi
-            echo "env attempt $i failed; retrying in 5s"
-            sleep 5
+            echo "env attempt $i failed (ssh exit $code); retrying in 10s"
+            sleep 10
           done
           exit 1
 
@@ -89,7 +95,7 @@ jobs:
         run: |
           set -uo pipefail
           for i in 1 2 3 4; do
-            if ssh $SSH_OPTS maaren@hackclub.app 'set -e
+            out=$(ssh $SSH_OPTS maaren@hackclub.app 'set -e
               cd slackbot
               mkdir -p logs data
               if command -v python3.13 >/dev/null; then PY=python3.13; else PY=python3; fi
@@ -100,11 +106,15 @@ jobs:
               sleep 3
               systemctl --no-pager --full status chicen-nugget-bot | head -15
               echo "--- log ---"
-              tail -20 logs/bot.log || true'; then
-              echo "deploy ok"
+              tail -20 logs/bot.log || true
+              echo DEPLOY_OK' 2>&1)
+            code=$?
+            printf '%s\n' "$out"
+            if [ "$code" -eq 0 ] || printf '%s' "$out" | grep -q DEPLOY_OK; then
+              echo "deploy ok (ssh exit $code)"
               exit 0
             fi
-            echo "deploy attempt $i failed; retrying in 10s"
+            echo "deploy attempt $i failed (ssh exit $code); retrying in 10s"
             sleep 10
           done
           exit 1
