@@ -65,6 +65,7 @@ class Agent:
         thread_ts: str | None,
         is_dm: bool,
         trigger: str = "mention",
+        jev: str = "",
     ) -> str:
         """Run one agent turn (with tools) and persist both sides of it."""
         if not self.settings.ai_enabled:
@@ -82,6 +83,7 @@ class Agent:
             .replace("{owner_id}", self.settings.owner_user_id)
             .replace("{location}", location)
             .replace("{trigger}", TRIGGER_TEXT.get(trigger, TRIGGER_TEXT["mention"]))
+            .replace("{jev}", jev or "no extra classification")
         )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]

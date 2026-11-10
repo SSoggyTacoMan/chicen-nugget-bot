@@ -142,19 +142,21 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
 
     user_name = await _user_name(client, user_id)
     channel_name = await _channel_name(client, channel)
-    if not await runtime.gate.should_reply(
+    decision = await runtime.gate.decide(
         text=text, channel_name=channel_name, user_name=user_name
-    ):
+    )
+    if not decision.reply:
         return
 
     _last_ambient[channel] = time.monotonic()
-    logger.info("gate let %s through in %s", user_id, channel)
+    logger.info("gate let %s through in %s (%s)", user_id, channel, decision.kind)
     await _handle_channel(
         event,
         client,
         text=strip_mentions(text) or text,
         thread_ts=event.get("ts"),
         trigger="ambient",
+        jev=decision.hint(),
     )
 
 
@@ -179,6 +181,7 @@ async def _handle_channel(
     text: str,
     thread_ts: str | None = None,
     trigger: str = "mention",
+    jev: str = "",
 ) -> None:
     settings = runtime.settings
     channel = event.get("channel")
@@ -212,6 +215,7 @@ async def _handle_channel(
                 thread_ts=root_ts,
                 is_dm=False,
                 trigger=trigger,
+                jev=jev,
             )
         for chunk in chunk_text(answer):
             await post(client, channel, chunk, thread_ts=root_ts)

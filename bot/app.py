@@ -83,8 +83,9 @@ async def run() -> None:
                     else ", ".join(sorted(settings.ai_ambient_channels)) or "nowhere"
                 )
                 logger.info(
-                    "gate enabled with %s; ambient replies in %s (cooldown %ss)",
+                    "gate enabled with %s at %s; ambient replies in %s (cooldown %ss)",
                     settings.ai_gate_model,
+                    runtime.gate.jev.url,
                     channels,
                     settings.ai_ambient_cooldown,
                 )

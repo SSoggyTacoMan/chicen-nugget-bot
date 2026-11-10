@@ -87,6 +87,10 @@ class Settings:
     ai_gate_enabled: bool
     ai_gate_model: str
     ai_gate_timeout: float
+    ai_jev_url: str
+    ai_gate_min_confidence: float
+    ai_gate_addressed_confidence: float
+    ai_gate_spam_threshold: float
     ai_ambient_channels: frozenset[str]
     ai_ambient_cooldown: int
     imagine_model: str | None
@@ -231,8 +235,12 @@ def load_settings() -> Settings:
         ai_allow_admins=_bool("AI_ALLOW_ADMINS", True),
         ai_rate_limit_per_minute=max(0, _int("AI_RATE_LIMIT_PER_MINUTE", 12)),
         ai_gate_enabled=_bool("AI_GATE_ENABLED", True),
-        ai_gate_model=_str("AI_GATE_MODEL", "typesafe/jev-router") or "typesafe/jev-router",
+        ai_gate_model=_str("AI_GATE_MODEL", "jev-latest") or "jev-latest",
         ai_gate_timeout=_float("AI_GATE_TIMEOUT", 8.0),
+        ai_jev_url=_str("AI_JEV_URL"),
+        ai_gate_min_confidence=_float("AI_GATE_MIN_CONFIDENCE", 0.5),
+        ai_gate_addressed_confidence=_float("AI_GATE_ADDRESSED_CONFIDENCE", 0.6),
+        ai_gate_spam_threshold=_float("AI_GATE_SPAM_THRESHOLD", 0.7),
         ai_ambient_channels=frozenset(_list("AI_AMBIENT_CHANNELS")),
         ai_ambient_cooldown=max(0, _int("AI_AMBIENT_COOLDOWN", 120)),
         imagine_model=_str("IMAGINE_MODEL") or None,
