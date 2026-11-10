@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -18,8 +19,31 @@ from bot.utils.tz import tzinfo
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system.md"
+PROMPT_DIGEST_KEY = "persona_digest"
 MAX_TOOL_ROUNDS = 6
 MAX_TOOL_RESULT = 7000
+
+
+def sync_prompt_digest(db: Database, template: str) -> int:
+    """Clear old chat turns when the persona changes.
+
+    The model learns style from the assistant messages in its history, so after
+    a prompt rewrite the old voice keeps leaking through. Resetting on a new
+    prompt hash starts every conversation on the new voice. Notes are untouched.
+    """
+    digest = hashlib.sha256(template.encode("utf-8")).hexdigest()
+    previous = db.kv_get(PROMPT_DIGEST_KEY)
+    if previous == digest:
+        return 0
+    cleared = db.clear_all_history()
+    db.kv_set(PROMPT_DIGEST_KEY, digest)
+    logger.info(
+        "persona changed (%s -> %s); cleared %s stored turns",
+        (previous or "none")[:8],
+        digest[:8],
+        cleared,
+    )
+    return cleared
 
 # How this turn started, in words the persona can act on. The model can't tell
 # a mention from an ambient chiming-in otherwise, because mentions are stripped
@@ -57,6 +81,7 @@ class Agent:
         )
         self.toolbox = Toolbox(settings)
         self.system_template = PROMPT_PATH.read_text(encoding="utf-8")
+        sync_prompt_digest(self.db, self.system_template)
 
     async def reply(
         self,
@@ -344,4 +369,4 @@ async def owner_label(client, user_id: str) -> str:
     return display_name(user)
 
 
-__all__ = ["Agent", "fit_history", "owner_label", "tzinfo"]
+__all__ = ["Agent", "fit_history", "owner_label", "sync_prompt_digest", "tzinfo"]

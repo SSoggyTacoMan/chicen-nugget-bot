@@ -227,6 +227,8 @@ Conversation history and notes are stored in `data/bot.db`. Nothing is sent anyw
 
 The bot's voice and rules live in [`prompts/system.md`](prompts/system.md): who it is, how it talks, when to use a tool, how to behave when it chimed in unprompted, and how to keep private data private. Edit that file to change the personality — no code changes needed. Each turn is also given the current time, the channel or DM it's in, who is speaking, and why it is replying (mention, thread follow-up, DM, or unprompted).
 
+Changing the persona also tells the bot to drop its stored chat turns on the next start. The model learns tone from its own old replies, so a rewrite would otherwise keep sounding like the previous version. Owner notes and other data are untouched.
+
 ### AI commands
 
 | command | what it does |

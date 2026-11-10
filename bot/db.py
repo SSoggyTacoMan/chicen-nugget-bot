@@ -431,6 +431,9 @@ class Database:
             (prefix + "%",),
         )
 
+    def clear_all_history(self) -> int:
+        return self._execute("DELETE FROM messages")
+
     # ------------------------------------------------------------------ notes
     def add_note(self, user_id: str, text: str) -> int:
         return self._write(

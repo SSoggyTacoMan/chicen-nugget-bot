@@ -1,6 +1,7 @@
 import re
 
-from bot.ai.agent import PROMPT_PATH, TRIGGER_TEXT
+from bot.ai.agent import PROMPT_PATH, TRIGGER_TEXT, sync_prompt_digest
+from bot.db import Database
 
 REQUIRED = {
     "bot_name",
@@ -35,3 +36,23 @@ def test_every_trigger_has_words():
     assert set(TRIGGER_TEXT) == {"dm", "mention", "thread_followup", "ambient"}
     for value in TRIGGER_TEXT.values():
         assert value.strip()
+
+
+def test_prompt_change_clears_stale_history(tmp_path):
+    db = Database(tmp_path / "prompt.db")
+    db.init()
+    db.add_message("dm:U1", "user", "U1", "hi")
+    db.add_message("dm:U1", "assistant", "BOT", "still crispy")
+
+    assert sync_prompt_digest(db, "persona v1") == 2
+    assert db.history("dm:U1", 10) == []
+
+    # same prompt again leaves new turns alone
+    sync_prompt_digest(db, "persona v1")
+    db.add_message("dm:U1", "user", "U1", "again")
+    assert sync_prompt_digest(db, "persona v1") == 0
+    assert len(db.history("dm:U1", 10)) == 1
+
+    # a new persona clears them
+    assert sync_prompt_digest(db, "persona v2") == 1
+    assert db.history("dm:U1", 10) == []
