@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import socket
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from html.parser import HTMLParser
@@ -269,21 +270,29 @@ class Toolbox:
             ),
             tool(
                 "fetch_url",
-                "Read a public web page as plain text. Blocks local/private addresses. Owner/admin only.",
+                "Read a public web page or API as plain text or JSON. Blocks private addresses. Owner/admin only.",
                 {"url": {"type": "string", "description": "Public http(s) URL."}},
                 ["url"],
             ),
+            tool(
+                "search_web",
+                "Search the live web for current information, documentation, news, or answers. Owner/admin only.",
+                {"query": {"type": "string", "description": "Search query."}},
+                ["query"],
+            ),
+            tool(
+                "generate_image",
+                "Generate an AI image from a text prompt and post it to the channel or DM. Owner/admin only.",
+                {
+                    "prompt": {"type": "string", "description": "Visual prompt describing the image to generate."},
+                    "ratio": {
+                        "type": "string",
+                        "description": "Aspect ratio: '1:1', '16:9', '9:16', '4:3', '3:4'. Default '1:1'.",
+                    },
+                },
+                ["prompt"],
+            ),
         ]
-
-        if self.settings.tavily_api_key:
-            tools.append(
-                tool(
-                    "search_web",
-                    "Search the live web and get a short answer with sources. Owner/admin only.",
-                    {"query": {"type": "string", "description": "Search query."}},
-                    ["query"],
-                )
-            )
         return tools
 
     # ---------------------------------------------------------------- dispatch
@@ -712,19 +721,22 @@ class Toolbox:
         try:
             async with httpx.AsyncClient(
                 timeout=15,
-                follow_redirects=False,
-                headers={"User-Agent": "chicen-nugget-bot/1.0"},
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
             ) as http:
                 response = await http.get(url)
         except httpx.HTTPError as exc:
             return _error(f"fetch failed: {exc}")
-        if response.status_code in {301, 302, 303, 307, 308}:
-            return _error(f"redirected to {response.headers.get('location')!r}; ask me to fetch that url directly")
         if response.status_code >= 400:
             return _error(f"http {response.status_code}")
+        final_host = response.url.host
+        if final_host and await self._is_private_host(final_host):
+            return _error("redirected host resolves to a private address")
         content_type = response.headers.get("content-type", "")
-        if "html" not in content_type and "text" not in content_type:
+        if "html" not in content_type and "text" not in content_type and "json" not in content_type:
             return _error(f"unsupported content type: {content_type or 'unknown'}")
+        if "json" in content_type:
+            return response.text[:MAX_TOOL_RESULT]
         parser = _TextExtractor()
         parser.feed(response.text[:500_000])
         text = html.unescape("".join(parser.parts))
@@ -734,36 +746,89 @@ class Toolbox:
     async def _tool_search_web(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can search the web")
-        if not self.settings.tavily_api_key:
-            return _error("TAVILY_API_KEY is not configured")
         query = str(args.get("query") or "").strip()
         if not query:
             return _error("query is required")
+        if self.settings.tavily_api_key:
+            try:
+                async with httpx.AsyncClient(timeout=25) as http:
+                    response = await http.post(
+                        "https://api.tavily.com/search",
+                        json={
+                            "api_key": self.settings.tavily_api_key,
+                            "query": query,
+                            "search_depth": "basic",
+                            "max_results": 5,
+                            "include_answer": True,
+                        },
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"web search failed: {exc}")
+            return _json(
+                {
+                    "answer": data.get("answer"),
+                    "results": [
+                        {"title": item.get("title"), "url": item.get("url"), "content": item.get("content", "")[:700]}
+                        for item in (data.get("results") or [])
+                    ],
+                }
+            )
+        # Fallback to Hack Club AI's perplexity/sonar search
         try:
             async with httpx.AsyncClient(timeout=25) as http:
                 response = await http.post(
-                    "https://api.tavily.com/search",
+                    f"{self.settings.ai_base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.settings.ai_api_key}"},
                     json={
-                        "api_key": self.settings.tavily_api_key,
-                        "query": query,
-                        "search_depth": "basic",
-                        "max_results": 5,
-                        "include_answer": True,
+                        "model": "perplexity/sonar",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a concise web search assistant. Provide accurate, up-to-date facts and sources.",
+                            },
+                            {"role": "user", "content": query},
+                        ],
+                        "max_tokens": 600,
+                        "temperature": 0.2,
                     },
                 )
                 response.raise_for_status()
                 data = response.json()
+                content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                return _json({"query": query, "answer": content})
         except Exception as exc:  # noqa: BLE001
             return _error(f"web search failed: {exc}")
-        return _json(
-            {
-                "answer": data.get("answer"),
-                "results": [
-                    {"title": item.get("title"), "url": item.get("url"), "content": item.get("content", "")[:700]}
-                    for item in (data.get("results") or [])
-                ],
-            }
-        )
+
+    async def _tool_generate_image(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can generate images")
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt:
+            return _error("prompt is required")
+        ratio = str(args.get("ratio") or "1:1").strip()
+        if ratio not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
+            ratio = "1:1"
+        if not ctx.channel_id:
+            return _error("no channel or dm context to post the image to")
+        from bot.features.ai_commands import _generate_image
+        try:
+            image_bytes, mime = await _generate_image(prompt, ratio)
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"image generation failed: {exc}")
+        ext = "png" if "png" in mime else "jpg"
+        try:
+            await ctx.client.files_upload_v2(
+                channel=ctx.channel_id,
+                thread_ts=ctx.thread_ts,
+                file=image_bytes,
+                filename=f"nugget-{int(time.time())}.{ext}",
+                initial_comment=f":art: generated: *{prompt}*",
+            )
+            return f"image successfully generated and uploaded to conversation for: {prompt}"
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"failed to upload image: {exc}")
 
     # ---------------------------------------------------------------- helpers
     async def _resolve_channel(self, ctx: ToolContext, value: str) -> str | None:
