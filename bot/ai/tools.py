@@ -287,7 +287,14 @@ class Toolbox:
         return tools
 
     # ---------------------------------------------------------------- dispatch
-    async def execute(self, name: str, args: dict[str, Any], ctx: ToolContext) -> str:
+    async def execute(self, name: str, args: Any, ctx: ToolContext) -> str:
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except Exception:
+                args = {}
+        if not isinstance(args, dict):
+            args = {}
         try:
             handler = getattr(self, f"_tool_{name}", None)
             if handler is None:

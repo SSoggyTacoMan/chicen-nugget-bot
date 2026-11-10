@@ -13,6 +13,8 @@ REQUIRED = {
     "location",
     "trigger",
     "jev",
+    "ai_model",
+    "repo_url",
 }
 
 
