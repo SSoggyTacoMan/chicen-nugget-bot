@@ -113,6 +113,9 @@ class Agent:
             .replace("{trigger}", TRIGGER_TEXT.get(trigger, TRIGGER_TEXT["mention"]))
             .replace("{jev}", jev or "no extra classification")
             .replace("{ai_model}", self.settings.ai_model)
+            .replace("{ai_fallback_model}", self.settings.ai_fallback_model or "none")
+            .replace("{imagine_model}", self.settings.imagine_model or "none")
+            .replace("{gate_model}", self.settings.ai_gate_model or "none")
             .replace("{repo_url}", self.settings.repo_url)
         )
 

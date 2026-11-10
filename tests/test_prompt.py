@@ -14,6 +14,9 @@ REQUIRED = {
     "trigger",
     "jev",
     "ai_model",
+    "ai_fallback_model",
+    "imagine_model",
+    "gate_model",
     "repo_url",
 }
 
