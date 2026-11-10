@@ -80,11 +80,18 @@ async def run() -> None:
                 f" (fallback {settings.ai_fallback_model})" if settings.ai_fallback_model else "",
             )
             status = runtime.budget.status()
+            global_stop = (
+                f"${settings.ai_daily_budget_usd:.2f}/day"
+                if settings.ai_daily_budget_usd > 0
+                else "off (account limit applies)"
+            )
             logger.info(
-                "ai budget: $%.2f of $%.2f used today (%s calls); limits %s/min per user, %s/min total",
+                "ai usage: $%.4f total, %s calls today; per-user cap %s/day; bot-wide stop %s; "
+                "limits %s/min per user, %s/min total",
                 status.spent,
-                status.limit,
                 status.calls,
+                f"${settings.ai_user_daily_budget_usd:.2f}",
+                global_stop,
                 settings.ai_rate_limit_per_minute or "off",
                 settings.ai_global_rate_limit_per_minute or "off",
             )

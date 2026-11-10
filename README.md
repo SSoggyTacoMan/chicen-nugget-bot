@@ -143,7 +143,8 @@ AI_MODEL=openai/gpt-5.6-luna
 AI_FALLBACK_MODEL=anthropic/claude-haiku-5.5
 AI_RATE_LIMIT_PER_MINUTE=12
 AI_GLOBAL_RATE_LIMIT_PER_MINUTE=30
-AI_DAILY_BUDGET_USD=2.50
+AI_USER_DAILY_BUDGET_USD=0.50
+AI_DAILY_BUDGET_USD=0
 ```
 
 Get a key from <https://ai.hackclub.com/dashboard>. The fallback model is tried automatically when the primary model errors or times out. `AI_RATE_LIMIT_PER_MINUTE=0` disables the per-user limit.
@@ -182,10 +183,11 @@ Mentions and DMs always skip the gate. If Jev errors or times out, the gate fail
 
 ### Spend limits
 
-The bot tracks every completion it makes — chat, Jev decisions, and `/imagine` — in `data/bot.db` and prices it from a small table. When the UTC-day total reaches `AI_DAILY_BUDGET_USD` it stops starting new calls and replies with a friendly "budget used up" message. The day resets at 00:00 UTC, the same as Hack Club AI.
+The bot accounts for every completion it makes — chat, Jev decisions, and `/imagine` — in `data/bot.db` and prices it from a small table. Hack Club AI already stops the account at its daily allowance, so the bot does not add a second global stop by default. What it does enforce is a **per-user** daily cap: once one person reaches `AI_USER_DAILY_BUDGET_USD`, their AI requests stop until 00:00 UTC. The owner is exempt. A guest with one very large request therefore can't spend the whole day's allowance.
 
 ```dotenv
-AI_DAILY_BUDGET_USD=2.50   # 0 disables the stop
+AI_USER_DAILY_BUDGET_USD=0.50   # owner is exempt; 0 disables
+AI_DAILY_BUDGET_USD=0           # optional extra bot-wide stop
 AI_GLOBAL_RATE_LIMIT_PER_MINUTE=30
 AI_MAX_CONTEXT_CHARS=24000
 AI_IMAGE_COST_USD=0.04
@@ -193,11 +195,11 @@ AI_IMAGE_COST_USD=0.04
 
 Three limits work together:
 
-- per-user cap (`AI_RATE_LIMIT_PER_MINUTE`) stops one person from spamming;
-- workspace cap (`AI_GLOBAL_RATE_LIMIT_PER_MINUTE`) stops a burst across the whole server;
-- daily budget stops the day from disappearing.
+- per-user rate limit (`AI_RATE_LIMIT_PER_MINUTE`) stops one person from spamming;
+- workspace rate limit (`AI_GLOBAL_RATE_LIMIT_PER_MINUTE`) stops a burst across the whole server;
+- per-user daily cap stops one person from quietly spending the day.
 
-The tracker only knows what the bot itself spent. Usage from other apps on the same key is invisible here, so keep `AI_DAILY_BUDGET_USD` below the account allowance. `/nugget budget` shows today's spend, remaining budget, and a per-model breakdown. Unknown models are priced pessimistically ($1/$5 per million) so a typo can't under-count.
+Usage is attributed to the Slack user who asked, so `/nugget budget` shows your own spend, the workspace total, and the top users for the day. Unknown models are priced pessimistically ($1/$5 per million) so a typo can't under-count.
 
 Other endpoints still work:
 
@@ -368,7 +370,8 @@ Times use `TIMEZONE`. The first time expression is removed from the front; every
 | `AI_ALLOW_ADMINS` | `true` | let admins DM the agent too |
 | `AI_RATE_LIMIT_PER_MINUTE` | `12` | per-user AI request cap; `0` disables |
 | `AI_GLOBAL_RATE_LIMIT_PER_MINUTE` | `30` | workspace-wide AI request cap; `0` disables |
-| `AI_DAILY_BUDGET_USD` | `2.50` | stop starting AI calls at this UTC-day spend; `0` disables |
+| `AI_USER_DAILY_BUDGET_USD` | `0.50` | per-user UTC-day spend cap; owner exempt; `0` disables |
+| `AI_DAILY_BUDGET_USD` | `0` | optional bot-wide UTC-day stop; off by default |
 | `AI_GATE_ENABLED` | `true` | ask jev whether to reply in ambient channels |
 | `AI_GATE_MODEL` | `jev-latest` | System One model used for gate decisions |
 | `AI_GATE_TIMEOUT` | `8` | seconds before the gate fails closed |

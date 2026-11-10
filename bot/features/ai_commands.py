@@ -65,6 +65,7 @@ async def cmd_ask(ack, command, client) -> None:
         ),
         text=question,
         max_tokens=min(runtime.settings.ai_max_tokens, 900),
+        user_id=user,
     )
     await _post_answer(client, channel, user, question, answer)
 
@@ -128,6 +129,7 @@ async def cmd_summarize(ack, command, client) -> None:
         ),
         text=f"channel: <#{channel}>\n\n{body}",
         max_tokens=min(runtime.settings.ai_max_tokens, 900),
+        user_id=user,
     )
     header = f":newspaper: *catch-up for <#{channel}>* — last {len(transcript)} messages"
     chunks = chunk_text(summary)
@@ -248,6 +250,7 @@ async def cmd_imagine(ack, command, client) -> None:
         runtime.budget.record(
             kind="image",
             model=settings.imagine_model or "image",
+            user_id=user,
             cost_usd=settings.ai_image_cost_usd,
         )
 
@@ -373,17 +376,29 @@ async def _ai_ready(client, channel: str, user: str) -> bool:
 
 async def _budget_blocked(client, channel: str, user: str) -> bool:
     budget = runtime.budget
-    if budget is None or not budget.exhausted():
+    if budget is None:
         return False
     status = budget.status()
-    await post_ephemeral(
-        client,
-        channel,
-        user,
-        f"i've used up my ai budget for today (${status.spent:.2f} of ${status.limit:.2f}). "
-        "it resets at 00:00 UTC.",
-    )
-    return True
+    if status.exhausted:
+        await post_ephemeral(
+            client,
+            channel,
+            user,
+            f"i've used up my ai budget for today (${status.spent:.2f} of ${status.limit:.2f}). "
+            "it resets at 00:00 UTC.",
+        )
+        return True
+    user_status = budget.user_status(user)
+    if user_status.exhausted:
+        await post_ephemeral(
+            client,
+            channel,
+            user,
+            f"you've hit today's ai limit (${user_status.spent:.2f} of ${user_status.limit:.2f}). "
+            "it resets at 00:00 UTC.",
+        )
+        return True
+    return False
 
 
 def _ai_allowed(channel: str) -> bool:

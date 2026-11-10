@@ -1,17 +1,19 @@
-"""Daily AI spend tracking and hard stops.
+"""Daily AI spend tracking and per-user hard stops.
 
-Hack Club AI gives the key a daily allowance. A bug, a tool loop, or a very
-chatty channel should never be able to eat the whole thing in a few minutes,
-so every completion is priced and written to SQLite before the next one starts.
+Hack Club AI gives the key a daily allowance and enforces it itself, so the bot
+does not need a second account-wide stop. What it does need is a way to keep one
+guest with a very large request from spending the whole day, so every completion
+is priced, written to SQLite, and attributed to the Slack user who asked.
 
 The tracker is deliberately conservative:
 
 - days are UTC, matching the provider's reset;
 - unknown models are priced high rather than low;
-- the bot stops at ``AI_DAILY_BUDGET_USD`` even if the account still has room.
+- ``AI_USER_DAILY_BUDGET_USD`` caps each person, with the owner exempt;
+- ``AI_DAILY_BUDGET_USD`` is an optional extra bot-wide stop, off by default.
 
 It only knows what the bot itself spent. Usage from other apps on the same key
-is invisible here, so keep the limit below the account allowance.
+is invisible here.
 """
 
 from __future__ import annotations
@@ -105,10 +107,11 @@ class BudgetStatus:
 
 
 class BudgetExceeded(RuntimeError):
-    def __init__(self, status: BudgetStatus) -> None:
+    def __init__(self, status: BudgetStatus, scope: str = "global") -> None:
         self.status = status
+        self.scope = scope
         super().__init__(
-            f"daily ai budget exhausted (${status.spent:.2f} of ${status.limit:.2f})"
+            f"{scope} ai budget exhausted (${status.spent:.2f} of ${status.limit:.2f})"
         )
 
 
@@ -126,14 +129,30 @@ class Budget:
             calls=self.db.ai_calls(day),
         )
 
+    def user_status(self, user_id: str) -> BudgetStatus:
+        """Spend for one person. The owner is never capped."""
+        day = utc_day()
+        owner = getattr(self.settings, "owner_user_id", "")
+        limit = 0.0 if user_id and user_id == owner else self.settings.ai_user_daily_budget_usd
+        return BudgetStatus(
+            day=day,
+            spent=self.db.ai_spend(day, user_id=user_id) if user_id else 0.0,
+            limit=limit,
+            calls=self.db.ai_calls(day, user_id=user_id) if user_id else 0,
+        )
+
     def exhausted(self) -> bool:
         return self.status().exhausted
+
+    def user_exhausted(self, user_id: str) -> bool:
+        return bool(user_id) and self.user_status(user_id).exhausted
 
     def record(
         self,
         *,
         kind: str,
         model: str,
+        user_id: str = "",
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         cost_usd: float | None = None,
@@ -148,20 +167,25 @@ class Budget:
             day=day,
             kind=kind,
             model=model,
+            user_id=user_id,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             cost_usd=cost,
         )
         spent = self.db.ai_spend(day)
+        user_spent = self.db.ai_spend(day, user_id=user_id) if user_id else 0.0
         logger.info(
-            "ai spend kind=%s model=%s tokens=%s/%s cost=$%.6f today=$%.4f/$%.2f",
+            "ai spend kind=%s model=%s user=%s tokens=%s/%s cost=$%.6f "
+            "user_today=$%.4f/$%.2f total_today=$%.4f",
             kind,
             model,
+            user_id or "-",
             prompt_tokens,
             completion_tokens,
             cost,
+            user_spent,
+            self.user_status(user_id).limit if user_id else 0.0,
             spent,
-            self.settings.ai_daily_budget_usd,
         )
         return cost
 

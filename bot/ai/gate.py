@@ -117,12 +117,16 @@ class Gate:
         text: str,
         channel_name: str = "a channel",
         user_name: str = "someone",
+        user_id: str | None = None,
         recent: list[str] | None = None,
     ) -> GateDecision:
         if not self.settings.ai_gate_enabled or not text.strip():
             return GateDecision(reply=False, error="gate disabled")
-        if self.budget is not None and self.budget.exhausted():
-            return GateDecision(reply=False, error="daily ai budget exhausted")
+        if self.budget is not None:
+            if self.budget.exhausted():
+                return GateDecision(reply=False, error="daily ai budget exhausted")
+            if user_id and self.budget.user_exhausted(user_id):
+                return GateDecision(reply=False, error="daily ai limit reached for this user")
 
         state = _state(text, channel_name, user_name, recent)
         result: JevResult | None = None
@@ -142,6 +146,7 @@ class Gate:
             self.budget.record(
                 kind="jev",
                 model=result.model or self.settings.ai_gate_model,
+                user_id=user_id or "",
                 prompt_tokens=result.prompt_tokens,
                 completion_tokens=result.completion_tokens,
             )
