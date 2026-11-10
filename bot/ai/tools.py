@@ -11,13 +11,14 @@ import html
 import ipaddress
 import json
 import logging
+import re
 import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 from slack_sdk.web.async_client import AsyncWebClient
@@ -120,6 +121,39 @@ def _error(message: str) -> str:
 
 def _need_owner(ctx: ToolContext) -> bool:
     return ctx.is_owner or ctx.is_admin
+
+
+def parse_slack_ref(ref: str) -> tuple[str | None, str | None]:
+    m = re.search(r"archives/(C[0-9A-Z]+)/p(\d{10})(\d{1,6})", ref)
+    if m:
+        return m.group(1), f"{m.group(2)}.{m.group(3)}"
+    m_cid = re.search(r"[?&]cid=(C[0-9A-Z]+)", ref)
+    m_ts = re.search(r"[?&]thread_ts=(\d+\.\d+)", ref)
+    if m_cid and m_ts:
+        return m_cid.group(1), m_ts.group(1)
+    m_raw = re.match(r"(C[0-9A-Z]+):(\d+\.\d+)", ref.strip())
+    if m_raw:
+        return m_raw.group(1), m_raw.group(2)
+    m_c = re.search(r"<#(C[0-9A-Z]+)", ref)
+    if m_c:
+        return m_c.group(1), None
+    m_b = re.match(r"(C[0-9A-Z]+)$", ref.strip())
+    if m_b:
+        return m_b.group(1), None
+    m_arch = re.search(r"archives/(C[0-9A-Z]+)(?!/\w)", ref)
+    if m_arch:
+        return m_arch.group(1), None
+    return None, None
+
+
+def parse_slack_thread_ref(ref: str) -> tuple[str | None, str | None]:
+    cid, ts = parse_slack_ref(ref)
+    if not cid:
+        return None, None
+    m_thread = re.search(r"[?&]thread_ts=(\d+\.\d+)", ref)
+    if m_thread:
+        return cid, m_thread.group(1)
+    return cid, ts
 
 
 class Toolbox:
@@ -291,6 +325,60 @@ class Toolbox:
                     },
                 },
                 ["prompt"],
+            ),
+            tool(
+                "flaron",
+                "Query the public Hack Club Slack directory (flaron.halceon.dev). Actions: user, channel, user_search, channel_search, channel_by_name, channel_managers, channel_members, app, emoji, command, promote.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "user",
+                            "channel",
+                            "user_search",
+                            "channel_search",
+                            "channel_by_name",
+                            "channel_managers",
+                            "channel_members",
+                            "app",
+                            "emoji",
+                            "command",
+                            "promote",
+                        ],
+                        "description": "Which lookup to perform.",
+                    },
+                    "id": {"type": "string", "description": "Slack id for user/channel/app/etc."},
+                    "name": {"type": "string", "description": "Name for channel_by_name, emoji, or command."},
+                    "query": {"type": "string", "description": "Search term for user_search or channel_search."},
+                },
+                ["action"],
+            ),
+            tool(
+                "fetch_slack_message",
+                "Fetch the actual text and author of a specific Slack message. Pass a Slack permalink/URL or channel:timestamp reference. Owner/admin only.",
+                {"ref": {"type": "string", "description": "Slack permalink URL or channel:timestamp."}},
+                ["ref"],
+            ),
+            tool(
+                "summarize_thread",
+                "Read messages in a Slack thread to provide a summary or context. Pass a permalink to the thread or omit to use current thread. Owner/admin only.",
+                {"ref": {"type": "string", "description": "Slack permalink URL, or omit for current thread."}},
+                [],
+            ),
+            tool(
+                "ocr_document",
+                "Extract text and markdown from an image or PDF document URL using Hack Club AI Mistral OCR. Owner/admin only.",
+                {"url": {"type": "string", "description": "Public URL of an image (PNG, JPG, WebP) or PDF."}},
+                ["url"],
+            ),
+            tool(
+                "public_holidays",
+                "Look up upcoming public holidays for a country via Nager.Date. Default country is US.",
+                {
+                    "country": {"type": "string", "description": "2-letter country code, e.g. US, NL, CA, GB. Default US."},
+                    "year": {"type": "integer", "description": "Optional 4-digit calendar year."},
+                },
+                [],
             ),
         ]
         return tools
@@ -718,6 +806,8 @@ class Toolbox:
             return _error("only public http(s) urls are allowed")
         if await self._is_private_host(parsed.hostname):
             return _error("that host resolves to a private address")
+
+        text_result = None
         try:
             async with httpx.AsyncClient(
                 timeout=15,
@@ -725,23 +815,45 @@ class Toolbox:
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
             ) as http:
                 response = await http.get(url)
-        except httpx.HTTPError as exc:
-            return _error(f"fetch failed: {exc}")
-        if response.status_code >= 400:
-            return _error(f"http {response.status_code}")
-        final_host = response.url.host
-        if final_host and await self._is_private_host(final_host):
-            return _error("redirected host resolves to a private address")
-        content_type = response.headers.get("content-type", "")
-        if "html" not in content_type and "text" not in content_type and "json" not in content_type:
-            return _error(f"unsupported content type: {content_type or 'unknown'}")
-        if "json" in content_type:
-            return response.text[:MAX_TOOL_RESULT]
-        parser = _TextExtractor()
-        parser.feed(response.text[:500_000])
-        text = html.unescape("".join(parser.parts))
-        text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-        return text[:MAX_TOOL_RESULT]
+            if response.status_code < 400:
+                final_host = response.url.host
+                if not (final_host and await self._is_private_host(final_host)):
+                    content_type = response.headers.get("content-type", "")
+                    if "json" in content_type:
+                        text_result = response.text[:MAX_TOOL_RESULT]
+                    elif "html" in content_type or "text" in content_type:
+                        parser = _TextExtractor()
+                        parser.feed(response.text[:500_000])
+                        extracted = html.unescape("".join(parser.parts))
+                        cleaned = "\n".join(line.strip() for line in extracted.splitlines() if line.strip())
+                        if len(cleaned) > 100:
+                            text_result = cleaned[:MAX_TOOL_RESULT]
+        except Exception:
+            logger.debug("direct fetch failed for %s, trying exa contents", url)
+
+        if text_result:
+            return text_result
+
+        # Fallback to Hack Club AI Exa contents for JS-rendered or bot-blocked pages
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                response = await http.post(
+                    f"{self.settings.ai_base_url}/exa/contents",
+                    headers={"Authorization": f"Bearer {self.settings.ai_api_key}"},
+                    json={"urls": [url], "text": {"maxCharacters": MAX_TOOL_RESULT}},
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    for r in data.get("results") or []:
+                        text = (r.get("text") or "").strip()
+                        if text:
+                            title = (r.get("title") or "").strip()
+                            prefix = f"# {title}\n\n" if title else ""
+                            return f"{prefix}{text}"[:MAX_TOOL_RESULT]
+        except Exception as exc:
+            logger.debug("exa contents failed for %s: %s", url, exc)
+
+        return _error(f"could not fetch or extract content from {url}")
 
     async def _tool_search_web(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
@@ -749,6 +861,32 @@ class Toolbox:
         query = str(args.get("query") or "").strip()
         if not query:
             return _error("query is required")
+
+        # 1. Primary: Hack Club AI Exa answer proxy
+        try:
+            async with httpx.AsyncClient(timeout=25) as http:
+                response = await http.post(
+                    f"{self.settings.ai_base_url}/exa/answer",
+                    headers={"Authorization": f"Bearer {self.settings.ai_api_key}"},
+                    json={"query": query},
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    answer = (data.get("answer") or "").strip()
+                    if answer:
+                        citations = [
+                            c.get("url")
+                            for c in (data.get("citations") or [])
+                            if isinstance(c, dict) and c.get("url")
+                        ]
+                        if citations:
+                            sources = "\n".join(f"- {u}" for u in citations[:5])
+                            return f"{answer}\n\nsources:\n{sources}"
+                        return answer
+        except Exception:
+            logger.exception("exa search failed, trying fallback")
+
+        # 2. Tavily if key is configured
         if self.settings.tavily_api_key:
             try:
                 async with httpx.AsyncClient(timeout=25) as http:
@@ -764,18 +902,19 @@ class Toolbox:
                     )
                     response.raise_for_status()
                     data = response.json()
-            except Exception as exc:  # noqa: BLE001
-                return _error(f"web search failed: {exc}")
-            return _json(
-                {
-                    "answer": data.get("answer"),
-                    "results": [
-                        {"title": item.get("title"), "url": item.get("url"), "content": item.get("content", "")[:700]}
-                        for item in (data.get("results") or [])
-                    ],
-                }
-            )
-        # Fallback to Hack Club AI's perplexity/sonar search
+                return _json(
+                    {
+                        "answer": data.get("answer"),
+                        "results": [
+                            {"title": item.get("title"), "url": item.get("url"), "content": item.get("content", "")[:700]}
+                            for item in (data.get("results") or [])
+                        ],
+                    }
+                )
+            except Exception:
+                logger.exception("tavily search failed, trying fallback")
+
+        # 3. Sonar on Hack Club AI
         try:
             async with httpx.AsyncClient(timeout=25) as http:
                 response = await http.post(
@@ -829,6 +968,167 @@ class Toolbox:
             return f"image successfully generated and uploaded to conversation for: {prompt}"
         except Exception as exc:  # noqa: BLE001
             return _error(f"failed to upload image: {exc}")
+
+    async def _tool_flaron(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        action = str(args.get("action") or "").lower().strip()
+        item_id = str(args.get("id") or "").strip()
+        name = str(args.get("name") or "").strip()
+        query = str(args.get("query") or "").strip()
+
+        path_map = {
+            "user": f"/user/{quote(item_id)}" if item_id else None,
+            "channel": f"/channel/{quote(item_id)}" if item_id else None,
+            "user_search": f"/users/search?{urlencode({'q': query})}" if query else None,
+            "channel_search": f"/channels/search?{urlencode({'q': query})}" if query else None,
+            "channel_by_name": f"/cname/{quote(name)}" if name else None,
+            "channel_managers": f"/cman/{quote(item_id)}" if item_id else None,
+            "channel_members": f"/ccount/{quote(item_id)}" if item_id else None,
+            "app": f"/app/{quote(item_id)}" if item_id else None,
+            "emoji": f"/emoji/{quote(name)}" if name else None,
+            "command": f"/command/{quote(name)}" if name else None,
+            "promote": f"/promote/{quote(item_id)}" if item_id else None,
+        }
+        path = path_map.get(action)
+        if not path:
+            return _error(f"invalid action {action!r} or missing required id/name/query parameter")
+
+        url = f"https://flaron.halceon.dev{path}"
+        try:
+            async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "chicen-nugget-bot"}) as http:
+                resp = await http.get(url)
+                if resp.status_code == 404:
+                    return f"no flaron data found for {action} ({item_id or name or query})"
+                resp.raise_for_status()
+                return _json(resp.json())
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"flaron lookup failed: {exc}")
+
+    async def _tool_fetch_slack_message(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can fetch slack messages")
+        ref = str(args.get("ref") or "").strip()
+        if not ref:
+            return _error("ref is required")
+        cid, ts = parse_slack_ref(ref)
+        if not cid:
+            return _error("could not parse a slack channel or link from reference")
+        if not ts:
+            return _error(f"found channel <#{cid}> but no specific message timestamp")
+        try:
+            resp = await ctx.client.conversations_history(channel=cid, latest=ts, inclusive=True, limit=1)
+            msgs = (resp.get("messages") or []) if resp.get("ok") else []
+            if not msgs:
+                resp2 = await ctx.client.conversations_replies(channel=cid, ts=ts, limit=1)
+                msgs = (resp2.get("messages") or []) if resp2.get("ok") else []
+            if not msgs:
+                return f"no message found in <#{cid}> at {ts}"
+            msg = msgs[0]
+            user = msg.get("user") or msg.get("bot_id") or "unknown"
+            text = (msg.get("text") or "").strip()
+            return f"message in <#{cid}> from <@{user}> at {ts}:\n{text}"
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"failed to fetch slack message: {exc}")
+
+    async def _tool_summarize_thread(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can summarize threads")
+        ref = str(args.get("ref") or "").strip()
+        if ref:
+            cid, ts = parse_slack_thread_ref(ref)
+        elif ctx.channel_id and ctx.thread_ts:
+            cid, ts = ctx.channel_id, ctx.thread_ts
+        else:
+            return _error("no thread specified and not currently inside a thread")
+        if not cid or not ts:
+            return _error("could not parse channel and thread timestamp")
+        try:
+            resp = await ctx.client.conversations_replies(channel=cid, ts=ts, limit=100)
+            msgs = (resp.get("messages") or []) if resp.get("ok") else []
+            if not msgs:
+                return "thread has no messages or could not be read"
+            tz = tzinfo()
+            lines = []
+            for m in msgs:
+                u = m.get("user") or m.get("bot_id") or "unknown"
+                t = (m.get("text") or "").strip()
+                try:
+                    when = datetime.fromtimestamp(float(m.get("ts")), tz).strftime("%H:%M")
+                except Exception:
+                    when = "?"
+                lines.append(f"<@{u}> ({when}): {t}")
+            return f"thread in <#{cid}> ({len(msgs)} messages):\n" + "\n".join(lines)[:MAX_TOOL_RESULT]
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"failed to read thread: {exc}")
+
+    async def _tool_ocr_document(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can use OCR")
+        url = str(args.get("url") or "").strip()
+        if not url:
+            return _error("url is required")
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return _error("only public http(s) urls are allowed")
+        if await self._is_private_host(parsed.hostname):
+            return _error("that host resolves to a private address")
+        doc_type = "document_url" if parsed.path.lower().endswith(".pdf") else "image_url"
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                response = await http.post(
+                    f"{self.settings.ai_base_url}/ocr",
+                    headers={"Authorization": f"Bearer {self.settings.ai_api_key}"},
+                    json={
+                        "model": "mistral-ocr-latest",
+                        "document": {"type": doc_type, doc_type: url},
+                    },
+                )
+                if response.status_code != 200:
+                    return _error(f"ocr failed with http {response.status_code}: {response.text[:200]}")
+                data = response.json()
+                pages = [
+                    (p.get("markdown") or "").strip()
+                    for p in (data.get("pages") or [])
+                    if isinstance(p, dict)
+                ]
+                text = "\n\n--- page ---\n\n".join(p for p in pages if p)
+                if not text:
+                    return "ocr returned no readable text"
+                return text[:MAX_TOOL_RESULT]
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"ocr failed: {exc}")
+
+    async def _tool_public_holidays(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        country = str(args.get("country") or "US").strip().upper()
+        if not re.match(r"^[A-Z]{2}$", country):
+            country = "US"
+        year = args.get("year")
+        if year:
+            try:
+                year_int = int(year)
+                api_url = f"https://date.nager.at/api/v3/PublicHolidays/{year_int}/{country}"
+            except (ValueError, TypeError):
+                api_url = f"https://date.nager.at/api/v3/NextPublicHolidays/{country}"
+        else:
+            api_url = f"https://date.nager.at/api/v3/NextPublicHolidays/{country}"
+        try:
+            async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "chicen-nugget-bot"}) as http:
+                resp = await http.get(api_url)
+                if resp.status_code == 404:
+                    return f"no holiday data found for country code {country}"
+                resp.raise_for_status()
+                data = resp.json()
+            if not isinstance(data, list) or not data:
+                return f"no public holidays found for {country}"
+            lines = [f"public holidays for {country}:"]
+            for h in data[:15]:
+                date_str = h.get("date")
+                name = h.get("name")
+                local_name = h.get("localName")
+                label = f"{name} ({local_name})" if local_name and local_name != name else name
+                lines.append(f"- {date_str}: {label}")
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"failed to fetch holidays: {exc}")
 
     # ---------------------------------------------------------------- helpers
     async def _resolve_channel(self, ctx: ToolContext, value: str) -> str | None:
