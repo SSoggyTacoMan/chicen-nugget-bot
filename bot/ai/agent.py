@@ -94,6 +94,7 @@ class Agent:
         is_dm: bool,
         trigger: str = "mention",
         jev: str = "",
+        images: list[str] | None = None,
     ) -> str:
         """Run one agent turn (with tools) and persist both sides of it."""
         if not self.settings.ai_enabled:
@@ -121,8 +122,18 @@ class Agent:
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(fit_history(history, text, self.settings.ai_max_context_chars))
-        messages.append({"role": "user", "content": text[: self.settings.ai_max_context_chars]})
-        self.db.add_message(conversation, "user", user_id, text)
+        if images:
+            user_content: list[dict[str, Any]] = [
+                {"type": "text", "text": text[: self.settings.ai_max_context_chars] or "Look at this image."}
+            ]
+            for img in images:
+                user_content.append({"type": "image_url", "image_url": {"url": img}})
+            messages.append({"role": "user", "content": user_content})
+            stored_text = text if not images else f"{text} [image attached]".strip()
+            self.db.add_message(conversation, "user", user_id, stored_text)
+        else:
+            messages.append({"role": "user", "content": text[: self.settings.ai_max_context_chars]})
+            self.db.add_message(conversation, "user", user_id, text)
 
         ctx = ToolContext(
             db=self.db,

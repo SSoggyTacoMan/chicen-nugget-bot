@@ -248,5 +248,173 @@ def test_email_helpers_and_unconfigured():
     assert "email credentials not configured" in res
 
 
+def test_bot_config_tool(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.ai.tools import Toolbox, ToolContext
+    from bot.db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.init()
+    settings = MagicMock()
+    box = Toolbox(settings)
+
+    ctx_guest = ToolContext(
+        db=db,
+        settings=settings,
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_GUEST",
+        channel_id="C1",
+        thread_ts=None,
+        is_dm=False,
+        is_owner=False,
+        is_admin=False,
+    )
+
+    ctx_owner = ToolContext(
+        db=db,
+        settings=settings,
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="C1",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+    )
+
+    async def run():
+        # Guest denied
+        denied = await box.execute("bot_config", {"action": "list"}, ctx_guest)
+        assert "only the owner/admin" in denied
+
+        # Owner can list
+        lst = await box.execute("bot_config", {"action": "list"}, ctx_owner)
+        assert "current bot runtime settings" in lst
+        assert "recaps" in lst
+
+        # Turn off recaps
+        res = await box.execute("bot_config", {"action": "set", "key": "recaps", "value": "off"}, ctx_owner)
+        assert "daily recaps disabled" in res
+        assert db.kv_get("config:recaps") == "false"
+
+        # Check recaps setting
+        get_res = await box.execute("bot_config", {"action": "get", "key": "recaps"}, ctx_owner)
+        assert "currently `false`" in get_res
+
+        # Reset recaps
+        reset_res = await box.execute("bot_config", {"action": "reset", "key": "recaps"}, ctx_owner)
+        assert "reset to default" in reset_res
+        assert db.kv_get("config:recaps") is None
+
+        # Set tier2 channel with slack mention format
+        res_ch = await box.execute("bot_config", {"action": "set", "key": "tier2_channel", "value": "<#C012345678|tier2>"}, ctx_owner)
+        assert "C012345678" in res_ch
+        assert db.kv_get("config:access_channel_id") == "C012345678"
+
+    asyncio.run(run())
+
+
+def test_fetch_slack_images():
+    import asyncio
+    from unittest.mock import MagicMock, patch
+    import httpx
+    from bot.slack_api import fetch_slack_images
+
+    event = {
+        "files": [
+            {
+                "mimetype": "image/png",
+                "url_private": "https://files.slack.com/img.png",
+                "size": 1024,
+            },
+            {
+                "mimetype": "image/svg+xml",
+                "url_private": "https://files.slack.com/img.svg",
+                "size": 500,
+            },
+            {
+                "mimetype": "text/plain",
+                "url_private": "https://files.slack.com/doc.txt",
+                "size": 100,
+            },
+        ]
+    }
+
+    async def mock_get(url, *args, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.content = b"fake_png_data"
+        return resp
+
+    async def run():
+        with patch.object(httpx.AsyncClient, "get", new=mock_get):
+            urls = await fetch_slack_images(event, "xoxb-test")
+            assert len(urls) == 1
+            assert urls[0].startswith("data:image/png;base64,")
+
+    asyncio.run(run())
+
+
+def test_agent_reply_with_images(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.ai.agent import Agent
+    from bot.db import Database
+
+    db = Database(str(tmp_path / "agent_test.db"))
+    db.init()
+    settings = MagicMock()
+    settings.bot_name = "nugget"
+    settings.ai_enabled = True
+    settings.ai_api_key = "test-key"
+    settings.ai_base_url = "https://ai.hackclub.com/proxy/v1"
+    settings.ai_model = "test-model"
+    settings.ai_fallback_model = ""
+    settings.imagine_model = "test-imagine"
+    settings.ai_gate_model = "test-gate"
+    settings.ai_max_context_chars = 1000
+    settings.ai_history_limit = 5
+    settings.owner_user_id = "U_OWNER"
+    settings.repo_url = "https://github.com/repo"
+    settings.is_admin.return_value = False
+
+    agent = Agent(settings, db, client=AsyncMock(), user_client=None, bot_user_id="U_BOT")
+
+    captured_messages = []
+
+    async def fake_chat(messages, *args, **kwargs):
+        captured_messages.extend(messages)
+        res = MagicMock()
+        choice = MagicMock()
+        choice.message.content = "I see a cute dog!"
+        choice.message.tool_calls = []
+        res.choices = [choice]
+        return res
+
+    agent._chat = fake_chat
+
+    async def run():
+        ans = await agent.reply(
+            conversation="dm:U1",
+            user_id="U1",
+            text="what is this?",
+            channel_id="C1",
+            thread_ts=None,
+            is_dm=True,
+            images=["data:image/png;base64,ZmFrZQ=="],
+        )
+        assert ans == "I see a cute dog!"
+        user_msg = [m for m in captured_messages if m.get("role") == "user"][-1]
+        assert isinstance(user_msg["content"], list)
+        assert any(p.get("type") == "image_url" for p in user_msg["content"])
+
+    asyncio.run(run())
+
+
 
 

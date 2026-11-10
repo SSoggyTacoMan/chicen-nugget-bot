@@ -608,6 +608,26 @@ class Toolbox:
                 {"term": {"type": "string", "description": "The word or phrase to look up."}},
                 ["term"],
             ),
+            tool(
+                "bot_config",
+                "View or change bot runtime settings (recaps, daily_digest, welcomer, tier2, tier2_channel, ambient_ai, weather_location). Owner/admin only.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["get", "set", "list", "reset"],
+                        "description": "Action: 'get', 'set', 'list', or 'reset'.",
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Setting name: 'recaps', 'daily_digest', 'welcomer', 'tier2', 'tier2_channel', 'ambient_ai', 'weather_location'.",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "New value to set (e.g. 'off', 'on', 'false', 'true', or channel ID).",
+                    },
+                },
+                ["action"],
+            ),
         ]
         return tools
 
@@ -631,7 +651,8 @@ class Toolbox:
 
     # ------------------------------------------------------------------ tools
     async def _tool_get_weather(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        location = (args.get("location") or self.settings.weather_default_location or "").strip()
+        loc_setting = ctx.db.kv_get("config:weather_location") if ctx.db else None
+        location = (args.get("location") or loc_setting or self.settings.weather_default_location or "").strip()
         if not location:
             return _error("no location given and WEATHER_DEFAULT_LOCATION is not set")
         days = max(1, min(7, int(args.get("days") or 3)))
@@ -1641,6 +1662,113 @@ class Toolbox:
             return res[:MAX_TOOL_RESULT]
         except Exception as exc:  # noqa: BLE001
             return _error(f"urban dictionary lookup failed: {exc}")
+
+    async def _tool_bot_config(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can view or change bot settings")
+        action = str(args.get("action") or "list").lower().strip()
+        raw_key = str(args.get("key") or "").strip().lower()
+        value = str(args.get("value") or "").strip()
+
+        key_aliases = {
+            "recap": "recaps",
+            "daily_recap": "recaps",
+            "daily_recaps": "recaps",
+            "digest": "daily_digest",
+            "access": "tier2",
+            "tier2_channel": "access_channel_id",
+            "access_channel": "access_channel_id",
+            "ambient": "ambient_ai",
+            "weather": "weather_location",
+        }
+        key = key_aliases.get(raw_key, raw_key)
+        known_keys = [
+            "recaps",
+            "daily_digest",
+            "welcomer",
+            "tier2",
+            "access_channel_id",
+            "ambient_ai",
+            "weather_location",
+        ]
+
+        if action == "list":
+            lines = ["current bot runtime settings:"]
+            for k in known_keys:
+                db_val = ctx.db.kv_get(f"config:{k}")
+                status = db_val if db_val is not None else "(default)"
+                lines.append(f"- *{k}*: `{status}`")
+            return "\n".join(lines)
+
+        if not key:
+            return _error("key is required for get/set/reset")
+
+        if action == "get":
+            db_val = ctx.db.kv_get(f"config:{key}")
+            if db_val is None:
+                return f"setting *{key}* is not set (using default)."
+            return f"setting *{key}* is currently `{db_val}`."
+
+        if action == "reset":
+            ctx.db.kv_del(f"config:{key}")
+            if key == "recaps":
+                try:
+                    from bot.features import scheduler
+                    scheduler._ensure_recap_jobs()
+                except Exception:
+                    pass
+            elif key == "daily_digest":
+                try:
+                    from bot.features import scheduler
+                    scheduler._ensure_digest_job()
+                except Exception:
+                    pass
+            return f"setting *{key}* reset to default."
+
+        if action == "set":
+            if not value:
+                return _error("value is required when setting a config")
+
+            val_lower = value.lower()
+            if val_lower in {"off", "false", "no", "disable", "disabled", "0"}:
+                normalized_val = "false"
+            elif val_lower in {"on", "true", "yes", "enable", "enabled", "1"}:
+                normalized_val = "true"
+            else:
+                if key == "access_channel_id":
+                    match = re.search(r"C[A-Z0-9]{8,}", value)
+                    normalized_val = match.group(0) if match else value.strip("#")
+                else:
+                    normalized_val = value
+
+            ctx.db.kv_set(f"config:{key}", normalized_val)
+
+            if key == "recaps":
+                if normalized_val == "false":
+                    ctx.db.cancel_reminders_by_kind("recap_public")
+                    ctx.db.cancel_reminders_by_kind("recap_reminder")
+                    return "daily recaps disabled. cancelled any pending recap reminders."
+                try:
+                    from bot.features import scheduler
+                    scheduler._ensure_recap_jobs()
+                except Exception:
+                    pass
+                return "daily recaps enabled."
+
+            if key == "daily_digest":
+                if normalized_val == "false":
+                    ctx.db.cancel_reminders_by_kind("digest")
+                    return "daily digest disabled. cancelled pending digest jobs."
+                try:
+                    from bot.features import scheduler
+                    scheduler._ensure_digest_job()
+                except Exception:
+                    pass
+                return "daily digest enabled."
+
+            return f"updated *{key}* to `{normalized_val}`."
+
+        return _error(f"unknown action '{action}'")
 
     # ---------------------------------------------------------------- helpers
     async def _resolve_channel(self, ctx: ToolContext, value: str) -> str | None:

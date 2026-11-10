@@ -25,6 +25,8 @@ def register(app) -> None:
 
 
 async def post_public_prompt(client) -> dict[str, Any] | None:
+    if runtime.db and runtime.db.kv_get("config:recaps") == "false":
+        return None
     settings = runtime.settings
     channel = settings.recap_channel_id
     owner = settings.owner_user_id

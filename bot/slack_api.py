@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 from typing import Any
 
+import httpx
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -246,3 +248,42 @@ async def invite_to_channel(
             return True, None
         logger.warning("conversations_invite failed for %s in %s: %s", user_id, channel_id, code)
         return False, code
+
+
+async def fetch_slack_images(event: dict[str, Any], token: str, max_images: int = 3) -> list[str]:
+    files = event.get("files") or []
+    if not files and isinstance(event.get("message"), dict):
+        files = event["message"].get("files") or []
+    if not files or not token:
+        return []
+
+    images = [
+        f
+        for f in files
+        if isinstance(f, dict)
+        and str(f.get("mimetype", "")).startswith("image/")
+        and "svg" not in str(f.get("mimetype", ""))
+    ][:max_images]
+
+    if not images:
+        return []
+
+    data_urls: list[str] = []
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as http:
+        for f in images:
+            url = f.get("url_private_download") or f.get("url_private")
+            mimetype = f.get("mimetype", "image/png")
+            size = f.get("size", 0)
+            if not url or (size and size > 15 * 1024 * 1024):
+                continue
+            try:
+                resp = await http.get(url, headers={"Authorization": f"Bearer {token}"})
+                if resp.status_code == 200 and resp.content:
+                    b64 = base64.b64encode(resp.content).decode("ascii")
+                    data_urls.append(f"data:{mimetype};base64,{b64}")
+                else:
+                    logger.warning("failed to fetch slack image %s: HTTP %s", url, resp.status_code)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("exception fetching slack image %s: %s", url, exc)
+
+    return data_urls
