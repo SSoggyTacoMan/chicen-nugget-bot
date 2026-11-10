@@ -39,6 +39,15 @@ jobs:
             echo '--- service ---'
             systemctl is-active chicen-nugget-bot || true
             systemctl show -p ActiveEnterTimestamp --value chicen-nugget-bot || true
+            echo '--- other services ---'
+            systemctl list-units --type=service --all 2>/dev/null | grep -Ei 'nugget|mochi|novabot|slack' || true
+            echo '--- processes ---'
+            ps -eo pid,etime,cmd 2>/dev/null | grep -Ei 'python.*(main|bot|slack)' | grep -v grep || true
+            echo '--- prompt ---'
+            md5sum ~/slackbot/prompts/system.md 2>/dev/null || true
+            head -n 6 ~/slackbot/prompts/system.md 2>/dev/null || true
+            echo '--- env ---'
+            grep -E '^(AI_MODEL|AI_FALLBACK_MODEL|AI_USER_DAILY_BUDGET_USD|AI_DAILY_BUDGET_USD)=' ~/slackbot/.env 2>/dev/null || true
             echo '--- log ---'
             tail -n $LINES ~/slackbot/logs/bot.log
           "
