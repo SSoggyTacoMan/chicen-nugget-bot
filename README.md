@@ -183,6 +183,10 @@ Who can use it:
 
 Conversation history and notes are stored in `data/bot.db`. Nothing is sent anywhere except your Slack workspace, your chosen AI endpoint, and the optional tools you enable.
 
+### Persona
+
+The bot's voice and rules live in [`prompts/system.md`](prompts/system.md): who it is, how it talks, when to use a tool, how to behave when it chimed in unprompted, and how to keep private data private. Edit that file to change the personality — no code changes needed. Each turn is also given the current time, the channel or DM it's in, who is speaking, and why it is replying (mention, thread follow-up, DM, or unprompted).
+
 ### AI commands
 
 | command | what it does |
