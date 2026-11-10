@@ -11,6 +11,7 @@ REQUIRED = {
     "is_admin",
     "location",
     "trigger",
+    "jev",
 }
 
 

@@ -17,7 +17,7 @@ admin clicks Approve ──▶ bot invites member to private channel ──▶ D
 - **Usergroup helpers** — DMs anyone who replies in a thread under a usergroup ping (replies re-ping the whole group), and posts a “thread here!” anchor when a ping includes 🧵 (or offers yes/no buttons when it doesn't).
 - **Daily recap** — a scheduled public prompt asks how your day went. Marking it done links your reply, adds ✨, optionally pings a usergroup, and can open a second private recap.
 - **Personal AI agent** — DM it (owner/admins only) or mention it in a channel. It has conversation memory in SQLite and tools for weather, dice, reminders, Slack search, channel history, DMs, notes, stats, URLs and optional web search. It also powers `/nugget ask`, `/nugget summarize` and `/nugget imagine`.
-- **Jev gate** — in channels listed in `AI_AMBIENT_CHANNELS`, the bot reads every message and asks `typesafe/jev-router` one yes/no question: should it reply? Only a yes runs the expensive agent turn, so it can chime in on questions and help without replying to every message.
+- **Jev gate** — in channels listed in `AI_AMBIENT_CHANNELS`, the bot asks Jev (`jev-latest`) four typed questions about every message: should it reply, was it addressed to the bot, is it spam, and what kind of message is it. Only a confident yes runs the expensive agent turn, so it can chime in on questions and help without replying to every message.
 - **One slash command** — everything lives under `/nugget`, so it never collides with other apps: `/nugget help`, `/nugget ping`, `/nugget roll 2d6`, `/nugget poll ...`, `/nugget ask ...`, `/nugget imagine ...`, `/nugget pinggroup`, and more.
 - **Reminders & scheduled messages** — one-off and recurring (`10m`, `tomorrow 09:00`, `daily 08:30`, `weekly mon 18:00`, `every 2h`), delivered by DM or posted to a channel by an admin.
 - **Polls** — `/nugget poll "question" "a" "b"` posts live button tallies with bars; click another option to change your vote.
@@ -147,19 +147,33 @@ Get a key from <https://ai.hackclub.com/dashboard>. The fallback model is tried 
 
 ### The jev gate
 
-In a busy channel a bot that answers everything is noise. `typesafe/jev-router` is a decision-only model: the bot asks it "should I reply to this?" and only a `YES` triggers a real agent turn.
+In a busy channel a bot that answers everything is noise. Jev is TypeSafe's *System One* model: it doesn't write text, it returns a typed probability for each question you ask it, in one pass. Hack Club AI serves it at `/jev/systemone`, so the bot asks four questions about every ambient message:
+
+| question | type | what it decides |
+|---|---|---|
+| `should_reply` | `noul` | would a reply genuinely add something? |
+| `addressed` | `noul` | is the message aimed at the bot? |
+| `spam` | `noul` | is it spam, a mass ping, or a link dump? |
+| `kind` | `choice` | question, help, feedback, celebration, bot, chatter, spam, other |
+
+A message is answered when `should_reply` clears `AI_GATE_MIN_CONFIDENCE` (or `addressed` clears `AI_GATE_ADDRESSED_CONFIDENCE`) and `spam` stays below `AI_GATE_SPAM_THRESHOLD`. The `kind` answer is passed to the agent as a hint, so it knows whether to troubleshoot, congratulate, or keep it short.
 
 ```dotenv
 AI_GATE_ENABLED=true
-AI_GATE_MODEL=typesafe/jev-router
+AI_GATE_MODEL=jev-latest
 AI_GATE_TIMEOUT=8
+# defaults to <AI_BASE_URL>/jev/systemone
+AI_JEV_URL=
+AI_GATE_MIN_CONFIDENCE=0.5
+AI_GATE_ADDRESSED_CONFIDENCE=0.6
+AI_GATE_SPAM_THRESHOLD=0.7
 # channels where the bot listens to every message; empty = off
-AI_AMBIENT_CHANNELS=C0C83BAUZCK
+AI_AMBIENT_CHANNELS=
 # minimum seconds between unprompted replies in one channel
 AI_AMBIENT_COOLDOWN=120
 ```
 
-Mentions and DMs always skip the gate. If the gate errors or times out it fails closed (no reply), so a broken gate never turns into spam. Set `AI_AMBIENT_CHANNELS=*` to let it do this everywhere.
+Mentions and DMs always skip the gate. If Jev errors or times out, the gate fails closed (no reply), so a broken gate never turns into spam. Set `AI_AMBIENT_CHANNELS=*` to let it do this everywhere. The gate needs a Jev-capable endpoint; the rest of the bot still works with any OpenAI-compatible one.
 
 Other endpoints still work:
 
@@ -328,8 +342,12 @@ Times use `TIMEZONE`. The first time expression is removed from the front; every
 | `AI_ALLOW_ADMINS` | `true` | let admins DM the agent too |
 | `AI_RATE_LIMIT_PER_MINUTE` | `12` | per-user AI request cap; `0` disables |
 | `AI_GATE_ENABLED` | `true` | ask jev whether to reply in ambient channels |
-| `AI_GATE_MODEL` | `typesafe/jev-router` | decision-only routing model |
+| `AI_GATE_MODEL` | `jev-latest` | System One model used for gate decisions |
 | `AI_GATE_TIMEOUT` | `8` | seconds before the gate fails closed |
+| `AI_JEV_URL` | `<AI_BASE_URL>/jev/systemone` | Jev endpoint override |
+| `AI_GATE_MIN_CONFIDENCE` | `0.5` | min `should_reply` probability to chime in |
+| `AI_GATE_ADDRESSED_CONFIDENCE` | `0.6` | min probability the message is for the bot |
+| `AI_GATE_SPAM_THRESHOLD` | `0.7` | spam probability that always suppresses a reply |
 | `AI_AMBIENT_CHANNELS` | — | channels where the bot may reply unprompted; `*` = all |
 | `AI_AMBIENT_COOLDOWN` | `120` | min seconds between unprompted replies per channel |
 | `IMAGINE_MODEL` | `google/gemini-3.1-flash-lite-image` | image model for `/imagine`; empty disables |
@@ -448,6 +466,8 @@ bot/
   slack_api.py              resilient Slack Web API wrappers
   ai/
     agent.py                OpenAI-compatible tool loop + memory
+    gate.py                 jev decisions: reply, addressed, spam, kind
+    jev.py                  typed System One client (/jev/systemone)
     limits.py               per-user AI rate limiter
     tools.py                model-callable tools
   features/
