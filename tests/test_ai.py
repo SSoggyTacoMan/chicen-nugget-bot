@@ -103,6 +103,12 @@ def test_toolbox_has_expanded_tools():
     assert "check_emails" in names
     assert "hackatime_stats" in names
     assert "github_info" in names
+    assert "run_code" in names
+    assert "hacker_news" in names
+    assert "http_status" in names
+    assert "dog_fact" in names
+    assert "taco_recipe" in names
+    assert "urban_dict" in names
 
 
 def test_owner_only_tools_guard():
@@ -137,6 +143,70 @@ def test_owner_only_tools_guard():
 
         res4 = await box.execute("check_emails", {}, ctx)
         assert "only the owner/admin" in res4
+
+        res5 = await box.execute("run_code", {"code": "print(1)"}, ctx)
+        assert "only the owner/admin" in res5
+
+        res6 = await box.execute("hacker_news", {}, ctx)
+        assert "only the owner/admin" in res6
+
+        res7 = await box.execute("http_status", {"url": "https://example.com"}, ctx)
+        assert "only the owner/admin" in res7
+
+    asyncio.run(run())
+
+
+def test_dog_and_taco_channel_tools():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.ai.tools import Toolbox, ToolContext
+
+    box = Toolbox(MagicMock())
+    ctx = ToolContext(
+        db=MagicMock(),
+        settings=MagicMock(),
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_GUEST",
+        channel_id="C1",
+        thread_ts=None,
+        is_dm=False,
+        is_owner=False,
+        is_admin=False,
+    )
+
+    async def run():
+        taco = await box.execute("taco_recipe", {"theme": "spicy"}, ctx)
+        assert ":taco:" in taco
+        assert "Ghost Pepper Barbacoa" in taco
+
+    asyncio.run(run())
+
+
+def test_run_code_execution():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.ai.tools import Toolbox, ToolContext
+
+    box = Toolbox(MagicMock())
+    ctx = ToolContext(
+        db=MagicMock(),
+        settings=MagicMock(),
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="C1",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+    )
+
+    async def run():
+        out = await box.execute("run_code", {"code": "print(2 + 2)"}, ctx)
+        assert out == "4"
 
     asyncio.run(run())
 
