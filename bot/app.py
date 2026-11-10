@@ -10,6 +10,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from bot.runtime import runtime
 from bot.ai.agent import Agent
+from bot.ai.budget import Budget
 from bot.ai.gate import Gate
 from bot.ai.limits import RateLimiter
 from bot.config import settings
@@ -61,7 +62,9 @@ async def run() -> None:
     runtime.user_client = user_client
 
     if settings.ai_enabled:
+        runtime.budget = Budget(settings, db)
         runtime.ai_limiter = RateLimiter(settings.ai_rate_limit_per_minute)
+        runtime.ai_global_limiter = RateLimiter(settings.ai_global_rate_limit_per_minute)
         try:
             runtime.agent = Agent(
                 settings,
@@ -69,14 +72,24 @@ async def run() -> None:
                 client=app.client,
                 user_client=user_client,
                 bot_user_id=runtime.bot_user_id,
+                budget=runtime.budget,
             )
             logger.info(
                 "ai agent enabled with model %s%s",
                 settings.ai_model,
                 f" (fallback {settings.ai_fallback_model})" if settings.ai_fallback_model else "",
             )
+            status = runtime.budget.status()
+            logger.info(
+                "ai budget: $%.2f of $%.2f used today (%s calls); limits %s/min per user, %s/min total",
+                status.spent,
+                status.limit,
+                status.calls,
+                settings.ai_rate_limit_per_minute or "off",
+                settings.ai_global_rate_limit_per_minute or "off",
+            )
             if settings.ai_gate_enabled:
-                runtime.gate = Gate(settings)
+                runtime.gate = Gate(settings, budget=runtime.budget)
                 channels = (
                     "everywhere"
                     if "*" in settings.ai_ambient_channels

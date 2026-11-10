@@ -38,15 +38,26 @@ class RateLimiter:
                 self._hits.pop(key, None)
 
 
-def user_retry_after(user_id: str) -> int:
-    """0 when the user may proceed, otherwise seconds to wait."""
+def ai_retry_after(user_id: str) -> int:
+    """0 when this user (and the workspace) may start another AI call."""
     from bot.runtime import runtime  # local import avoids a runtime<->limits cycle
 
     limiter = runtime.ai_limiter
-    if limiter is None:
-        return 0
-    allowed, retry = limiter.allow(user_id)
-    return 0 if allowed else retry
+    if limiter is not None:
+        allowed, retry = limiter.allow(user_id)
+        if not allowed:
+            return retry
+
+    shared = runtime.ai_global_limiter
+    if shared is not None:
+        allowed, retry = shared.allow("global")
+        if not allowed:
+            return retry
+    return 0
 
 
-__all__ = ["RateLimiter", "user_retry_after"]
+# The old name is still used by a few call sites and plugins.
+user_retry_after = ai_retry_after
+
+
+__all__ = ["RateLimiter", "ai_retry_after", "user_retry_after"]

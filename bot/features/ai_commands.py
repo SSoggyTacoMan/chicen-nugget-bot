@@ -217,6 +217,8 @@ async def cmd_imagine(ack, command, client) -> None:
             "image generation is off. set `AI_API_KEY` and `IMAGINE_MODEL` first.",
         )
         return
+    if await _budget_blocked(client, channel, user):
+        return
     prompt, ratio = _parse_imagine(command.get("text") or "")
     if not prompt:
         await post_ephemeral(
@@ -241,6 +243,13 @@ async def cmd_imagine(ack, command, client) -> None:
         logger.exception("image generation failed")
         await post_ephemeral(client, channel, user, "image generation broke. check my logs?")
         return
+
+    if runtime.budget is not None:
+        runtime.budget.record(
+            kind="image",
+            model=settings.imagine_model or "image",
+            cost_usd=settings.ai_image_cost_usd,
+        )
 
     extension = "png" if "png" in mime else "jpg"
     try:
@@ -357,6 +366,23 @@ async def _ai_ready(client, channel: str, user: str) -> bool:
             "my ai brain isn't configured. set `AI_API_KEY`, `AI_BASE_URL` and `AI_MODEL`, then restart me.",
         )
         return False
+    if await _budget_blocked(client, channel, user):
+        return False
+    return True
+
+
+async def _budget_blocked(client, channel: str, user: str) -> bool:
+    budget = runtime.budget
+    if budget is None or not budget.exhausted():
+        return False
+    status = budget.status()
+    await post_ephemeral(
+        client,
+        channel,
+        user,
+        f"i've used up my ai budget for today (${status.spent:.2f} of ${status.limit:.2f}). "
+        "it resets at 00:00 UTC.",
+    )
     return True
 
 

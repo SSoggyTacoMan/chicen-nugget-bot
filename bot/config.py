@@ -84,6 +84,10 @@ class Settings:
     ai_channels: frozenset[str]
     ai_allow_admins: bool
     ai_rate_limit_per_minute: int
+    ai_global_rate_limit_per_minute: int
+    ai_daily_budget_usd: float
+    ai_max_context_chars: int
+    ai_image_cost_usd: float
     ai_gate_enabled: bool
     ai_gate_model: str
     ai_gate_timeout: float
@@ -234,6 +238,10 @@ def load_settings() -> Settings:
         ai_channels=frozenset(_list("AI_CHANNELS", ("*",))),
         ai_allow_admins=_bool("AI_ALLOW_ADMINS", True),
         ai_rate_limit_per_minute=max(0, _int("AI_RATE_LIMIT_PER_MINUTE", 12)),
+        ai_global_rate_limit_per_minute=max(0, _int("AI_GLOBAL_RATE_LIMIT_PER_MINUTE", 30)),
+        ai_daily_budget_usd=max(0.0, _float("AI_DAILY_BUDGET_USD", 2.50)),
+        ai_max_context_chars=max(2_000, _int("AI_MAX_CONTEXT_CHARS", 24_000)),
+        ai_image_cost_usd=max(0.0, _float("AI_IMAGE_COST_USD", 0.04)),
         ai_gate_enabled=_bool("AI_GATE_ENABLED", True),
         ai_gate_model=_str("AI_GATE_MODEL", "jev-latest") or "jev-latest",
         ai_gate_timeout=_float("AI_GATE_TIMEOUT", 8.0),

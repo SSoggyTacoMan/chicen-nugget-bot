@@ -2,17 +2,39 @@ import asyncio
 from types import SimpleNamespace
 
 from bot.ai.gate import Gate, GateDecision, _state
-from bot.ai.jev import Answer
+from bot.ai.jev import Answer, JevResult
 
 
 class FakeJev:
-    def __init__(self, answers):
+    def __init__(self, answers, prompt_tokens=600, completion_tokens=40):
         self.answers = answers
         self.calls = []
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
 
     async def ask(self, **kwargs):
         self.calls.append(kwargs)
-        return self.answers
+        if self.answers is None:
+            return None
+        return JevResult(
+            answers=self.answers,
+            model="jev-1.14.0",
+            prompt_tokens=self.prompt_tokens,
+            completion_tokens=self.completion_tokens,
+        )
+
+
+class FakeBudget:
+    def __init__(self, exhausted=False):
+        self.is_exhausted = exhausted
+        self.records = []
+
+    def exhausted(self):
+        return self.is_exhausted
+
+    def record(self, **kwargs):
+        self.records.append(kwargs)
+        return 0.0
 
 
 def settings(**overrides):
@@ -38,8 +60,8 @@ def answers(should=0.0, addressed=0.0, spam=0.0, kind="other", confidence=0.8):
     }
 
 
-def decide(jev_answers, text="hello", **overrides):
-    gate = Gate(settings(**overrides), jev=FakeJev(jev_answers))
+def decide(jev_answers, text="hello", budget=None, **overrides):
+    gate = Gate(settings(**overrides), jev=FakeJev(jev_answers), budget=budget)
     return asyncio.run(gate.decide(text=text))
 
 
@@ -81,6 +103,26 @@ def test_unavailable_jev_fails_closed():
     result = decide(None, text="how do i code")
     assert not result.reply
     assert result.error == "jev unavailable"
+
+
+def test_gate_records_jev_usage():
+    budget = FakeBudget()
+    result = decide(answers(should=0.9), text="how do i code", budget=budget)
+    assert result.reply
+    assert len(budget.records) == 1
+    assert budget.records[0]["kind"] == "jev"
+    assert budget.records[0]["prompt_tokens"] == 600
+    assert budget.records[0]["completion_tokens"] == 40
+
+
+def test_exhausted_budget_skips_jev_entirely():
+    budget = FakeBudget(exhausted=True)
+    gate = Gate(settings(), jev=FakeJev(answers(should=0.99)), budget=budget)
+    result = asyncio.run(gate.decide(text="how do i code"))
+    assert not result.reply
+    assert result.error == "daily ai budget exhausted"
+    assert gate.jev.calls == []
+    assert budget.records == []
 
 
 def test_state_includes_recent_messages():
