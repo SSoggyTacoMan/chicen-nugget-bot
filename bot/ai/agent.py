@@ -111,7 +111,7 @@ class Agent:
         answer = ""
         try:
             for _ in range(MAX_TOOL_ROUNDS):
-                response = await self._chat(messages, tools=True)
+                response = await self._chat(messages, tools=True, user_id=user_id)
                 message = response.choices[0].message
                 tool_calls = message.tool_calls or []
                 if tool_calls:
@@ -152,7 +152,7 @@ class Agent:
                 answer = "i got stuck in a tool loop. try asking again, maybe a little smaller."
         except BudgetExceeded as exc:
             logger.warning("ai budget exhausted: %s", exc)
-            answer = _budget_text(exc.status)
+            answer = _budget_text(exc)
         except Exception as exc:  # noqa: BLE001
             logger.exception("agent completion failed")
             answer = self._friendly_error(exc)
@@ -162,7 +162,13 @@ class Agent:
         return answer or "hmm, i blanked. try again?"
 
     async def complete(
-        self, *, system: str, text: str, max_tokens: int | None = None, temperature: float = 0.5
+        self,
+        *,
+        system: str,
+        text: str,
+        max_tokens: int | None = None,
+        temperature: float = 0.5,
+        user_id: str | None = None,
     ) -> str:
         """One-shot completion with no tools or persisted history."""
         if not self.settings.ai_enabled:
@@ -177,11 +183,12 @@ class Agent:
                 tools=False,
                 temperature=temperature,
                 max_tokens=max_tokens or self.settings.ai_max_tokens,
+                user_id=user_id,
             )
             return (response.choices[0].message.content or "").strip() or "i blanked. try again?"
         except BudgetExceeded as exc:
             logger.warning("ai budget exhausted: %s", exc)
-            return _budget_text(exc.status)
+            return _budget_text(exc)
         except Exception as exc:  # noqa: BLE001
             logger.exception("one-shot completion failed")
             return self._friendly_error(exc)
@@ -193,6 +200,7 @@ class Agent:
         tools: bool,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        user_id: str | None = None,
     ):
         models = [self.settings.ai_model]
         fallback = self.settings.ai_fallback_model
@@ -214,12 +222,14 @@ class Agent:
                 status = self.budget.status()
                 if status.exhausted:
                     raise BudgetExceeded(status)
+                if user_id and self.budget.user_exhausted(user_id):
+                    raise BudgetExceeded(self.budget.user_status(user_id), scope="user")
             try:
                 response = await self.llm.chat.completions.create(model=model, **kwargs)
                 message = response.choices[0].message
                 if index:
                     logger.info("ai answered with fallback model %s", model)
-                self._record_usage(model, messages, message, response)
+                self._record_usage(model, messages, message, response, user_id=user_id)
                 if not (message.content or "").strip() and not (message.tool_calls or []):
                     raise RuntimeError("empty response")
                 return response
@@ -238,7 +248,7 @@ class Agent:
                 raise
         raise last_error or RuntimeError("no ai model configured")
 
-    def _record_usage(self, model, messages, message, response) -> None:
+    def _record_usage(self, model, messages, message, response, user_id: str | None = None) -> None:
         if self.budget is None:
             return
         usage = getattr(response, "usage", None)
@@ -253,6 +263,7 @@ class Agent:
         self.budget.record(
             kind="chat",
             model=model,
+            user_id=user_id or "",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
@@ -295,7 +306,13 @@ class Agent:
         return f"my ai brain hiccuped: {text[:300]}"
 
 
-def _budget_text(status) -> str:
+def _budget_text(exc: BudgetExceeded) -> str:
+    status = exc.status
+    if exc.scope == "user":
+        return (
+            f"you've hit today's ai limit (${status.spent:.2f} of ${status.limit:.2f}). "
+            "it resets at 00:00 UTC."
+        )
     return (
         f"i've used up my ai budget for today (${status.spent:.2f} of ${status.limit:.2f}). "
         "it resets at 00:00 UTC."

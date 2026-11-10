@@ -25,12 +25,16 @@ class FakeJev:
 
 
 class FakeBudget:
-    def __init__(self, exhausted=False):
+    def __init__(self, exhausted=False, user_exhausted=False):
         self.is_exhausted = exhausted
+        self.is_user_exhausted = user_exhausted
         self.records = []
 
     def exhausted(self):
         return self.is_exhausted
+
+    def user_exhausted(self, user_id):
+        return self.is_user_exhausted
 
     def record(self, **kwargs):
         self.records.append(kwargs)
@@ -60,9 +64,9 @@ def answers(should=0.0, addressed=0.0, spam=0.0, kind="other", confidence=0.8):
     }
 
 
-def decide(jev_answers, text="hello", budget=None, **overrides):
+def decide(jev_answers, text="hello", budget=None, user_id="U1", **overrides):
     gate = Gate(settings(**overrides), jev=FakeJev(jev_answers), budget=budget)
-    return asyncio.run(gate.decide(text=text))
+    return asyncio.run(gate.decide(text=text, user_id=user_id))
 
 
 def test_high_probability_replies():
@@ -111,6 +115,7 @@ def test_gate_records_jev_usage():
     assert result.reply
     assert len(budget.records) == 1
     assert budget.records[0]["kind"] == "jev"
+    assert budget.records[0]["user_id"] == "U1"
     assert budget.records[0]["prompt_tokens"] == 600
     assert budget.records[0]["completion_tokens"] == 40
 
@@ -118,9 +123,19 @@ def test_gate_records_jev_usage():
 def test_exhausted_budget_skips_jev_entirely():
     budget = FakeBudget(exhausted=True)
     gate = Gate(settings(), jev=FakeJev(answers(should=0.99)), budget=budget)
-    result = asyncio.run(gate.decide(text="how do i code"))
+    result = asyncio.run(gate.decide(text="how do i code", user_id="U1"))
     assert not result.reply
     assert result.error == "daily ai budget exhausted"
+    assert gate.jev.calls == []
+    assert budget.records == []
+
+
+def test_exhausted_user_skips_jev_entirely():
+    budget = FakeBudget(user_exhausted=True)
+    gate = Gate(settings(), jev=FakeJev(answers(should=0.99)), budget=budget)
+    result = asyncio.run(gate.decide(text="how do i code", user_id="U1"))
+    assert not result.reply
+    assert result.error == "daily ai limit reached for this user"
     assert gate.jev.calls == []
     assert budget.records == []
 

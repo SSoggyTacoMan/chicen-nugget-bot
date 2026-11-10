@@ -329,37 +329,52 @@ async def cmd_stats(ack, command, client) -> None:
 async def cmd_budget(ack, command, client) -> None:
     await ack()
     settings = runtime.settings
-    if not settings.is_admin(command.get("user_id")):
-        await _say(client, command, "only admins can see the ai budget.", ephemeral=True)
+    user = command.get("user_id")
+    if not settings.is_admin(user):
+        await _say(client, command, "only admins can see ai usage.", ephemeral=True)
         return
     budget = runtime.budget
     if budget is None:
-        await _say(client, command, "ai is off, so there's no budget to show.", ephemeral=True)
+        await _say(client, command, "ai is off, so there's no usage to show.", ephemeral=True)
         return
+
     status = budget.status()
-    limit = f"${status.limit:.2f}" if status.limit > 0 else "no limit"
-    remaining = "unlimited" if status.limit <= 0 else f"${status.remaining:.2f}"
+    mine = budget.user_status(user)
+    my_limit = "unlimited" if mine.limit <= 0 else f"${mine.limit:.2f}"
+    workspace_stop = (
+        f"${settings.ai_daily_budget_usd:.2f}/day" if settings.ai_daily_budget_usd > 0 else "off"
+    )
     lines = [
-        "*ai budget — today (UTC)*",
-        f"• spent: *${status.spent:.4f}* of *{limit}* · *{status.calls}* calls",
-        f"• remaining: *{remaining}*",
+        "*ai usage — today (UTC)*",
+        f"• you: *${mine.spent:.4f}* · *{mine.calls}* calls · limit *{my_limit}*",
+        f"• workspace: *${status.spent:.4f}* · *{status.calls}* calls",
         "• resets at 00:00 UTC",
         "",
         "*limits*",
-        f"• per user: *{settings.ai_rate_limit_per_minute or 'off'}* calls/min",
-        f"• workspace: *{settings.ai_global_rate_limit_per_minute or 'off'}* calls/min",
+        f"• per user: *${settings.ai_user_daily_budget_usd:.2f}/day* (owner exempt)",
+        f"• bot-wide stop: *{workspace_stop}* · hack club ai enforces the account cap",
+        f"• requests: *{settings.ai_rate_limit_per_minute or 'off'}* per user/min · "
+        f"*{settings.ai_global_rate_limit_per_minute or 'off'}* workspace/min",
         f"• context: *{settings.ai_max_context_chars:,}* chars per request",
         f"• models: `{settings.ai_model}` → `{settings.ai_fallback_model or 'no fallback'}`",
     ]
-    rows = runtime.db.ai_usage(status.day)
+
+    rows = runtime.db.ai_usage(status.day, user_id=user)
     if rows:
         lines.append("")
-        lines.append("*breakdown*")
+        lines.append("*your breakdown*")
         for row in rows[:8]:
             lines.append(
                 f"• `{row['kind']}` · `{row['model']}` — {row['calls']} calls · "
                 f"${row['cost_usd']:.4f}"
             )
+
+    top = runtime.db.ai_usage_by_user(status.day, limit=5)
+    if top:
+        lines.append("")
+        lines.append("*top users*")
+        for row in top:
+            lines.append(f"• <@{row['user_id']}> — *${row['cost_usd']:.4f}* · {row['calls']} calls")
     await _say(client, command, "\n".join(lines), ephemeral=True)
 
 

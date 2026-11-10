@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS ai_usage (
     created_at TEXT NOT NULL,
     kind TEXT NOT NULL,
     model TEXT NOT NULL,
+    user_id TEXT NOT NULL DEFAULT '',
     prompt_tokens INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd REAL NOT NULL DEFAULT 0
@@ -157,6 +158,19 @@ class Database:
                 }
                 if "admin_note" not in columns:
                     conn.execute("ALTER TABLE access_requests ADD COLUMN admin_note TEXT")
+
+                usage_columns = {
+                    row["name"] for row in conn.execute("PRAGMA table_info(ai_usage)").fetchall()
+                }
+                if "user_id" not in usage_columns:
+                    # Older databases predate per-user spend tracking. Keep the
+                    # column here so the index below can be created after.
+                    conn.execute(
+                        "ALTER TABLE ai_usage ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"
+                    )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage (day, user_id)"
+                )
                 conn.commit()
             finally:
                 conn.close()
@@ -509,43 +523,69 @@ class Database:
         day: str,
         kind: str,
         model: str,
+        user_id: str = "",
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         cost_usd: float = 0.0,
     ) -> None:
         self._write(
-            "INSERT INTO ai_usage (day, created_at, kind, model, prompt_tokens, "
-            "completion_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO ai_usage (day, created_at, kind, model, user_id, prompt_tokens, "
+            "completion_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 day,
                 iso(),
                 kind,
                 model,
+                user_id or "",
                 max(0, int(prompt_tokens)),
                 max(0, int(completion_tokens)),
                 max(0.0, float(cost_usd)),
             ),
         )
 
-    def ai_spend(self, day: str) -> float:
-        row = self._one(
-            "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM ai_usage WHERE day = ?",
-            (day,),
-        )
+    def ai_spend(self, day: str, user_id: str | None = None) -> float:
+        if user_id is None:
+            row = self._one(
+                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM ai_usage WHERE day = ?",
+                (day,),
+            )
+        else:
+            row = self._one(
+                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM ai_usage "
+                "WHERE day = ? AND user_id = ?",
+                (day, user_id),
+            )
         return float(row["total"]) if row else 0.0
 
-    def ai_calls(self, day: str) -> int:
-        row = self._one("SELECT COUNT(*) AS n FROM ai_usage WHERE day = ?", (day,))
+    def ai_calls(self, day: str, user_id: str | None = None) -> int:
+        if user_id is None:
+            row = self._one("SELECT COUNT(*) AS n FROM ai_usage WHERE day = ?", (day,))
+        else:
+            row = self._one(
+                "SELECT COUNT(*) AS n FROM ai_usage WHERE day = ? AND user_id = ?",
+                (day, user_id),
+            )
         return int(row["n"]) if row else 0
 
-    def ai_usage(self, day: str) -> list[dict[str, Any]]:
+    def ai_usage(self, day: str, user_id: str | None = None) -> list[dict[str, Any]]:
+        where = "day = ?" if user_id is None else "day = ? AND user_id = ?"
+        params: tuple[Any, ...] = (day,) if user_id is None else (day, user_id)
         return self._all(
             "SELECT kind, model, COUNT(*) AS calls, "
             "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
             "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
             "COALESCE(SUM(cost_usd), 0) AS cost_usd "
-            "FROM ai_usage WHERE day = ? GROUP BY kind, model ORDER BY cost_usd DESC",
-            (day,),
+            f"FROM ai_usage WHERE {where} GROUP BY kind, model ORDER BY cost_usd DESC",
+            params,
+        )
+
+    def ai_usage_by_user(self, day: str, limit: int = 10) -> list[dict[str, Any]]:
+        return self._all(
+            "SELECT user_id, COUNT(*) AS calls, "
+            "COALESCE(SUM(cost_usd), 0) AS cost_usd "
+            "FROM ai_usage WHERE day = ? AND user_id != '' "
+            "GROUP BY user_id ORDER BY cost_usd DESC LIMIT ?",
+            (day, max(1, limit)),
         )
 
     # ---------------------------------------------------------------- threads

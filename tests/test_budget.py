@@ -16,10 +16,20 @@ from bot.ai.budget import (
 from bot.db import Database
 
 
-def make_budget(tmp_path, limit=2.5):
+def make_budget(tmp_path, limit=0.0, user_limit=0.50):
     db = Database(tmp_path / "budget.db")
     db.init()
-    return Budget(SimpleNamespace(ai_daily_budget_usd=limit), db), db
+    return (
+        Budget(
+            SimpleNamespace(
+                ai_daily_budget_usd=limit,
+                ai_user_daily_budget_usd=user_limit,
+                owner_user_id="U_OWNER",
+            ),
+            db,
+        ),
+        db,
+    )
 
 
 def test_known_model_pricing():
@@ -95,6 +105,48 @@ def test_zero_limit_means_unlimited(tmp_path):
     budget.record(kind="chat", model="openai/gpt-5.5", prompt_tokens=100_000, completion_tokens=10_000)
     assert not budget.exhausted()
     assert budget.status().remaining == float("inf")
+
+
+def test_per_user_spend_is_tracked_separately(tmp_path):
+    budget, db = make_budget(tmp_path)
+    budget.record(kind="chat", model="openai/gpt-5.6-luna", user_id="U1", prompt_tokens=10_000)
+    budget.record(kind="chat", model="openai/gpt-5.6-luna", user_id="U2", prompt_tokens=2_000)
+    day = utc_day()
+    assert db.ai_spend(day, user_id="U1") == pytest.approx(0.002)
+    assert db.ai_spend(day, user_id="U2") == pytest.approx(0.0004)
+    assert db.ai_spend(day) == pytest.approx(0.0024)
+    assert db.ai_calls(day, user_id="U1") == 1
+    assert {row["user_id"] for row in db.ai_usage_by_user(day)} == {"U1", "U2"}
+
+
+def test_user_limit_only_blocks_that_user(tmp_path):
+    budget, _ = make_budget(tmp_path, user_limit=0.001)
+    budget.record(kind="chat", model="openai/gpt-5.6-luna", user_id="U1", prompt_tokens=10_000)
+    assert budget.user_exhausted("U1")
+    assert not budget.user_exhausted("U2")
+    assert budget.user_status("U1").exhausted
+    assert not budget.status().exhausted
+
+
+def test_owner_is_never_capped(tmp_path):
+    budget, _ = make_budget(tmp_path, user_limit=0.0001)
+    budget.record(
+        kind="chat",
+        model="openai/gpt-5.6-luna",
+        user_id="U_OWNER",
+        prompt_tokens=1_000_000,
+    )
+    assert not budget.user_exhausted("U_OWNER")
+    assert budget.user_status("U_OWNER").limit == 0.0
+
+
+def test_user_exhaustion_returns_user_scope(tmp_path):
+    budget, _ = make_budget(tmp_path, user_limit=0.001)
+    budget.record(kind="chat", model="openai/gpt-5.6-luna", user_id="U1", prompt_tokens=10_000)
+    with pytest.raises(BudgetExceeded) as info:
+        raise BudgetExceeded(budget.user_status("U1"), scope="user")
+    assert info.value.scope == "user"
+    assert "user ai budget" in str(info.value)
 
 
 def test_explicit_image_cost(tmp_path):

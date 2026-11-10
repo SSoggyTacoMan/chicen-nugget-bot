@@ -143,7 +143,7 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
     user_name = await _user_name(client, user_id)
     channel_name = await _channel_name(client, channel)
     decision = await runtime.gate.decide(
-        text=text, channel_name=channel_name, user_name=user_name
+        text=text, channel_name=channel_name, user_name=user_name, user_id=user_id
     )
     if not decision.reply:
         return
