@@ -96,7 +96,8 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
 async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
     channel = event.get("channel")
     thread_ts = event.get("thread_ts")
-    if not channel or not thread_ts:
+    user_id = event.get("user")
+    if not channel or not thread_ts or not user_id:
         return
     if not runtime.settings.ai_allowed(channel):
         return
@@ -107,8 +108,25 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         return
     if f"<@{runtime.bot_user_id}>" in text:
         return  # app_mention owns this one
+    if user_retry_after(user_id):
+        return
+    if len(text) < 4:
+        return
+
+    jev_hint = ""
+    if runtime.gate is not None and runtime.settings.ai_gate_enabled:
+        user_name = await _user_name(client, user_id)
+        channel_name = await _channel_name(client, channel)
+        decision = await runtime.gate.decide(
+            text=text, channel_name=channel_name, user_name=user_name, user_id=user_id
+        )
+        if not decision.reply:
+            logger.info("gate suppressed thread continuation for %s in %s: %s", user_id, channel, decision.kind)
+            return
+        jev_hint = decision.hint()
+
     await _handle_channel(
-        event, client, text=text, thread_ts=thread_ts, trigger="thread_followup"
+        event, client, text=text, thread_ts=thread_ts, trigger="thread_followup", jev=jev_hint
     )
 
 
@@ -203,7 +221,7 @@ async def _handle_channel(
     conversation = f"ch:{channel}:{root_ts}"
     message_ts = event.get("ts")
 
-    if message_ts:
+    if message_ts and trigger == "mention":
         await react(client, channel, message_ts, "eyes")
     try:
         async with runtime.lock(conversation):
@@ -217,6 +235,8 @@ async def _handle_channel(
                 trigger=trigger,
                 jev=jev,
             )
+        if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
+            return
         for chunk in chunk_text(answer):
             await post(client, channel, chunk, thread_ts=root_ts)
         runtime.db.mark_thread(channel, root_ts)
@@ -229,5 +249,5 @@ async def _handle_channel(
             thread_ts=root_ts,
         )
     finally:
-        if message_ts:
+        if message_ts and trigger == "mention":
             await unreact(client, channel, message_ts, "eyes")
