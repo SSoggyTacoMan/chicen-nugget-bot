@@ -1,0 +1,44 @@
+name: logs
+
+# Read the bot log without SSH access. Useful from networks that block port 22.
+on:
+  workflow_dispatch:
+    inputs:
+      lines:
+        description: "how many lines to tail"
+        required: false
+        default: "120"
+
+jobs:
+  logs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SSH_OPTS: -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+      LINES: ${{ inputs.lines }}
+    steps:
+      - name: configure ssh
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H hackclub.app >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: tail log
+        run: |
+          set -euo pipefail
+          case "$LINES" in
+            ''|*[!0-9]*) echo "lines must be a number"; exit 1 ;;
+          esac
+          ssh $SSH_OPTS maaren@hackclub.app "
+            echo '--- service ---'
+            systemctl is-active chicen-nugget-bot || true
+            systemctl show -p ActiveEnterTimestamp --value chicen-nugget-bot || true
+            echo '--- log ---'
+            tail -n $LINES ~/slackbot/logs/bot.log
+          "
