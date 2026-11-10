@@ -40,6 +40,8 @@ def register(app) -> None:
 
 
 async def on_member_joined(event: dict[str, Any], client) -> None:
+    if runtime.db and runtime.db.kv_get("config:welcomer") == "false":
+        return
     settings = runtime.settings
     channel = event.get("channel")
     user_id = event.get("user")

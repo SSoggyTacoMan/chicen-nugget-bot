@@ -33,10 +33,24 @@ def register(app) -> None:
     app.view("access_deny_modal")(on_deny_submit)
 
 
+def access_channel_id() -> str | None:
+    if runtime.db:
+        override = runtime.db.kv_get("config:access_channel_id")
+        if override:
+            return override
+    return runtime.settings.access_channel_id
+
+
+def access_enabled() -> bool:
+    if runtime.db and runtime.db.kv_get("config:tier2") == "false":
+        return False
+    return bool(access_channel_id())
+
+
 # --------------------------------------------------------------------- panel
 async def ensure_panel(client, channel: str | None = None) -> str | None:
     settings = runtime.settings
-    if not settings.access_enabled:
+    if not access_enabled():
         return None
     channel = channel or settings.access_panel_channel_id
     if not channel and settings.watched_channel_ids:
@@ -128,7 +142,7 @@ def _request_modal() -> dict[str, Any]:
 
 
 async def _open_modal(client, trigger_id: str, user_id: str) -> None:
-    if not runtime.settings.access_enabled:
+    if not access_enabled():
         await post(client, user_id, "tier 2 access isn't set up yet. ask an admin.")
         return
     try:
@@ -151,7 +165,7 @@ async def on_request_submit(ack, body, view, client) -> None:
     user_id = (body.get("user") or {}).get("id")
     if not user_id:
         return
-    if not settings.access_enabled:
+    if not access_enabled():
         await post(client, user_id, "tier 2 access isn't set up yet. ask an admin.")
         return
 
@@ -162,13 +176,14 @@ async def on_request_submit(ack, body, view, client) -> None:
         await post(client, user_id, "you have to agree to the house rules first.")
         return
 
-    if settings.access_channel_id:
-        already = await is_channel_member(client, settings.access_channel_id, user_id)
+    target_channel = access_channel_id()
+    if target_channel:
+        already = await is_channel_member(client, target_channel, user_id)
         if already:
             await post(
                 client,
                 user_id,
-                f"you're already inside {channel_mention(settings.access_channel_id)} — "
+                f"you're already inside {channel_mention(target_channel)} — "
                 "the door's already open for you. :door:",
             )
             return
@@ -187,7 +202,7 @@ async def on_request_submit(ack, body, view, client) -> None:
                 await post(
                     client,
                     user_id,
-                    f"you were already approved for {channel_mention(settings.access_channel_id)}. "
+                    f"you were already approved for {channel_mention(target_channel or '')}. "
                     "if you're not in it, ask an admin to re-invite you.",
                 )
             else:
@@ -198,15 +213,15 @@ async def on_request_submit(ack, body, view, client) -> None:
 
     request_id = runtime.db.create_access_request(user_id, reason)
 
-    if settings.access_auto_approve and settings.access_channel_id:
-        ok, error = await invite_to_channel(client, settings.access_channel_id, user_id)
+    if settings.access_auto_approve and target_channel:
+        ok, error = await invite_to_channel(client, target_channel, user_id)
         if ok:
             runtime.db.decide_access(request_id, "approved", settings.owner_user_id or "auto")
             await post(
                 client,
                 user_id,
                 "the door swings open — you're in "
-                f"{channel_mention(settings.access_channel_id)}! :tada:",
+                f"{channel_mention(target_channel)}! :tada:",
             )
             await _log(
                 f"tier 2 request *#{request_id}* from <@{user_id}> auto-approved: "
@@ -315,7 +330,7 @@ async def _decision_blocks(
         label = ":white_check_mark: approved"
         detail = (
             f"the door swings open — approved by <@{admin_id}>, invited to "
-            f"{channel_mention(runtime.settings.access_channel_id)}."
+            f"{channel_mention(access_channel_id() or '')}."
         )
     else:
         label = ":x: denied"
@@ -352,7 +367,7 @@ async def on_approve(ack, body, client) -> None:
         return
 
     ok, error = await invite_to_channel(
-        client, runtime.settings.access_channel_id, request["user_id"]
+        client, access_channel_id() or "", request["user_id"]
     )
     if not ok:
         hint = {
@@ -370,7 +385,7 @@ async def on_approve(ack, body, client) -> None:
         client,
         request["user_id"],
         "the door swings open — you're in! welcome to "
-        f"{channel_mention(runtime.settings.access_channel_id)} :tada:",
+        f"{channel_mention(access_channel_id() or '')} :tada:",
     )
     await _log(f"tier 2 request *#{request_id}* approved by <@{admin_id}> for <@{request['user_id']}>.")
 

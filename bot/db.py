@@ -223,6 +223,9 @@ class Database:
             (key, value),
         )
 
+    def kv_del(self, key: str) -> None:
+        self._write("DELETE FROM kv WHERE key = ?", (key,))
+
     # -------------------------------------------------------------- members
     def record_join(
         self, user_id: str, username: str | None = None, channel_id: str | None = None
@@ -388,6 +391,21 @@ class Database:
                 )
                 conn.commit()
                 return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def cancel_reminders_by_kind(self, kind: str, user_id: str | None = None) -> int:
+        conn = self._connect()
+        try:
+            with self._write_lock:
+                query = "UPDATE reminders SET done = 1 WHERE done = 0 AND kind = ?"
+                params: list[Any] = [kind]
+                if user_id:
+                    query += " AND user_id = ?"
+                    params.append(user_id)
+                cur = conn.execute(query, params)
+                conn.commit()
+                return cur.rowcount
         finally:
             conn.close()
 

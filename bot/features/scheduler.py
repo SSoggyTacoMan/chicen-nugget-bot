@@ -52,6 +52,8 @@ async def _loop() -> None:
 
 
 def _ensure_digest_job() -> None:
+    if runtime.db and runtime.db.kv_get("config:daily_digest") == "false":
+        return
     settings = runtime.settings
     if not settings.daily_digest_time or not settings.owner_user_id:
         return
@@ -77,6 +79,8 @@ def _ensure_digest_job() -> None:
 
 
 def _ensure_recap_jobs() -> None:
+    if runtime.db and runtime.db.kv_get("config:recaps") == "false":
+        return
     settings = runtime.settings
     if not settings.recaps_enabled or not settings.owner_user_id:
         return
@@ -155,9 +159,16 @@ async def _deliver(reminder: dict) -> None:
     if client is None:
         return
     if reminder.get("kind") == "recap_public":
+        if runtime.db and runtime.db.kv_get("config:recaps") == "false":
+            logger.info("skipped recap_public: recaps disabled via config")
+            return
         await recaps.post_public_prompt(client)
         logger.info("delivered daily recap prompt")
         return
+    if reminder.get("kind") == "recap_reminder":
+        if runtime.db and runtime.db.kv_get("config:recaps") == "false":
+            logger.info("skipped recap_reminder: recaps disabled via config")
+            return
     if reminder.get("kind") == "digest":
         text = build_digest(runtime.db, runtime.settings, tzinfo())
     else:

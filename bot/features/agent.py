@@ -8,7 +8,15 @@ from typing import Any
 
 from bot.runtime import runtime
 from bot.ai.limits import user_retry_after
-from bot.slack_api import channel_info, post, post_ephemeral, react, unreact, user_info
+from bot.slack_api import (
+    channel_info,
+    fetch_slack_images,
+    post,
+    post_ephemeral,
+    react,
+    unreact,
+    user_info,
+)
 from bot.utils.text import chunk_text, display_name, strip_mentions
 
 logger = logging.getLogger(__name__)
@@ -20,7 +28,8 @@ _names: dict[str, str] = {}
 
 
 async def on_message(event: dict[str, Any], client) -> None:
-    if event.get("subtype") or event.get("bot_id"):
+    subtype = event.get("subtype")
+    if (subtype and subtype != "file_share") or event.get("bot_id"):
         return
     user_id = event.get("user")
     if not user_id or user_id == runtime.bot_user_id:
@@ -36,7 +45,8 @@ async def on_message(event: dict[str, Any], client) -> None:
 
 
 async def on_app_mention(event: dict[str, Any], client) -> None:
-    if event.get("subtype") or event.get("bot_id"):
+    subtype = event.get("subtype")
+    if (subtype and subtype != "file_share") or event.get("bot_id"):
         return
     channel = event.get("channel") or ""
     # DM mentions are handled by the message event.
@@ -44,8 +54,12 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
         return
     if not runtime.settings.ai_allowed(channel):
         return
+    images = await fetch_slack_images(event, runtime.settings.slack_bot_token)
+    text = strip_mentions(event.get("text") or "").strip()
+    if not text and images:
+        text = "What is in this image?"
     await _handle_channel(
-        event, client, text=strip_mentions(event.get("text") or ""), trigger="mention"
+        event, client, text=text, trigger="mention", images=images
     )
 
 
@@ -67,9 +81,12 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
         )
         return
 
+    images = await fetch_slack_images(event, settings.slack_bot_token)
     text = (event.get("text") or "").strip()
-    if not text:
+    if not text and not images:
         return
+    if not text and images:
+        text = "Describe or look at this image."
     retry = user_retry_after(user_id)
     if retry:
         await post(client, event["channel"], f"slow down a lil — try again in {retry}s :3")
@@ -85,6 +102,7 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
                 thread_ts=None,
                 is_dm=True,
                 trigger="dm",
+                images=images,
             )
         except Exception:  # noqa: BLE001
             logger.exception("dm agent turn failed")
@@ -103,14 +121,17 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         return
     if not runtime.db.is_thread(channel, thread_ts):
         return
+    images = await fetch_slack_images(event, runtime.settings.slack_bot_token)
     text = (event.get("text") or "").strip()
-    if not text:
+    if not text and not images:
         return
+    if not text and images:
+        text = "What is this?"
     if f"<@{runtime.bot_user_id}>" in text:
         return  # app_mention owns this one
     if user_retry_after(user_id):
         return
-    if len(text) < 4:
+    if len(text) < 4 and not images:
         return
 
     jev_hint = ""
@@ -126,12 +147,20 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         jev_hint = decision.hint()
 
     await _handle_channel(
-        event, client, text=text, thread_ts=thread_ts, trigger="thread_followup", jev=jev_hint
+        event,
+        client,
+        text=text,
+        thread_ts=thread_ts,
+        trigger="thread_followup",
+        jev=jev_hint,
+        images=images,
     )
 
 
 async def _maybe_ambient(event: dict[str, Any], client) -> None:
     """Let jev decide whether an unaddressed channel message deserves a reply."""
+    if runtime.db and runtime.db.kv_get("config:ambient_ai") == "false":
+        return
     settings = runtime.settings
     channel = event.get("channel")
     user_id = event.get("user")
@@ -200,6 +229,7 @@ async def _handle_channel(
     thread_ts: str | None = None,
     trigger: str = "mention",
     jev: str = "",
+    images: list[str] | None = None,
 ) -> None:
     settings = runtime.settings
     channel = event.get("channel")
@@ -209,8 +239,10 @@ async def _handle_channel(
     if not settings.ai_enabled or runtime.agent is None:
         return
     text = text.strip()
-    if not text:
+    if not text and not images:
         text = "hey"
+    elif not text and images:
+        text = "Look at this image."
     retry = user_retry_after(user_id)
     if retry:
         await post_ephemeral(
@@ -234,6 +266,7 @@ async def _handle_channel(
                 is_dm=False,
                 trigger=trigger,
                 jev=jev,
+                images=images,
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return
