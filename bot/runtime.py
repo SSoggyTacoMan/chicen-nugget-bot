@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -32,6 +32,8 @@ class Runtime:
     user_client: AsyncWebClient | None = None
     bot_user_id: str = ""
     bot_id: str = ""
+    user_id: str = ""
+    user_gateway: Any | None = None
     agent: "Agent | None" = None
     gate: "Gate | None" = None
     budget: "Budget | None" = None
