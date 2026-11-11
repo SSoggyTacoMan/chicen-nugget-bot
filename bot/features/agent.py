@@ -32,7 +32,7 @@ async def on_message(event: dict[str, Any], client) -> None:
     if (subtype and subtype != "file_share") or event.get("bot_id"):
         return
     user_id = event.get("user")
-    if not user_id or user_id == runtime.bot_user_id:
+    if not user_id or user_id == runtime.bot_user_id or (runtime.user_id and user_id == runtime.user_id):
         return
 
     channel_type = event.get("channel_type")
@@ -47,6 +47,9 @@ async def on_message(event: dict[str, Any], client) -> None:
 async def on_app_mention(event: dict[str, Any], client) -> None:
     subtype = event.get("subtype")
     if (subtype and subtype != "file_share") or event.get("bot_id"):
+        return
+    user_id = event.get("user")
+    if not user_id or user_id == runtime.bot_user_id or (runtime.user_id and user_id == runtime.user_id):
         return
     channel = event.get("channel") or ""
     # DM mentions are handled by the message event.
