@@ -93,3 +93,9 @@ def test_extract_id():
     assert extract_id("C0C83BAUZCK", "#") == "C0C83BAUZCK"
     assert extract_id("G0C83BAUZCK", "#") == "G0C83BAUZCK"
     assert extract_id("maaren", "@") is None
+    assert extract_id("general", "#") is None
+    assert extract_id("#general", "#") is None
+    assert extract_id("wendy", "@") is None
+    assert extract_id("@wendy", "@") is None
+    assert extract_id("ubuntu", "@") is None
+    assert extract_id("charles", "#") is None
