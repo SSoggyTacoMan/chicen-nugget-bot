@@ -109,6 +109,8 @@ def test_toolbox_has_expanded_tools():
     assert "dog_fact" in names
     assert "taco_recipe" in names
     assert "urban_dict" in names
+    assert "system_diagnostics" in names
+    assert "manage_tasks" in names
 
 
 def test_owner_only_tools_guard():
@@ -152,6 +154,9 @@ def test_owner_only_tools_guard():
 
         res7 = await box.execute("http_status", {"url": "https://example.com"}, ctx)
         assert "only the owner/admin" in res7
+
+        res8 = await box.execute("system_diagnostics", {}, ctx)
+        assert "only the owner/admin" in res8
 
     asyncio.run(run())
 

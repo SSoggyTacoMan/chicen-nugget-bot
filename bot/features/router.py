@@ -28,6 +28,8 @@ from bot.features.commands import (
     cmd_roll,
     cmd_schedule,
     cmd_stats,
+    cmd_sysinfo,
+    cmd_todo,
     cmd_whois,
 )
 from bot.features.nuggets import cmd_nugget
@@ -65,6 +67,13 @@ SUBCOMMANDS: dict[str, Handler] = {
     "recap": cmd_recap,
     "config": cmd_config,
     "settings": cmd_config,
+    "todo": cmd_todo,
+    "todos": cmd_todo,
+    "task": cmd_todo,
+    "tasks": cmd_todo,
+    "sysinfo": cmd_sysinfo,
+    "diagnostics": cmd_sysinfo,
+    "sys": cmd_sysinfo,
     "ask": cmd_ask,
     "summarize": cmd_summarize,
     "summary": cmd_summarize,

@@ -14,6 +14,7 @@ import imaplib
 import ipaddress
 import json
 import logging
+import os
 import random
 import re
 import socket
@@ -31,8 +32,13 @@ from slack_sdk.web.async_client import AsyncWebClient
 from bot.config import Settings
 from bot.db import Database
 from bot.features.nuggets import random_fact
-from bot.features.stats import format_stats
+from bot.features.stats import (
+    collect_system_diagnostics,
+    format_stats,
+    format_system_diagnostics,
+)
 from bot.reminders import confirmation_text, dm_target, create_reminder, reminder_line
+from bot.runtime import runtime
 from bot.slack_api import all_channels, all_users, channel_info, error_code, post, user_info
 from bot.utils import dice
 from bot.utils.text import extract_id
@@ -551,19 +557,28 @@ class Toolbox:
             ),
             tool(
                 "github_info",
-                "Look up a GitHub user profile, repository details, recent commits, or latest release.",
+                "Look up GitHub repositories, issues, pull requests, commits, releases, or user profiles.",
                 {
                     "action": {
                         "type": "string",
-                        "enum": ["user", "repo", "commits", "release"],
-                        "description": "Action: 'user', 'repo', 'commits', or 'release'.",
+                        "enum": ["user", "repo", "commits", "release", "issues", "prs", "issue"],
+                        "description": "Action: 'repo' (default), 'issues', 'prs', 'issue', 'commits', 'release', or 'user'.",
                     },
                     "target": {
                         "type": "string",
-                        "description": "Username (for 'user') or 'owner/repo' (for 'repo', 'commits', 'release').",
+                        "description": "Username (for 'user'), 'owner/repo' (for 'repo', 'commits', 'release', 'issues', 'prs'), or 'owner/repo#123' (for 'issue'). Defaults to 'SSoggyTacoMan/chicen-nugget-bot'.",
+                    },
+                    "state": {
+                        "type": "string",
+                        "enum": ["open", "closed", "all"],
+                        "description": "Filter state for 'issues' or 'prs': 'open' (default), 'closed', or 'all'.",
+                    },
+                    "number": {
+                        "type": "integer",
+                        "description": "Specific issue or pull request number (for action='issue').",
                     },
                 },
-                ["action", "target"],
+                ["action"],
             ),
             tool(
                 "run_code",
@@ -625,6 +640,27 @@ class Toolbox:
                         "type": "string",
                         "description": "New value to set (e.g. 'off', 'on', 'false', 'true', or channel ID).",
                     },
+                },
+                ["action"],
+            ),
+            tool(
+                "system_diagnostics",
+                "Inspect server and host diagnostics: host OS, uptime, CPU load, memory usage, disk space, Python runtime, and SQLite database size. Owner/admin only.",
+                {},
+                [],
+            ),
+            tool(
+                "manage_tasks",
+                "Manage a persistent personal to-do checklist in SQLite: add, list, complete, uncomplete, delete, or clear tasks.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "list", "complete", "uncomplete", "delete", "clear_completed"],
+                        "description": "Action: 'add', 'list', 'complete', 'uncomplete', 'delete', or 'clear_completed'.",
+                    },
+                    "title": {"type": "string", "description": "Task description for action='add'."},
+                    "task_id": {"type": "integer", "description": "Task ID number for complete, uncomplete, or delete."},
+                    "show_all": {"type": "boolean", "description": "Whether to list completed tasks as well as pending. Default false."},
                 },
                 ["action"],
             ),
@@ -1424,9 +1460,16 @@ class Toolbox:
     async def _tool_github_info(self, args: dict[str, Any], ctx: ToolContext) -> str:
         action = str(args.get("action") or "repo").lower().strip()
         target = str(args.get("target") or "SSoggyTacoMan/chicen-nugget-bot").strip()
-        headers = {"User-Agent": "chicen-nugget-bot"}
+        state = str(args.get("state") or "open").lower().strip()
+        if state not in {"open", "closed", "all"}:
+            state = "open"
+        headers = {"User-Agent": "chicen-nugget-bot", "Accept": "application/vnd.github+json"}
+        token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
         try:
-            async with httpx.AsyncClient(timeout=12, headers=headers) as http:
+            async with httpx.AsyncClient(timeout=12, headers=headers, follow_redirects=True) as http:
                 if action == "user":
                     resp = await http.get(f"https://api.github.com/users/{quote(target)}")
                     if resp.status_code == 404:
@@ -1466,6 +1509,73 @@ class Toolbox:
                         "name": rel.get("name"),
                         "published_at": rel.get("published_at"),
                         "body": (rel.get("body") or "")[:500],
+                    })
+                if action == "issues":
+                    resp = await http.get(f"https://api.github.com/repos/{target}/issues?state={state}&per_page=10")
+                    if resp.status_code == 404:
+                        return f"github repo '{target}' not found"
+                    resp.raise_for_status()
+                    issues = [
+                        {
+                            "number": i["number"],
+                            "title": i.get("title"),
+                            "author": (i.get("user") or {}).get("login"),
+                            "state": i.get("state"),
+                            "comments": i.get("comments", 0),
+                            "labels": [l.get("name") for l in i.get("labels", []) if isinstance(l, dict)],
+                            "created_at": i.get("created_at"),
+                            "url": i.get("html_url"),
+                        }
+                        for i in (resp.json() or [])
+                        if isinstance(i, dict) and "pull_request" not in i
+                    ][:5]
+                    return _json(issues) if issues else f"no {state} issues found for '{target}'"
+                if action == "prs":
+                    resp = await http.get(f"https://api.github.com/repos/{target}/pulls?state={state}&per_page=5")
+                    if resp.status_code == 404:
+                        return f"github repo '{target}' not found"
+                    resp.raise_for_status()
+                    prs = [
+                        {
+                            "number": p["number"],
+                            "title": p.get("title"),
+                            "author": (p.get("user") or {}).get("login"),
+                            "state": p.get("state"),
+                            "draft": p.get("draft", False),
+                            "branch": f"{(p.get('head') or {}).get('ref')} -> {(p.get('base') or {}).get('ref')}",
+                            "created_at": p.get("created_at"),
+                            "url": p.get("html_url"),
+                        }
+                        for p in (resp.json() or [])
+                        if isinstance(p, dict)
+                    ][:5]
+                    return _json(prs) if prs else f"no {state} pull requests found for '{target}'"
+                if action == "issue":
+                    repo = target
+                    number = args.get("number")
+                    if "#" in target:
+                        repo, _, num_str = target.partition("#")
+                        try:
+                            number = int(num_str)
+                        except ValueError:
+                            pass
+                    if not number:
+                        return _error("issue number is required for action='issue'")
+                    resp = await http.get(f"https://api.github.com/repos/{repo}/issues/{number}")
+                    if resp.status_code == 404:
+                        return f"issue #{number} not found in '{repo}'"
+                    resp.raise_for_status()
+                    it = resp.json()
+                    return _json({
+                        "number": it.get("number"),
+                        "title": it.get("title"),
+                        "author": (it.get("user") or {}).get("login"),
+                        "state": it.get("state"),
+                        "labels": [l.get("name") for l in it.get("labels", []) if isinstance(l, dict)],
+                        "comments": it.get("comments", 0),
+                        "created_at": it.get("created_at"),
+                        "body": (it.get("body") or "")[:500],
+                        "url": it.get("html_url"),
                     })
                 # default action == "repo"
                 resp = await http.get(f"https://api.github.com/repos/{target}")
@@ -1769,6 +1879,71 @@ class Toolbox:
             return f"updated *{key}* to `{normalized_val}`."
 
         return _error(f"unknown action '{action}'")
+
+    async def _tool_system_diagnostics(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can inspect system diagnostics")
+        info = collect_system_diagnostics(self.settings, ctx.db, runtime.started_at)
+        return format_system_diagnostics(info)
+
+    async def _tool_manage_tasks(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        action = str(args.get("action") or "list").lower().strip()
+        user_id = ctx.user_id
+
+        if action == "add":
+            title = str(args.get("title") or "").strip()
+            if not title:
+                return _error("task title is required")
+            task_id = ctx.db.add_task(user_id, title)
+            return f":white_check_mark: added task `#{task_id}`: {title}"
+
+        if action == "list":
+            show_all = bool(args.get("show_all", False))
+            tasks = ctx.db.list_tasks(user_id, show_all=show_all)
+            if not tasks:
+                return "you don't have any pending tasks! :tada:" if not show_all else "no tasks recorded."
+            lines = [f"*your tasks ({'all' if show_all else 'pending'}):*"]
+            for t in tasks:
+                box = ":white_check_mark:" if t["done"] else ":white_square:"
+                title = f"~{t['title']}~" if t["done"] else t["title"]
+                lines.append(f"{box} `#{t['id']}` {title}")
+            return "\n".join(lines)
+
+        if action == "complete":
+            try:
+                task_id = int(args.get("task_id") or 0)
+            except (ValueError, TypeError):
+                task_id = 0
+            if not task_id:
+                return _error("task_id is required")
+            ok = ctx.db.complete_task(task_id, user_id)
+            return f":white_check_mark: completed task `#{task_id}`" if ok else f"task `#{task_id}` not found"
+
+        if action == "uncomplete":
+            try:
+                task_id = int(args.get("task_id") or 0)
+            except (ValueError, TypeError):
+                task_id = 0
+            if not task_id:
+                return _error("task_id is required")
+            ok = ctx.db.uncomplete_task(task_id, user_id)
+            return f":white_square: reopened task `#{task_id}`" if ok else f"task `#{task_id}` not found"
+
+        if action == "delete":
+            try:
+                task_id = int(args.get("task_id") or 0)
+            except (ValueError, TypeError):
+                task_id = 0
+            if not task_id:
+                return _error("task_id is required")
+            ok = ctx.db.delete_task(task_id, user_id)
+            return f":wastebasket: deleted task `#{task_id}`" if ok else f"task `#{task_id}` not found"
+
+        if action == "clear_completed":
+            count = ctx.db.clear_completed_tasks(user_id)
+            return f":wastebasket: cleared {count} completed task(s)."
+
+        return _error(f"unknown task action: {action}")
 
     # ---------------------------------------------------------------- helpers
     async def _resolve_channel(self, ctx: ToolContext, value: str) -> str | None:

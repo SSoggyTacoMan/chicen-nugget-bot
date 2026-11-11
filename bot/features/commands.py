@@ -9,7 +9,13 @@ import time
 from typing import Any
 
 from bot.runtime import runtime
-from bot.features.stats import build_digest, format_stats
+from bot.features.stats import (
+    build_digest,
+    collect_system_diagnostics,
+    format_stats,
+    format_system_diagnostics,
+    format_uptime,
+)
 from bot.reminders import confirmation_text, create_reminder, dm_target, reminder_line
 from bot.slack_api import (
     all_channels,
@@ -57,7 +63,14 @@ HELP = """*{bot} — everything lives under `/nugget`*
 • `/nugget budget` — admin: today's ai spend and limits
 • `/nugget forget` — wipe stored ai memory (DM or channel)
 
-*admin / config*
+*tasks*
+• `/nugget todo` — list your pending tasks (`/nugget todo all` for all)
+• `/nugget todo add <text>` — add a new task
+• `/nugget todo done <id>` — complete a task
+• `/nugget todo rm <id>` — remove a task
+
+*developer & admin*
+• `/nugget sysinfo` — admin: host diagnostics (RAM, CPU, disk, commit)
 • `/nugget config` — view or change runtime settings (recaps, tier2, welcomer, etc.)
 • `/nugget stats` — admin workspace stats
 • `/nugget digest` — admin: daily digest now
@@ -91,7 +104,7 @@ async def cmd_ping(ack, command, client) -> None:
         client,
         command["channel_id"],
         f":ping_pong: pong — {settings.bot_name} is awake "
-        f"({elapsed:.0f} ms api round trip, up {_uptime()}). ai: {ai}",
+        f"({elapsed:.0f} ms api round trip, up {format_uptime(runtime.started_at)}). ai: {ai}",
     )
 
 
@@ -524,24 +537,102 @@ async def cmd_config(ack, command, client) -> None:
     await _say(client, command, f":white_check_mark: updated *{key}* to `{norm}`.", ephemeral=True)
 
 
+async def cmd_sysinfo(ack, command, client) -> None:
+    await ack()
+    user = command.get("user_id")
+    if not runtime.settings.is_admin(user):
+        await _say(client, command, "only admins can inspect system diagnostics.", ephemeral=True)
+        return
+    info = collect_system_diagnostics(runtime.settings, runtime.db, runtime.started_at)
+    await _say(client, command, format_system_diagnostics(info), ephemeral=True)
+
+
+async def cmd_todo(ack, command, client) -> None:
+    await ack()
+    user = command.get("user_id")
+    text = (command.get("text") or "").strip()
+    parts = text.split(maxsplit=1)
+    sub = parts[0].lower() if parts else "list"
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in {"list", "show", "all", "ls"}:
+        show_all = sub == "all" or arg == "all"
+        tasks = runtime.db.list_tasks(user, show_all=show_all) if runtime.db else []
+        if not tasks:
+            msg = (
+                "you don't have any pending tasks! :tada:"
+                if not show_all
+                else "you don't have any tasks recorded yet."
+            )
+            await _say(client, command, msg, ephemeral=True)
+            return
+        lines = [f"*your tasks ({'all' if show_all else 'pending'}):*"]
+        for t in tasks:
+            box = ":white_check_mark:" if t["done"] else ":white_square:"
+            title = f"~{t['title']}~" if t["done"] else t["title"]
+            lines.append(f"{box} `#{t['id']}` {title}")
+        lines.append("\n_use `/nugget todo add <text>`, `/nugget todo done <id>`, `/nugget todo rm <id>`_")
+        await _say(client, command, "\n".join(lines), ephemeral=True)
+        return
+
+    if sub in {"add", "new", "+", "create"}:
+        if not arg:
+            await _say(client, command, "usage: `/nugget todo add <task description>`", ephemeral=True)
+            return
+        task_id = runtime.db.add_task(user, arg) if runtime.db else 0
+        await _say(client, command, f":white_check_mark: added task `#{task_id}`: {arg}", ephemeral=True)
+        return
+
+    if sub in {"done", "complete", "check", "finish", "x"}:
+        try:
+            task_id = int(arg.lstrip("#"))
+        except ValueError:
+            await _say(client, command, "usage: `/nugget todo done <id>`", ephemeral=True)
+            return
+        ok = runtime.db.complete_task(task_id, user) if runtime.db else False
+        if ok:
+            await _say(client, command, f":white_check_mark: completed task `#{task_id}`! :tada:", ephemeral=True)
+        else:
+            await _say(client, command, f"task `#{task_id}` not found in your list.", ephemeral=True)
+        return
+
+    if sub in {"undone", "reopen", "uncheck"}:
+        try:
+            task_id = int(arg.lstrip("#"))
+        except ValueError:
+            await _say(client, command, "usage: `/nugget todo undone <id>`", ephemeral=True)
+            return
+        ok = runtime.db.uncomplete_task(task_id, user) if runtime.db else False
+        if ok:
+            await _say(client, command, f":white_square: reopened task `#{task_id}`.", ephemeral=True)
+        else:
+            await _say(client, command, f"task `#{task_id}` not found in your list.", ephemeral=True)
+        return
+
+    if sub in {"rm", "delete", "del", "remove"}:
+        try:
+            task_id = int(arg.lstrip("#"))
+        except ValueError:
+            await _say(client, command, "usage: `/nugget todo rm <id>`", ephemeral=True)
+            return
+        ok = runtime.db.delete_task(task_id, user) if runtime.db else False
+        if ok:
+            await _say(client, command, f":wastebasket: deleted task `#{task_id}`.", ephemeral=True)
+        else:
+            await _say(client, command, f"task `#{task_id}` not found in your list.", ephemeral=True)
+        return
+
+    if sub in {"clear", "cleanup", "prune"}:
+        count = runtime.db.clear_completed_tasks(user) if runtime.db else 0
+        await _say(client, command, f":wastebasket: cleared {count} completed task(s).", ephemeral=True)
+        return
+
+    # Treat bare `/nugget todo buy milk` as adding a task directly
+    task_id = runtime.db.add_task(user, text) if runtime.db else 0
+    await _say(client, command, f":white_check_mark: added task `#{task_id}`: {text}", ephemeral=True)
+
+
 # ------------------------------------------------------------------- helpers
-def _uptime() -> str:
-    if not runtime.started_at:
-        return "just now"
-    seconds = max(0, int(time.time() - runtime.started_at))
-    days, rem = divmod(seconds, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, _ = divmod(rem, 60)
-    parts = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes or not parts:
-        parts.append(f"{minutes}m")
-    return " ".join(parts)
-
-
 async def _say(client, command: dict[str, Any], text: str, *, ephemeral: bool = True) -> None:
     if ephemeral:
         await post_ephemeral(client, command["channel_id"], command["user_id"], text)
