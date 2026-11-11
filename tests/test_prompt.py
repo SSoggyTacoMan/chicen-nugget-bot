@@ -18,6 +18,9 @@ REQUIRED = {
     "imagine_model",
     "gate_model",
     "repo_url",
+    "bot_user_id",
+    "assistant_user_id",
+    "active_identity",
 }
 
 

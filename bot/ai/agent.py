@@ -13,6 +13,7 @@ from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens
 from bot.ai.tools import ToolContext, Toolbox, format_now
 from bot.config import Settings
 from bot.db import Database
+from bot.runtime import runtime
 from bot.slack_api import channel_info, user_info
 from bot.utils.text import display_name, format_mrkdwn
 from bot.utils.tz import tzinfo
@@ -66,6 +67,7 @@ class Agent:
         client,
         user_client=None,
         bot_user_id: str,
+        user_id: str = "",
         budget: Budget | None = None,
     ) -> None:
         self.settings = settings
@@ -73,6 +75,7 @@ class Agent:
         self.client = client
         self.user_client = user_client
         self.bot_user_id = bot_user_id
+        self.user_id = user_id
         self.budget = budget or Budget(settings, db)
         self.llm = AsyncOpenAI(
             api_key=settings.ai_api_key,
@@ -103,11 +106,21 @@ class Agent:
             return "my ai brain isn't configured yet. add AI_API_KEY and restart me."
 
         active_client = client or self.client
+        is_user_identity = bool(self.user_client and active_client == self.user_client)
+        active_identity = (
+            "Chicen Nugget Boi (personal assistant user account)"
+            if is_user_identity
+            else "Chicen Nugget Bot (workspace bot app)"
+        )
+        assistant_id = self.user_id or getattr(runtime, "user_id", "") or "unknown"
         history = self.db.history(conversation, self.settings.ai_history_limit)
         role = "owner" if user_id == self.settings.owner_user_id else "guest"
         location = await self._location(channel_id, is_dm, client=active_client)
         system = (
             self.system_template.replace("{bot_name}", self.settings.bot_name)
+            .replace("{bot_user_id}", self.bot_user_id or "unknown")
+            .replace("{assistant_user_id}", assistant_id)
+            .replace("{active_identity}", active_identity)
             .replace("{now}", format_now(self.settings))
             .replace("{user_id}", user_id)
             .replace("{is_owner}", "yes" if role == "owner" else "no")
@@ -150,6 +163,7 @@ class Agent:
             is_dm=is_dm,
             is_owner=user_id == self.settings.owner_user_id,
             is_admin=self.settings.is_admin(user_id),
+            bot_client=self.client,
         )
 
         answer = ""

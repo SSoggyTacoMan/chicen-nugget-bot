@@ -960,6 +960,241 @@ def test_send_dm_resolves_bare_id_and_me():
     asyncio.run(run())
 
 
+def test_send_dm_and_post_message_as_user():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.tools import Toolbox, ToolContext
+
+    settings = MagicMock()
+    settings.owner_user_id = "U091GMQ14KV"
+    box = Toolbox(settings)
+
+    bot_client = AsyncMock()
+    user_client = AsyncMock()
+
+    bot_client.users_info = AsyncMock(return_value={"user": {"id": "U123456789", "name": "target"}})
+    bot_client.conversations_open = AsyncMock(return_value={"channel": {"id": "D111111111"}})
+    bot_client.chat_postMessage = AsyncMock(return_value=MagicMock(data={"ok": True, "ts": "111.000"}))
+
+    user_client.conversations_open = AsyncMock(return_value={"channel": {"id": "D222222222"}})
+    user_client.chat_postMessage = AsyncMock(return_value=MagicMock(data={"ok": True, "ts": "222.000"}))
+
+    ctx = ToolContext(
+        db=MagicMock(),
+        settings=settings,
+        client=bot_client,
+        user_client=user_client,
+        bot_user_id="U_BOT",
+        user_id="U091GMQ14KV",
+        channel_id="C123456789",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+        bot_client=bot_client,
+    )
+
+    async def run():
+        # 1. send_dm default (as bot)
+        res_dm_bot = await box.execute("send_dm", {"user": "U123456789", "text": "hello from bot"}, ctx)
+        assert "sent a DM to <@U123456789> as Bot app." in res_dm_bot
+        bot_client.chat_postMessage.assert_called_once()
+        user_client.chat_postMessage.assert_not_called()
+
+        # 2. send_dm as_user=True (as user assistant)
+        res_dm_user = await box.execute(
+            "send_dm", {"user": "U123456789", "text": "hello from boi", "as_user": True}, ctx
+        )
+        assert "sent a DM to <@U123456789> as Boi (user account)." in res_dm_user
+        user_client.chat_postMessage.assert_called_once()
+
+        # 3. post_message default (as bot)
+        res_post_bot = await box.execute(
+            "post_message", {"channel": "C123456789", "text": "bot announcement"}, ctx
+        )
+        assert "posted to <#C123456789>" in res_post_bot
+        assert "as Bot app" in res_post_bot
+
+        # 4. post_message as_user=True (as user assistant)
+        res_post_user = await box.execute(
+            "post_message", {"channel": "C123456789", "text": "boi announcement", "as_user": True}, ctx
+        )
+        assert "posted to <#C123456789>" in res_post_user
+        assert "as Boi (user account)" in res_post_user
+
+        # 5. Missing user_client error when as_user=True
+        ctx_no_user = ToolContext(
+            db=MagicMock(),
+            settings=settings,
+            client=bot_client,
+            user_client=None,
+            bot_user_id="U_BOT",
+            user_id="U091GMQ14KV",
+            channel_id="C123456789",
+            thread_ts=None,
+            is_dm=True,
+            is_owner=True,
+            is_admin=True,
+            bot_client=bot_client,
+        )
+        err = await box.execute("post_message", {"channel": "C123456789", "text": "hi", "as_user": True}, ctx_no_user)
+        assert "user client is not configured" in err
+
+    asyncio.run(run())
+
+
+def test_slack_status_and_dnd_tools():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.tools import Toolbox, ToolContext
+
+    settings = MagicMock()
+    settings.owner_user_id = "U_OWNER"
+    box = Toolbox(settings)
+
+    user_client = AsyncMock()
+    user_client.users_profile_get = AsyncMock(
+        return_value={"profile": {"status_text": "coding", "status_emoji": ":technologist:", "status_expiration": 12345}}
+    )
+    user_client.users_profile_set = AsyncMock(return_value={"ok": True})
+    user_client.dnd_info = AsyncMock(
+        return_value={"dnd_enabled": True, "snooze_enabled": True, "snooze_endtime": 1234567, "snooze_remaining": 60}
+    )
+    user_client.dnd_setSnooze = AsyncMock(return_value={"ok": True, "snooze_endtime": 9999999})
+    user_client.dnd_endSnooze = AsyncMock(return_value={"ok": True})
+
+    ctx = ToolContext(
+        db=MagicMock(),
+        settings=settings,
+        client=AsyncMock(),
+        user_client=user_client,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="D1",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+    )
+
+    async def run():
+        # status get
+        res_get = await box.execute("slack_status", {"action": "get"}, ctx)
+        assert "coding" in res_get
+        assert ":technologist:" in res_get
+
+        # status set
+        res_set = await box.execute("slack_status", {"action": "set", "text": "away", "emoji": ":palm_tree:", "minutes": 30}, ctx)
+        assert "updated Slack status: :palm_tree: away" in res_set
+        user_client.users_profile_set.assert_called()
+
+        # status clear
+        res_clear = await box.execute("slack_status", {"action": "clear"}, ctx)
+        assert "cleared Slack status." in res_clear
+
+        # dnd info
+        res_dnd_info = await box.execute("slack_dnd", {"action": "info"}, ctx)
+        assert "snooze_enabled" in res_dnd_info
+
+        # dnd snooze
+        res_snooze = await box.execute("slack_dnd", {"action": "snooze", "minutes": 45}, ctx)
+        assert "snoozed notifications for 45 minute(s)" in res_snooze
+        user_client.dnd_setSnooze.assert_called_with(num_minutes=45)
+
+        # dnd end
+        res_end = await box.execute("slack_dnd", {"action": "end"}, ctx)
+        assert "ended DND snooze." in res_end
+        user_client.dnd_endSnooze.assert_called_once()
+
+    asyncio.run(run())
+
+
+def test_agent_active_identity_injection(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.agent import Agent
+    from bot.db import Database
+
+    db = Database(str(tmp_path / "ident_test.db"))
+    db.init()
+
+    settings = MagicMock()
+    settings.bot_name = "Chicen Nugget"
+    settings.ai_enabled = True
+    settings.ai_api_key = "test-key"
+    settings.ai_base_url = "https://ai.example.com"
+    settings.ai_model = "test-model"
+    settings.ai_fallback_model = ""
+    settings.imagine_model = "test-img"
+    settings.ai_gate_model = "test-gate"
+    settings.ai_max_context_chars = 1000
+    settings.ai_history_limit = 5
+    settings.owner_user_id = "U_OWNER"
+    settings.repo_url = "https://github.com/repo"
+    settings.is_admin.return_value = False
+
+    bot_client = AsyncMock()
+    bot_client.conversations_info = AsyncMock(return_value={"channel": {"name": "general", "is_private": False}})
+    user_client = AsyncMock()
+    user_client.conversations_info = AsyncMock(return_value={"channel": {"name": "general", "is_private": False}})
+
+    agent = Agent(
+        settings,
+        db,
+        client=bot_client,
+        user_client=user_client,
+        bot_user_id="U0CGC8SJ8R0",
+        user_id="U0CGW7W9FLL",
+    )
+
+    captured_system_messages = []
+
+    async def fake_chat(messages, *args, **kwargs):
+        for m in messages:
+            if m.get("role") == "system":
+                captured_system_messages.append(m["content"])
+        choice = MagicMock()
+        choice.message.content = "pong"
+        choice.message.tool_calls = []
+        res = MagicMock()
+        res.choices = [choice]
+        return res
+
+    agent._chat = fake_chat
+
+    async def run():
+        # Call via bot_client
+        await agent.reply(
+            conversation="ch:C1:1.0",
+            user_id="U_OWNER",
+            text="hello bot",
+            channel_id="C1",
+            thread_ts="1.0",
+            is_dm=False,
+            client=bot_client,
+        )
+        assert "Chicen Nugget Bot (workspace bot app)" in captured_system_messages[-1]
+        assert "U0CGC8SJ8R0" in captured_system_messages[-1]
+
+        # Call via user_client (Boi)
+        await agent.reply(
+            conversation="user_dm:U_OWNER",
+            user_id="U_OWNER",
+            text="hello boi",
+            channel_id="D1",
+            thread_ts=None,
+            is_dm=True,
+            client=user_client,
+        )
+        assert "Chicen Nugget Boi (personal assistant user account)" in captured_system_messages[-1]
+        assert "U0CGW7W9FLL" in captured_system_messages[-1]
+
+    asyncio.run(run())
+
+
 def test_all_users_cache_and_ratelimit_fallback():
     import asyncio
     from unittest.mock import AsyncMock
@@ -991,12 +1226,4 @@ def test_all_users_cache_and_ratelimit_fallback():
         assert third == first
 
     asyncio.run(run())
-
-
-
-
-
-
-
-
 

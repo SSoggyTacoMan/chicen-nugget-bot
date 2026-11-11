@@ -143,6 +143,7 @@ class ToolContext:
     is_dm: bool
     is_owner: bool
     is_admin: bool
+    bot_client: AsyncWebClient | None = None
 
 
 class _TextExtractor(HTMLParser):
@@ -340,23 +341,23 @@ def _numbers(values: Any) -> list[float]:
 
 
 def parse_slack_ref(ref: str) -> tuple[str | None, str | None]:
-    m = re.search(r"archives/(C[0-9A-Z]+)/p(\d{10})(\d{1,6})", ref)
+    m = re.search(r"archives/([CDG][0-9A-Z]+)/p(\d{10})(\d{1,6})", ref)
     if m:
         return m.group(1), f"{m.group(2)}.{m.group(3)}"
-    m_cid = re.search(r"[?&]cid=(C[0-9A-Z]+)", ref)
+    m_cid = re.search(r"[?&]cid=([CDG][0-9A-Z]+)", ref)
     m_ts = re.search(r"[?&]thread_ts=(\d+\.\d+)", ref)
     if m_cid and m_ts:
         return m_cid.group(1), m_ts.group(1)
-    m_raw = re.match(r"(C[0-9A-Z]+):(\d+\.\d+)", ref.strip())
+    m_raw = re.match(r"([CDG][0-9A-Z]+):(\d+\.\d+)", ref.strip())
     if m_raw:
         return m_raw.group(1), m_raw.group(2)
-    m_c = re.search(r"<#(C[0-9A-Z]+)", ref)
+    m_c = re.search(r"<#([CDG][0-9A-Z]+)", ref)
     if m_c:
         return m_c.group(1), None
-    m_b = re.match(r"(C[0-9A-Z]+)$", ref.strip())
+    m_b = re.match(r"([CDG][0-9A-Z]+)$", ref.strip())
     if m_b:
         return m_b.group(1), None
-    m_arch = re.search(r"archives/(C[0-9A-Z]+)(?!/\w)", ref)
+    m_arch = re.search(r"archives/([CDG][0-9A-Z]+)(?!/\w)", ref)
     if m_arch:
         return m_arch.group(1), None
     return None, None
@@ -472,10 +473,14 @@ class Toolbox:
             ),
             tool(
                 "send_dm",
-                "Send a direct message to a Slack user as the bot. Owner/admin only.",
+                "Send a direct message to a Slack user as the bot app or user assistant. Owner/admin only.",
                 {
                     "user": {"type": "string", "description": "User id, @name, display name, or email."},
                     "text": {"type": "string", "description": "Message text (Slack mrkdwn)."},
+                    "as_user": {
+                        "type": "boolean",
+                        "description": "Send as personal user assistant (Boi) instead of bot app. Default false.",
+                    },
                 },
                 ["user", "text"],
             ),
@@ -518,12 +523,53 @@ class Toolbox:
             ),
             tool(
                 "post_message",
-                "Post a message to a Slack channel as the bot. Owner/admin only.",
+                "Post a message to a Slack channel as the bot app or user assistant. Owner/admin only.",
                 {
                     "channel": {"type": "string", "description": "Channel id, #name, or 'here'."},
                     "text": {"type": "string", "description": "Message text (Slack mrkdwn)."},
+                    "as_user": {
+                        "type": "boolean",
+                        "description": "Send as personal user assistant (Boi) instead of bot app. Default false.",
+                    },
                 },
                 ["channel", "text"],
+            ),
+            tool(
+                "slack_status",
+                "View, set, or clear Slack custom status text, emoji, and expiration for the user assistant. Owner/admin only.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["get", "set", "clear"],
+                        "description": "Action: 'get' (view current status), 'set' (update status), or 'clear' (remove status).",
+                    },
+                    "text": {"type": "string", "description": "Status text to set."},
+                    "emoji": {
+                        "type": "string",
+                        "description": "Status emoji code (e.g. ':speech_balloon:', ':calendar:', ':coffee:').",
+                    },
+                    "minutes": {
+                        "type": "integer",
+                        "description": "Optional expiration duration in minutes from now.",
+                    },
+                },
+                ["action"],
+            ),
+            tool(
+                "slack_dnd",
+                "Check DND (Do Not Disturb) snooze status, or snooze/end notification snooze for the user assistant. Owner/admin only.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["info", "snooze", "end"],
+                        "description": "Action: 'info' (check status), 'snooze' (snooze notifications), or 'end' (turn off snooze).",
+                    },
+                    "minutes": {
+                        "type": "integer",
+                        "description": "Number of minutes to snooze notifications (required for action='snooze').",
+                    },
+                },
+                ["action"],
             ),
             tool(
                 "pending_access_requests",
@@ -1145,6 +1191,13 @@ class Toolbox:
             "purpose": ((channel.get("purpose") or {}).get("value")),
         }
 
+    def _get_target_client(self, ctx: ToolContext, as_user: bool) -> tuple[AsyncWebClient | None, str | None]:
+        if as_user:
+            if not ctx.user_client:
+                return None, "user client is not configured (needs SLACK_USER_TOKEN)"
+            return ctx.user_client, None
+        return ctx.bot_client or ctx.client, None
+
     async def _tool_get_channel_history(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can read channel history")
@@ -1156,10 +1209,20 @@ class Toolbox:
             limit = max(1, min(100, int(args.get("limit") or 30)))
         except (TypeError, ValueError):
             limit = 30
+        client = ctx.client
+        if channel_id.startswith("D") and ctx.user_client and client is not ctx.user_client:
+            client = ctx.user_client
         try:
-            response = await ctx.client.conversations_history(channel=channel_id, limit=limit)
+            response = await client.conversations_history(channel=channel_id, limit=limit)
         except Exception as exc:  # noqa: BLE001
-            return _error(f"could not read channel: {error_code(exc)}")
+            alt = ctx.user_client if client is not ctx.user_client else (ctx.bot_client or ctx.client)
+            if alt and alt is not client:
+                try:
+                    response = await alt.conversations_history(channel=channel_id, limit=limit)
+                except Exception as exc2:  # noqa: BLE001
+                    return _error(f"could not read channel: {error_code(exc2)}")
+            else:
+                return _error(f"could not read channel: {error_code(exc)}")
         tz = tzinfo()
         messages = []
         for message in reversed(response.get("messages") or []):
@@ -1195,6 +1258,7 @@ class Toolbox:
             return _error("only the owner/admin can send direct messages")
         query = str(args.get("user") or "").strip()
         text = str(args.get("text") or "").strip()
+        as_user = bool(args.get("as_user", False))
         if not query:
             return _error("which user?")
         if not text:
@@ -1203,18 +1267,22 @@ class Toolbox:
         if not user:
             return _error(f"could not find a user matching {query!r}")
         user_id = user.get("id")
+        target_client, err = self._get_target_client(ctx, as_user)
+        if err or not target_client:
+            return _error(err or "slack client not available")
         target = user_id
         try:
-            opened = await ctx.client.conversations_open(users=user_id)
+            opened = await target_client.conversations_open(users=user_id)
             ch = opened.get("channel") if hasattr(opened, "get") else None
             dm_id = ch.get("id") if hasattr(ch, "get") else None
             if isinstance(dm_id, str) and dm_id.startswith("D"):
                 target = dm_id
         except Exception as exc:  # noqa: BLE001 - fall back to posting with user_id directly
             logger.debug("conversations_open failed for %s: %s", user_id, error_code(exc))
-        if not await post(ctx.client, target, disarm_broadcasts(format_mrkdwn(text))):
+        if not await post(target_client, target, disarm_broadcasts(format_mrkdwn(text))):
             return _error("slack rejected the DM")
-        return f"sent a DM to <@{user_id}>."
+        sender = "Boi (user account)" if as_user else "Bot app"
+        return f"sent a DM to <@{user_id}> as {sender}."
 
     async def _tool_nugget_fact(self, args: dict[str, Any], ctx: ToolContext) -> str:
         return random_fact()
@@ -1343,18 +1411,115 @@ class Toolbox:
 
     async def _tool_post_message(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
-            return _error("only the owner/admin can post as the bot")
+            return _error("only the owner/admin can post messages")
         channel_value = str(args.get("channel") or "here").strip()
         text = str(args.get("text") or "").strip()
+        as_user = bool(args.get("as_user", False))
         if not text:
             return _error("message text is required")
         channel_id = await self._resolve_channel(ctx, channel_value)
         if not channel_id:
             return _error(f"could not resolve channel {channel_value!r}")
-        result = await post(ctx.client, channel_id, disarm_broadcasts(format_mrkdwn(text)))
+        target_client, err = self._get_target_client(ctx, as_user)
+        if err or not target_client:
+            return _error(err or "slack client not available")
+        result = await post(target_client, channel_id, disarm_broadcasts(format_mrkdwn(text)))
         if not result:
             return _error("slack rejected the message")
-        return f"posted to <#{channel_id}> (ts {result.get('ts')})."
+        sender = "Boi (user account)" if as_user else "Bot app"
+        return f"posted to <#{channel_id}> (ts {result.get('ts')}) as {sender}."
+
+    async def _tool_slack_status(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can manage Slack status")
+        if ctx.user_client is None:
+            return _error("user client is not configured (needs SLACK_USER_TOKEN)")
+        action = str(args.get("action") or "get").lower().strip()
+        if action == "get":
+            try:
+                resp = await ctx.user_client.users_profile_get()
+                profile = resp.get("profile") or {}
+                return _json(
+                    {
+                        "status_text": profile.get("status_text") or "",
+                        "status_emoji": profile.get("status_emoji") or "",
+                        "status_expiration": profile.get("status_expiration") or 0,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"failed to get status: {exc}")
+        if action == "set":
+            text = str(args.get("text") or "").strip()
+            emoji = str(args.get("emoji") or "").strip()
+            if emoji and not (emoji.startswith(":") and emoji.endswith(":")):
+                emoji = f":{emoji.strip(':')}:"
+            exp = 0
+            minutes = args.get("minutes")
+            if minutes is not None:
+                try:
+                    mins = int(minutes)
+                    if mins > 0:
+                        exp = int(time.time()) + mins * 60
+                except (TypeError, ValueError):
+                    pass
+            profile = {
+                "status_text": text[:100],
+                "status_emoji": emoji,
+                "status_expiration": exp,
+            }
+            try:
+                await ctx.user_client.users_profile_set(profile=profile)
+                return f"updated Slack status: {emoji} {text}".strip()
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"failed to set status: {exc}")
+        if action == "clear":
+            try:
+                await ctx.user_client.users_profile_set(
+                    profile={"status_text": "", "status_emoji": "", "status_expiration": 0}
+                )
+                return "cleared Slack status."
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"failed to clear status: {exc}")
+        return _error(f"unknown slack_status action: {action}")
+
+    async def _tool_slack_dnd(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can manage DND")
+        if ctx.user_client is None:
+            return _error("user client is not configured (needs SLACK_USER_TOKEN)")
+        action = str(args.get("action") or "info").lower().strip()
+        if action == "info":
+            try:
+                resp = await ctx.user_client.dnd_info()
+                return _json(
+                    {
+                        "dnd_enabled": resp.get("dnd_enabled"),
+                        "snooze_enabled": resp.get("snooze_enabled"),
+                        "snooze_endtime": resp.get("snooze_endtime"),
+                        "snooze_remaining": resp.get("snooze_remaining"),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"failed to get dnd info: {exc}")
+        if action == "snooze":
+            try:
+                minutes = int(args.get("minutes") or 0)
+            except (TypeError, ValueError):
+                minutes = 0
+            if minutes <= 0:
+                return _error("minutes must be a positive integer")
+            try:
+                await ctx.user_client.dnd_setSnooze(num_minutes=minutes)
+                return f"snoozed notifications for {minutes} minute(s)."
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"failed to set snooze: {exc}")
+        if action == "end":
+            try:
+                await ctx.user_client.dnd_endSnooze()
+                return "ended DND snooze."
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"failed to end snooze: {exc}")
+        return _error(f"unknown slack_dnd action: {action}")
 
     async def _tool_pending_access_requests(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
@@ -1743,20 +1908,34 @@ class Toolbox:
             return _error("could not parse a slack channel or link from reference")
         if not ts:
             return _error(f"found channel <#{cid}> but no specific message timestamp")
+        client = ctx.client
+        if cid.startswith("D") and ctx.user_client and client is not ctx.user_client:
+            client = ctx.user_client
         try:
-            resp = await ctx.client.conversations_history(channel=cid, latest=ts, inclusive=True, limit=1)
+            resp = await client.conversations_history(channel=cid, latest=ts, inclusive=True, limit=1)
             msgs = (resp.get("messages") or []) if resp.get("ok") else []
             if not msgs:
-                resp2 = await ctx.client.conversations_replies(channel=cid, ts=ts, limit=1)
+                resp2 = await client.conversations_replies(channel=cid, ts=ts, limit=1)
                 msgs = (resp2.get("messages") or []) if resp2.get("ok") else []
-            if not msgs:
-                return f"no message found in <#{cid}> at {ts}"
-            msg = msgs[0]
-            user = msg.get("user") or msg.get("bot_id") or "unknown"
-            text = (msg.get("text") or "").strip()
-            return f"message in <#{cid}> from <@{user}> at {ts}:\n{text}"
-        except Exception as exc:  # noqa: BLE001
-            return _error(f"failed to fetch slack message: {exc}")
+        except Exception:
+            alt = ctx.user_client if client is not ctx.user_client else (ctx.bot_client or ctx.client)
+            if alt and alt is not client:
+                try:
+                    resp = await alt.conversations_history(channel=cid, latest=ts, inclusive=True, limit=1)
+                    msgs = (resp.get("messages") or []) if resp.get("ok") else []
+                    if not msgs:
+                        resp2 = await alt.conversations_replies(channel=cid, ts=ts, limit=1)
+                        msgs = (resp2.get("messages") or []) if resp2.get("ok") else []
+                except Exception as exc:  # noqa: BLE001
+                    return _error(f"failed to fetch slack message: {exc}")
+            else:
+                return _error(f"failed to fetch slack message: {exc}")
+        if not msgs:
+            return f"no message found in <#{cid}> at {ts}"
+        msg = msgs[0]
+        user = msg.get("user") or msg.get("bot_id") or "unknown"
+        text = (msg.get("text") or "").strip()
+        return f"message in <#{cid}> from <@{user}> at {ts}:\n{text}"
 
     async def _tool_summarize_thread(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
@@ -1770,24 +1949,35 @@ class Toolbox:
             return _error("no thread specified and not currently inside a thread")
         if not cid or not ts:
             return _error("could not parse channel and thread timestamp")
+        client = ctx.client
+        if cid.startswith("D") and ctx.user_client and client is not ctx.user_client:
+            client = ctx.user_client
         try:
-            resp = await ctx.client.conversations_replies(channel=cid, ts=ts, limit=100)
+            resp = await client.conversations_replies(channel=cid, ts=ts, limit=100)
             msgs = (resp.get("messages") or []) if resp.get("ok") else []
-            if not msgs:
-                return "thread has no messages or could not be read"
-            tz = tzinfo()
-            lines = []
-            for m in msgs:
-                u = m.get("user") or m.get("bot_id") or "unknown"
-                t = (m.get("text") or "").strip()
+        except Exception:
+            alt = ctx.user_client if client is not ctx.user_client else (ctx.bot_client or ctx.client)
+            if alt and alt is not client:
                 try:
-                    when = datetime.fromtimestamp(float(m.get("ts")), tz).strftime("%H:%M")
-                except Exception:
-                    when = "?"
-                lines.append(f"<@{u}> ({when}): {t}")
-            return f"thread in <#{cid}> ({len(msgs)} messages):\n" + "\n".join(lines)[:MAX_TOOL_RESULT]
-        except Exception as exc:  # noqa: BLE001
-            return _error(f"failed to read thread: {exc}")
+                    resp = await alt.conversations_replies(channel=cid, ts=ts, limit=100)
+                    msgs = (resp.get("messages") or []) if resp.get("ok") else []
+                except Exception as exc:  # noqa: BLE001
+                    return _error(f"failed to read thread: {exc}")
+            else:
+                return _error(f"failed to read thread: {exc}")
+        if not msgs:
+            return "thread has no messages or could not be read"
+        tz = tzinfo()
+        lines = []
+        for m in msgs:
+            u = m.get("user") or m.get("bot_id") or "unknown"
+            t = (m.get("text") or "").strip()
+            try:
+                when = datetime.fromtimestamp(float(m.get("ts")), tz).strftime("%H:%M")
+            except Exception:
+                when = "?"
+            lines.append(f"<@{u}> ({when}): {t}")
+        return f"thread in <#{cid}> ({len(msgs)} messages):\n" + "\n".join(lines)[:MAX_TOOL_RESULT]
 
     async def _tool_ocr_document(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
@@ -2709,7 +2899,7 @@ class Toolbox:
         channel_id = extract_id(value, "#")
         if channel_id:
             return channel_id
-        if value and value[0] in {"C", "G"} and value.isalnum():
+        if value and value[0] in {"C", "G", "D"} and value.isalnum():
             return value
         needle = value.lstrip("#").lower()
         for channel in await all_channels(ctx.client):
