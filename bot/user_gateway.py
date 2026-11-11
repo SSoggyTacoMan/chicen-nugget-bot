@@ -2,15 +2,13 @@
 
 Maintains a client WebSocket connection to Slack for:
 1. Real-time typing indicators in DMs and threads ("User is typing...").
-2. Direct message handling, mentions, and thread continuations for the personal AI assistant identity.
+2. Direct message handling and explicit mentions for the personal AI assistant identity.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
-import time
 import urllib.parse
 from collections import deque
 from contextlib import asynccontextmanager, suppress
@@ -21,11 +19,10 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from bot.ai.limits import user_retry_after
 from bot.runtime import runtime
-from bot.slack_api import channel_info, fetch_slack_images, user_info
+from bot.slack_api import fetch_slack_images
 from bot.utils.text import (
     chunk_text,
     disarm_broadcasts,
-    display_name,
     format_mrkdwn,
     strip_mentions,
 )
@@ -53,39 +50,6 @@ class UserGateway:
         self._seen_ts: set[str] = set()
         self._seen_order: deque[str] = deque()
         self._reconnect_url: str | None = None
-        self._last_thread: dict[tuple[str, str], float] = {}
-        self._names: dict[str, str] = {}
-
-    async def _user_name(self, user_id: str) -> str:
-        if user_id not in self._names:
-            if not self.user_client:
-                return "someone"
-            self._names[user_id] = display_name(await user_info(self.user_client, user_id))
-        return self._names[user_id]
-
-    async def _channel_name(self, channel_id: str) -> str:
-        key = f"ch:{channel_id}"
-        if key not in self._names:
-            if not self.user_client:
-                return "a channel"
-            info = await channel_info(self.user_client, channel_id) or {}
-            self._names[key] = f"#{info.get('name')}" if info.get("name") else "a channel"
-        return self._names[key]
-
-    async def _recent_lines(self, rows: list[dict[str, Any]]) -> list[str]:
-        """Format prior turns for the gate so it can tell who is talking to whom."""
-        lines: list[str] = []
-        for row in rows[-6:]:
-            text = " ".join((row.get("text") or "").split())
-            if not text:
-                continue
-            if row.get("role") == "assistant":
-                lines.append(f"you: {text[:200]}")
-            else:
-                uid = row.get("user_id") or ""
-                name = await self._user_name(uid) if uid else "someone"
-                lines.append(f"{name}: {text[:200]}")
-        return lines
 
     def _next_id(self) -> int:
         mid = self._msg_id
@@ -292,11 +256,8 @@ class UserGateway:
         is_mention = bool(self.user_id and f"<@{self.user_id}>" in text)
         thread_ts = event.get("thread_ts")
         root_ts = thread_ts or event.get("ts")
-        is_thread_continuation = bool(
-            thread_ts and runtime.db and runtime.db.is_thread(channel, thread_ts, owner="user")
-        )
 
-        if not (is_dm or is_mention or is_thread_continuation):
+        if not (is_dm or is_mention):
             return
 
         settings = runtime.settings
@@ -318,83 +279,18 @@ class UserGateway:
         if runtime.agent is None or not settings.ai_enabled:
             return
 
-        jev_hint = ""
-        explicitly_named = False
-        has_files = bool(event.get("files") or event.get("file") or event.get("subtype") == "file_share")
-        if is_thread_continuation and not is_mention and not is_dm:
-            if not has_files and len(text) < 4:
-                return
-            if runtime.db and runtime.db.kv_get("config:thread_followups") == "false":
-                return
-            if user_retry_after(sender_id):
-                return
-
-            rows = runtime.db.history(f"user_ch:{channel}:{thread_ts}", 8) if runtime.db else []
-            bot_last = bool(rows and rows[-1].get("role") == "assistant")
-            raw_bot_name = getattr(settings, "bot_name", "")
-            bot_names = {
-                raw_bot_name.lower() if isinstance(raw_bot_name, str) else "",
-                "nugget",
-                "chicen",
-                "chicennugget",
-            }
-            text_lower = text.lower()
-            explicitly_named = any(
-                re.search(rf"\b{re.escape(name)}\b", text_lower) for name in bot_names if name
-            )
-
-            if not explicitly_named:
-                human_users = {
-                    r.get("user_id")
-                    for r in rows
-                    if isinstance(r, dict) and r.get("role") == "user" and r.get("user_id")
-                }
-                if len(human_users) >= 2 and "?" not in text and not has_files:
-                    return
-                if not has_files and len(text.split()) < 3 and "?" not in text:
-                    return
-
-            if runtime.gate is not None and settings.ai_gate_enabled:
-                recent = await self._recent_lines(rows)
-                user_name = await self._user_name(sender_id)
-                channel_name = await self._channel_name(channel)
-                decision = await runtime.gate.decide(
-                    text=text,
-                    channel_name=channel_name,
-                    user_name=user_name,
-                    user_id=sender_id,
-                    recent=recent,
-                    bot_last=bot_last,
-                )
-                if not decision.reply:
-                    logger.info(
-                        "user gateway gate suppressed thread continuation for %s in %s: %s",
-                        sender_id,
-                        channel,
-                        decision.kind,
+        retry = user_retry_after(sender_id)
+        if retry:
+            if self.user_client:
+                with suppress(Exception):
+                    await self.user_client.chat_postMessage(
+                        channel=channel,
+                        text=f"slow down a lil, try again in {retry}s :3",
+                        thread_ts=root_ts if not is_dm else None,
+                        unfurl_links=False,
+                        unfurl_media=False,
                     )
-                    return
-                jev_hint = decision.hint()
-
-            cooldown = getattr(settings, "ai_thread_cooldown", 0)
-            if isinstance(cooldown, (int, float)) and cooldown > 0 and not explicitly_named:
-                key = (channel, root_ts)
-                if time.monotonic() - self._last_thread.get(key, 0.0) < cooldown:
-                    logger.info("user gateway thread followup cooldown in %s (%ss)", channel, cooldown)
-                    return
-        else:
-            retry = user_retry_after(sender_id)
-            if retry:
-                if self.user_client:
-                    with suppress(Exception):
-                        await self.user_client.chat_postMessage(
-                            channel=channel,
-                            text=f"slow down a lil, try again in {retry}s :3",
-                            thread_ts=root_ts if not is_dm else None,
-                            unfurl_links=False,
-                            unfurl_media=False,
-                        )
-                return
+            return
 
         images = await fetch_slack_images(event, self.token)
         clean_text = strip_mentions(text).strip()
@@ -403,13 +299,7 @@ class UserGateway:
         if not clean_text and not images:
             return
 
-        if is_dm:
-            trigger = "dm"
-        elif is_thread_continuation and not is_mention:
-            trigger = "thread_followup"
-        else:
-            trigger = "mention"
-
+        trigger = "dm" if is_dm else "mention"
         conv_key = f"user_dm:{sender_id}" if is_dm else f"user_ch:{channel}:{root_ts}"
         try:
             async with (
@@ -424,7 +314,7 @@ class UserGateway:
                     thread_ts=root_ts if not is_dm else None,
                     is_dm=is_dm,
                     trigger=trigger,
-                    jev=jev_hint,
+                    jev="",
                     images=images,
                     client=self.user_client,
                 )
@@ -437,8 +327,6 @@ class UserGateway:
 
         if not is_dm and runtime.db and root_ts:
             runtime.db.mark_thread(channel, root_ts, owner="user")
-            if is_thread_continuation and not is_mention:
-                self._last_thread[(channel, root_ts)] = time.monotonic()
 
         if self.user_client:
             for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):

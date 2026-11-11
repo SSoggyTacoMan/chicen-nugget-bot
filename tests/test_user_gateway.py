@@ -113,16 +113,15 @@ def test_user_gateway_deduplication():
     asyncio.run(run())
 
 
-def test_user_gateway_thread_continuation():
+def test_user_gateway_channel_mention():
     async def run():
         mock_client = AsyncMock()
         gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
         mock_agent = AsyncMock()
-        mock_agent.reply = AsyncMock(return_value="thread response")
+        mock_agent.reply = AsyncMock(return_value="channel mention response")
         runtime.agent = mock_agent
 
         mock_db = MagicMock()
-        mock_db.is_thread.return_value = True
         runtime.db = mock_db
 
         old_settings = runtime.settings
@@ -136,7 +135,7 @@ def test_user_gateway_thread_continuation():
             "type": "message",
             "channel": "C_TEST",
             "user": "U_OWNER",
-            "text": "follow up question here",
+            "text": "<@U_ALT> follow up question here",
             "ts": "200.002",
             "thread_ts": "200.000",
         }
@@ -147,7 +146,7 @@ def test_user_gateway_thread_continuation():
 
             mock_agent.reply.assert_called_once()
             call_kwargs = mock_agent.reply.call_args[1]
-            assert call_kwargs["trigger"] == "thread_followup"
+            assert call_kwargs["trigger"] == "mention"
             assert call_kwargs["thread_ts"] == "200.000"
             mock_db.mark_thread.assert_called_with("C_TEST", "200.000", owner="user")
             mock_client.chat_postMessage.assert_called_once()
@@ -247,91 +246,33 @@ def test_user_gateway_ignores_bot_owned_thread(tmp_path):
     asyncio.run(run())
 
 
-def test_user_gateway_suppresses_multi_human_and_gate(tmp_path):
-    from bot.ai.gate import GateDecision
-    from bot.db import Database
-
+def test_user_gateway_ignores_unmentioned_channel_messages():
     async def run():
-        db = Database(str(tmp_path / "gw_gate.db"))
-        db.init()
-        db.mark_thread("C_TEST", "300.000", owner="user")
-        db.add_message("user_ch:C_TEST:300.000", "user", "U_ALICE", "first msg")
-        db.add_message("user_ch:C_TEST:300.000", "user", "U_BOB", "second msg")
-
         mock_client = AsyncMock()
         gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
         mock_agent = AsyncMock()
-        mock_agent.reply = AsyncMock(return_value="ok")
-        mock_gate = MagicMock()
-        mock_gate.decide = AsyncMock(return_value=GateDecision(reply=False, kind="chatter"))
-
-        old_agent = runtime.agent
-        old_db = runtime.db
-        old_gate = runtime.gate
-        old_settings = runtime.settings
         runtime.agent = mock_agent
-        runtime.db = db
-        runtime.gate = mock_gate
 
+        old_settings = runtime.settings
         mock_settings = MagicMock()
-        mock_settings.bot_name = "Chicen Nugget Bot"
         mock_settings.ai_enabled = True
-        mock_settings.ai_gate_enabled = True
-        mock_settings.ai_thread_cooldown = 0
         mock_settings.ai_allowed.return_value = True
         runtime.settings = mock_settings
 
+        event = {
+            "type": "message",
+            "channel": "C_TEST",
+            "user": "U_ALICE",
+            "text": "regular channel chatter or thread message",
+            "ts": "300.002",
+            "thread_ts": "300.000",
+        }
+
         try:
-            with (
-                patch("bot.user_gateway.fetch_slack_images", AsyncMock(return_value=[])),
-                patch.object(gw, "_user_name", AsyncMock(return_value="alice")),
-                patch.object(gw, "_channel_name", AsyncMock(return_value="#general")),
-            ):
-                # Multi-human thread without '?' or bot name -> suppressed before gate
-                await gw._handle_event(
-                    {
-                        "type": "message",
-                        "channel": "C_TEST",
-                        "user": "U_ALICE",
-                        "text": "yeah this repo is messy",
-                        "ts": "300.002",
-                        "thread_ts": "300.000",
-                    }
-                )
-                mock_gate.decide.assert_not_called()
-                mock_agent.reply.assert_not_called()
-
-                # Question in multi-human thread goes to gate; gate says reply=False -> suppressed
-                await gw._handle_event(
-                    {
-                        "type": "message",
-                        "channel": "C_TEST",
-                        "user": "U_ALICE",
-                        "text": "hey bob did you push that?",
-                        "ts": "300.003",
-                        "thread_ts": "300.000",
-                    }
-                )
-                mock_gate.decide.assert_called_once()
-                mock_agent.reply.assert_not_called()
-
-                # Gate allows -> replies
-                mock_gate.decide = AsyncMock(return_value=GateDecision(reply=True, kind="question"))
-                await gw._handle_event(
-                    {
-                        "type": "message",
-                        "channel": "C_TEST",
-                        "user": "U_ALICE",
-                        "text": "nugget can you check the api?",
-                        "ts": "300.004",
-                        "thread_ts": "300.000",
-                    }
-                )
-                mock_agent.reply.assert_called_once()
+            with patch("bot.user_gateway.fetch_slack_images", AsyncMock(return_value=[])):
+                await gw._handle_event(event)
+            mock_agent.reply.assert_not_called()
         finally:
-            runtime.agent = old_agent
-            runtime.db = old_db
-            runtime.gate = old_gate
             runtime.settings = old_settings
 
     asyncio.run(run())

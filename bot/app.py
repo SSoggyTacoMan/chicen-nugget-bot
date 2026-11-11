@@ -85,6 +85,7 @@ async def run() -> None:
                 client=app.client,
                 user_client=user_client,
                 bot_user_id=runtime.bot_user_id,
+                user_id=runtime.user_id,
                 budget=runtime.budget,
             )
             logger.info(
