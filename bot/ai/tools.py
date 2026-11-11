@@ -15,6 +15,7 @@ import io
 import json
 import logging
 import os
+from pathlib import Path
 import random
 import re
 import sys
@@ -766,6 +767,66 @@ class Toolbox:
                     "show_all": {"type": "boolean", "description": "Whether to list completed tasks as well as pending. Default false."},
                 },
                 ["action"],
+            ),
+            tool(
+                "inspect_code",
+                "Inspect local codebase files in the bot repository: read file contents, list directories, or search code. Owner/admin only.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["read", "list", "search"],
+                        "description": "Action: 'read' (default), 'list', or 'search'.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Relative file or directory path in the repo (e.g. 'bot/ai/tools.py', 'prompts', or empty for root).",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Search pattern (text or regex) for action='search'.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Line number to start reading from (1-based, default 1) for action='read'.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to read for action='read' (default 150).",
+                    },
+                },
+                ["action"],
+            ),
+            tool(
+                "clone_repo",
+                "Shallow clone a remote Git repository into an isolated sandbox, inspect its files (list, read, or search), and auto-delete immediately after. Owner/admin only.",
+                {
+                    "repo_url": {
+                        "type": "string",
+                        "description": "Git URL (https://...) or GitHub 'owner/repo' shorthand.",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "read", "search"],
+                        "description": "Action: 'list' (default), 'read', or 'search'.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Relative file or directory path within the cloned repository.",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Search pattern (text or regex) for action='search'.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Line number to start reading from (1-based, default 1) for action='read'.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to read for action='read' (default 150).",
+                    },
+                },
+                ["repo_url"],
             ),
         ]
         return tools
@@ -1895,6 +1956,222 @@ class Toolbox:
             return _error("code execution timed out after 5.0 seconds")
         except Exception as exc:  # noqa: BLE001
             return _error(f"execution failed: {exc}")
+
+    async def _tool_inspect_code(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can inspect local code")
+        action = str(args.get("action") or "read").lower().strip()
+        repo_root = Path(__file__).resolve().parents[2]
+        rel_path = str(args.get("path") or "").strip().lstrip("/")
+        target_path = (repo_root / rel_path).resolve() if rel_path else repo_root
+
+        try:
+            target_path.relative_to(repo_root)
+        except ValueError:
+            return _error("access denied: path escapes repository root")
+
+        forbidden_names = {".env", "id_rsa", "id_ed25519"}
+        forbidden_exts = {".pem", ".key", ".db", ".sqlite", ".sqlite3"}
+
+        def is_forbidden(p: Path) -> bool:
+            name = p.name.lower()
+            if name in forbidden_names or name.startswith(".env"):
+                return True
+            if p.suffix.lower() in forbidden_exts:
+                return True
+            return False
+
+        if action == "list":
+            if not target_path.exists():
+                return _error(f"path not found: {rel_path}")
+            if target_path.is_file():
+                if is_forbidden(target_path):
+                    return _error("access denied: sensitive file")
+                return f"file: {target_path.relative_to(repo_root)} ({target_path.stat().st_size} bytes)"
+            entries = []
+            try:
+                for item in sorted(target_path.iterdir()):
+                    if item.name.startswith(".") and item.name in {".git", ".pytest_cache", ".mypy_cache"}:
+                        continue
+                    if item.name in {"__pycache__", ".venv", "venv", "node_modules"}:
+                        continue
+                    if is_forbidden(item):
+                        continue
+                    suffix = "/" if item.is_dir() else ""
+                    entries.append(f"{item.relative_to(repo_root)}{suffix}")
+            except Exception as exc:
+                return _error(f"failed to list directory: {exc}")
+            return "\n".join(entries[:150])[:MAX_TOOL_RESULT] or "(empty directory)"
+
+        if action == "read":
+            if not target_path.exists() or not target_path.is_file():
+                return _error(f"file not found: {rel_path}")
+            if is_forbidden(target_path):
+                return _error("access denied: sensitive file")
+            try:
+                offset = max(1, int(args.get("offset") or 1))
+                limit = max(1, min(500, int(args.get("limit") or 150)))
+                lines = target_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                slice_lines = lines[offset - 1 : offset - 1 + limit]
+                formatted = [f"{i}: {line}" for i, line in enumerate(slice_lines, start=offset)]
+                return "\n".join(formatted)[:MAX_TOOL_RESULT]
+            except Exception as exc:
+                return _error(f"failed to read file: {exc}")
+
+        if action == "search":
+            pattern = str(args.get("pattern") or "").strip()
+            if not pattern:
+                return _error("pattern is required for search")
+            try:
+                rx = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                rx = re.compile(re.escape(pattern), re.IGNORECASE)
+            matches = []
+            try:
+                for p in repo_root.rglob("*"):
+                    if not p.is_file() or p.is_symlink() or is_forbidden(p):
+                        continue
+                    rel = p.relative_to(repo_root)
+                    parts = set(rel.parts)
+                    if any(bad in parts for bad in {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "data"}):
+                        continue
+                    if p.stat().st_size > 512_000:
+                        continue
+                    try:
+                        content_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+                        for idx, line in enumerate(content_lines, 1):
+                            if rx.search(line):
+                                matches.append(f"{rel}:{idx}: {line.strip()}")
+                                if len(matches) >= 60:
+                                    break
+                    except Exception:
+                        continue
+                    if len(matches) >= 60:
+                        break
+            except Exception as exc:
+                return _error(f"search failed: {exc}")
+            if not matches:
+                return f"no matches for pattern: {pattern}"
+            return "\n".join(matches)[:MAX_TOOL_RESULT]
+
+        return _error(f"unknown action: {action}")
+
+    async def _tool_clone_repo(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can clone repositories")
+        raw_url = str(args.get("repo_url") or "").strip()
+        if not raw_url:
+            return _error("repo_url is required")
+        if raw_url.startswith("-") or any(ch in raw_url for ch in (";", "&", "|", "`", "$", "\n")):
+            return _error("invalid repo_url")
+        if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", raw_url):
+            clone_url = f"https://github.com/{raw_url}.git"
+        elif raw_url.startswith(("https://", "http://")):
+            parsed = urlparse(raw_url)
+            if not parsed.hostname or await self._is_private_host(parsed.hostname):
+                return _error("invalid or private repository host")
+            clone_url = raw_url
+        else:
+            return _error("only https:// or 'owner/repo' GitHub URLs are allowed")
+
+        action = str(args.get("action") or "list").lower().strip()
+        # ponytail: sandbox cloning uses temporary directory; upgrade to container sandbox for untrusted git hooks/LFS.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = (Path(tmpdir) / "repo").resolve()
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "git",
+                    "-c",
+                    "core.symlinks=false",
+                    "-c",
+                    "protocol.file.allow=never",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--single-branch",
+                    clone_url,
+                    str(dest),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+            except TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return _error("git clone timed out after 25s")
+            except Exception as exc:
+                return _error(f"failed to run git clone: {exc}")
+
+            if proc.returncode != 0:
+                err = stderr.decode(errors="replace").strip() or f"git clone exited with code {proc.returncode}"
+                return _error(f"clone failed: {err}")
+
+            rel_path = str(args.get("path") or "").strip().lstrip("/")
+            target = (dest / rel_path).resolve() if rel_path else dest
+            try:
+                target.relative_to(dest.resolve())
+            except ValueError:
+                return _error("access denied: path escapes cloned repository")
+
+            if action == "list":
+                if not target.exists():
+                    return _error(f"path not found: {rel_path}")
+                if target.is_file():
+                    return f"file: {target.relative_to(dest)} ({target.stat().st_size} bytes)"
+                entries = []
+                for item in sorted(target.iterdir()):
+                    if item.name == ".git":
+                        continue
+                    suffix = "/" if item.is_dir() else ""
+                    entries.append(f"{item.relative_to(dest)}{suffix}")
+                return "\n".join(entries[:150])[:MAX_TOOL_RESULT] or "(empty directory)"
+
+            if action == "read":
+                if not target.exists() or not target.is_file():
+                    return _error(f"file not found: {rel_path}")
+                try:
+                    offset = max(1, int(args.get("offset") or 1))
+                    limit = max(1, min(500, int(args.get("limit") or 150)))
+                    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+                    slice_lines = lines[offset - 1 : offset - 1 + limit]
+                    formatted = [f"{i}: {line}" for i, line in enumerate(slice_lines, start=offset)]
+                    return "\n".join(formatted)[:MAX_TOOL_RESULT]
+                except Exception as exc:
+                    return _error(f"failed to read file: {exc}")
+
+            if action == "search":
+                pattern = str(args.get("pattern") or "").strip()
+                if not pattern:
+                    return _error("pattern is required for search")
+                try:
+                    rx = re.compile(pattern, re.IGNORECASE)
+                except re.error:
+                    rx = re.compile(re.escape(pattern), re.IGNORECASE)
+                matches = []
+                for p in dest.rglob("*"):
+                    if not p.is_file() or p.is_symlink() or ".git" in p.parts:
+                        continue
+                    if p.stat().st_size > 512_000:
+                        continue
+                    rel = p.relative_to(dest)
+                    try:
+                        content_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+                        for idx, line in enumerate(content_lines, 1):
+                            if rx.search(line):
+                                matches.append(f"{rel}:{idx}: {line.strip()}")
+                                if len(matches) >= 60:
+                                    break
+                    except Exception:
+                        continue
+                    if len(matches) >= 60:
+                        break
+                if not matches:
+                    return f"no matches for pattern: {pattern}"
+                return "\n".join(matches)[:MAX_TOOL_RESULT]
+
+            return _error(f"unknown action: {action}")
 
     async def _tool_hacker_news(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):

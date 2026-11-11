@@ -381,6 +381,9 @@ def fit_history(
         content = (item["text"] or "").strip()
         if not content:
             continue
+        uid = item.get("user_id")
+        if uid and item["role"] == "user" and not content.startswith(f"<@{uid}>") and not content.startswith("<@"):
+            content = f"<@{uid}>: {content}"
         if len(content) > room:
             break
         kept.append({"role": item["role"], "content": content})
