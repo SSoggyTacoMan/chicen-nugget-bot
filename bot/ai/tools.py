@@ -11,13 +11,12 @@ import email
 import email.header
 import html
 import imaplib
-import ipaddress
+import io
 import json
 import logging
 import os
 import random
 import re
-import socket
 import sys
 import tempfile
 import time
@@ -30,6 +29,7 @@ from urllib.parse import quote, urlencode, urlparse
 import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
+from bot import image_access
 from bot.config import Settings
 from bot.db import Database
 from bot.features.nuggets import random_fact
@@ -38,7 +38,7 @@ from bot.features.stats import (
     format_stats,
     format_system_diagnostics,
 )
-from bot.reminders import confirmation_text, dm_target, create_reminder, reminder_line
+from bot.reminders import confirmation_text, create_reminder, dm_target, reminder_line
 from bot.runtime import runtime
 from bot.slack_api import (
     all_channels,
@@ -281,6 +281,24 @@ def _need_owner(ctx: ToolContext) -> bool:
     return ctx.is_owner or ctx.is_admin
 
 
+def _default_repo(settings: Settings) -> str:
+    """`https://github.com/owner/repo` -> `owner/repo`, else empty."""
+    match = re.search(r"github\.com/([^/\s]+/[^/\s#?]+)", settings.repo_url or "")
+    return match.group(1).removesuffix(".git") if match else ""
+
+
+def _numbers(values: Any) -> list[float]:
+    if not isinstance(values, list):
+        return []
+    out: list[float] = []
+    for value in values:
+        try:
+            out.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def parse_slack_ref(ref: str) -> tuple[str | None, str | None]:
     m = re.search(r"archives/(C[0-9A-Z]+)/p(\d{10})(\d{1,6})", ref)
     if m:
@@ -485,6 +503,65 @@ class Toolbox:
                 ["prompt"],
             ),
             tool(
+                "make_chart",
+                "Render a chart from data as a PNG and upload it to the conversation. Owner/admin only.",
+                {
+                    "type": {
+                        "type": "string",
+                        "enum": ["bar", "line", "pie", "scatter", "hist"],
+                        "description": "Chart type. Default 'bar'.",
+                    },
+                    "title": {"type": "string", "description": "Chart title."},
+                    "x_label": {"type": "string", "description": "X axis label."},
+                    "y_label": {"type": "string", "description": "Y axis label."},
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Category labels for the first series.",
+                    },
+                    "values": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "Numbers for the first series, in the same order as labels.",
+                    },
+                    "series": {
+                        "type": "array",
+                        "description": "Optional extra series: [{'name': 'series name', 'values': [1, 2, 3]}].",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "values": {"type": "array", "items": {"type": "number"}},
+                            },
+                            "required": ["name", "values"],
+                        },
+                    },
+                },
+                [],
+            ),
+            tool(
+                "make_deck",
+                "Build a PowerPoint (.pptx) deck from a title and slides, then upload it to the conversation. Owner/admin only.",
+                {
+                    "title": {"type": "string", "description": "Deck title."},
+                    "subtitle": {"type": "string", "description": "Optional subtitle for the title slide."},
+                    "slides": {
+                        "type": "array",
+                        "description": "Slides in order: [{'title': '...', 'bullets': ['...'], 'notes': 'optional speaker notes'}].",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "bullets": {"type": "array", "items": {"type": "string"}},
+                                "notes": {"type": "string"},
+                            },
+                            "required": ["title"],
+                        },
+                    },
+                },
+                ["title", "slides"],
+            ),
+            tool(
                 "flaron",
                 "Query the public Hack Club Slack directory (flaron.halceon.dev). Actions: user, channel, user_search, channel_search, channel_by_name, channel_managers, channel_members, app, emoji, command, promote.",
                 {
@@ -560,7 +637,7 @@ class Toolbox:
                 {
                     "username": {
                         "type": "string",
-                        "description": "Hackatime/GitHub username. Defaults to maaren (SSoggyTacoMan).",
+                        "description": "Hackatime/GitHub username. Defaults to GITHUB_USERNAME when set.",
                     },
                 },
                 [],
@@ -576,7 +653,7 @@ class Toolbox:
                     },
                     "target": {
                         "type": "string",
-                        "description": "Username (for 'user'), 'owner/repo' (for 'repo', 'commits', 'release', 'issues', 'prs'), or 'owner/repo#123' (for 'issue'). Defaults to 'SSoggyTacoMan/chicen-nugget-bot'.",
+                        "description": "Username (for 'user'), 'owner/repo' (for 'repo', 'commits', 'release', 'issues', 'prs'), or 'owner/repo#123' (for 'issue'). Defaults to REPO_URL when set.",
                     },
                     "state": {
                         "type": "string",
@@ -635,7 +712,7 @@ class Toolbox:
             ),
             tool(
                 "bot_config",
-                "View or change bot runtime settings (recaps, daily_digest, welcomer, tier2, tier2_channel, ambient_ai, weather_location). Owner/admin only.",
+                "View or change bot runtime settings (recaps, daily_digest, personal_updates, welcomer, tier2, tier2_channel, admin_channel, ambient_ai, thread_followups, weather_location). Owner/admin only.",
                 {
                     "action": {
                         "type": "string",
@@ -644,11 +721,27 @@ class Toolbox:
                     },
                     "key": {
                         "type": "string",
-                        "description": "Setting name: 'recaps', 'daily_digest', 'welcomer', 'tier2', 'tier2_channel', 'ambient_ai', 'weather_location'.",
+                        "description": "Setting name: 'recaps', 'daily_digest', 'personal_updates', 'welcomer', 'tier2', 'tier2_channel', 'admin_channel', 'ambient_ai', 'thread_followups', 'weather_location'.",
                     },
                     "value": {
                         "type": "string",
-                        "description": "New value to set (e.g. 'off', 'on', 'false', 'true', or channel ID).",
+                        "description": "New value to set (e.g. 'off', 'on', 'false', 'true', 'dm', or channel ID).",
+                    },
+                },
+                ["action"],
+            ),
+            tool(
+                "image_access",
+                "List, add or remove people allowed to use image generation. Admins always have access. Owner/admin only.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "add", "remove"],
+                        "description": "Action: 'list', 'add', or 'remove'.",
+                    },
+                    "user": {
+                        "type": "string",
+                        "description": "Slack user id or @mention for add/remove.",
                     },
                 },
                 ["action"],
@@ -691,7 +784,7 @@ class Toolbox:
             if handler is None:
                 return _error(f"unknown tool: {name}")
             return await handler(args, ctx)
-        except Exception as exc:  # noqa: BLE001 - never crash the model loop
+        except Exception as exc:
             logger.exception("tool %s failed", name)
             return _error(f"tool failed: {exc}")
 
@@ -1237,8 +1330,8 @@ class Toolbox:
             return _error(f"web search failed: {exc}")
 
     async def _tool_generate_image(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can generate images")
+        if not image_access.can_generate(ctx.settings, ctx.db, ctx.user_id):
+            return _error("you are not on the image allowlist; ask an admin to add you")
         prompt = str(args.get("prompt") or "").strip()
         if not prompt:
             return _error("prompt is required")
@@ -1264,6 +1357,152 @@ class Toolbox:
             return f"image successfully generated and uploaded to conversation for: {prompt}"
         except Exception as exc:  # noqa: BLE001
             return _error(f"failed to upload image: {exc}")
+
+    async def _tool_make_chart(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can render charts")
+        if not ctx.channel_id:
+            return _error("no channel or dm context to post the chart to")
+        kind = str(args.get("type") or "bar").strip().lower()
+        if kind not in {"bar", "line", "pie", "scatter", "hist"}:
+            return _error("type must be bar, line, pie, scatter or hist")
+        title = str(args.get("title") or "").strip()[:160]
+        labels = [str(item)[:60] for item in (args.get("labels") or [])]
+        values = _numbers(args.get("values"))
+        series = [
+            (str(item.get("name") or f"series {i + 1}")[:60], _numbers(item.get("values")))
+            for i, item in enumerate(args.get("series") or [])
+            if isinstance(item, dict)
+        ]
+        if not series and values:
+            series = [("", values)]
+        if not series:
+            return _error("values or series is required")
+        if len(series) == 1 and labels and len(labels) != len(series[0][1]):
+            return _error("labels and values must be the same length")
+
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(8, 4.5), dpi=160)
+            fig.patch.set_facecolor("#ffffff")
+            ax.set_facecolor("#ffffff")
+            ax.grid(True, axis="y", alpha=0.25, linewidth=0.8)
+            ax.spines[["top", "right"]].set_visible(False)
+
+            if kind == "pie":
+                name, data = series[0]
+                if len(labels) != len(data):
+                    return _error("pie charts need one label per value")
+                ax.pie(data, labels=labels, autopct="%1.0f%%", startangle=90)
+                ax.axis("equal")
+            elif kind == "hist":
+                for name, data in series:
+                    if data:
+                        ax.hist(data, bins=min(20, max(4, len(data) // 2)), label=name or None, alpha=0.75)
+            elif kind == "scatter":
+                x = labels or [str(i + 1) for i in range(len(series[0][1]))]
+                for name, data in series:
+                    ax.scatter(x[: len(data)], data, label=name or None)
+            else:
+                x = labels or [str(i + 1) for i in range(max(len(s) for _, s in series))]
+                for name, data in series:
+                    if kind == "line":
+                        ax.plot(x[: len(data)], data, marker="o", linewidth=2, label=name or None)
+                    else:
+                        ax.bar(x[: len(data)], data, label=name or None)
+                if len(series) > 1:
+                    ax.legend(frameon=False)
+                ax.tick_params(axis="x", labelrotation=30)
+
+            if kind != "pie":
+                if title:
+                    ax.set_title(title, loc="left", fontsize=13, fontweight="bold")
+                if args.get("x_label"):
+                    ax.set_xlabel(str(args["x_label"])[:80])
+                if args.get("y_label"):
+                    ax.set_ylabel(str(args["y_label"])[:80])
+            elif title:
+                ax.set_title(title, loc="left", fontsize=13, fontweight="bold")
+
+            fig.tight_layout()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png")
+            plt.close(fig)
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"chart rendering failed: {exc}")
+
+        try:
+            await ctx.client.files_upload_v2(
+                channel=ctx.channel_id,
+                thread_ts=ctx.thread_ts,
+                file=buf.getvalue(),
+                filename=f"chart-{int(time.time())}.png",
+                initial_comment=f":bar_chart: {title}" if title else ":bar_chart: chart",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"failed to upload chart: {exc}")
+        return f"chart uploaded ({kind})" + (f": {title}" if title else "")
+
+    async def _tool_make_deck(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can build decks")
+        if not ctx.channel_id:
+            return _error("no channel or dm context to post the deck to")
+        title = str(args.get("title") or "").strip()[:140]
+        if not title:
+            return _error("title is required")
+        subtitle = str(args.get("subtitle") or "").strip()[:180]
+        raw_slides = [item for item in (args.get("slides") or []) if isinstance(item, dict)]
+        if not raw_slides:
+            return _error("at least one slide is required")
+        if len(raw_slides) > 30:
+            return _error("that is more than 30 slides; split it into two decks")
+
+        try:
+            from pptx import Presentation
+            from pptx.util import Pt
+
+            prs = Presentation()
+            cover = prs.slides.add_slide(prs.slide_layouts[0])
+            cover.shapes.title.text = title
+            if subtitle and len(cover.placeholders) > 1:
+                cover.placeholders[1].text = subtitle
+
+            for item in raw_slides:
+                slide = prs.slides.add_slide(prs.slide_layouts[1])
+                slide.shapes.title.text = str(item.get("title") or "untitled")[:140]
+                bullets = [str(b)[:400] for b in (item.get("bullets") or [])][:12]
+                body = slide.placeholders[1].text_frame
+                body.clear()
+                for i, bullet in enumerate(bullets):
+                    paragraph = body.paragraphs[0] if i == 0 else body.add_paragraph()
+                    paragraph.text = bullet
+                    paragraph.level = 0
+                    paragraph.font.size = Pt(20)
+                notes = str(item.get("notes") or "").strip()
+                if notes:
+                    slide.notes_slide.notes_text_frame.text = notes[:4000]
+
+            buf = io.BytesIO()
+            prs.save(buf)
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"deck build failed: {exc}")
+
+        try:
+            await ctx.client.files_upload_v2(
+                channel=ctx.channel_id,
+                thread_ts=ctx.thread_ts,
+                file=buf.getvalue(),
+                filename=f"deck-{int(time.time())}.pptx",
+                initial_comment=f":bar_chart: {title} ({len(raw_slides) + 1} slides)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"failed to upload deck: {exc}")
+        return f"deck uploaded: {title} ({len(raw_slides) + 1} slides)"
 
     async def _tool_flaron(self, args: dict[str, Any], ctx: ToolContext) -> str:
         action = str(args.get("action") or "").lower().strip()
@@ -1448,7 +1687,11 @@ class Toolbox:
         )
 
     async def _tool_hackatime_stats(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        username = str(args.get("username") or "SSoggyTacoMan").strip()
+        username = str(
+            args.get("username") or ctx.settings.github_username or ""
+        ).strip()
+        if not username:
+            return _error("username is required; set GITHUB_USERNAME for a default")
         url = f"https://hackatime.hackclub.com/api/v1/users/{quote(username)}/stats"
         try:
             async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "chicen-nugget-bot"}) as http:
@@ -1470,7 +1713,11 @@ class Toolbox:
 
     async def _tool_github_info(self, args: dict[str, Any], ctx: ToolContext) -> str:
         action = str(args.get("action") or "repo").lower().strip()
-        target = str(args.get("target") or "SSoggyTacoMan/chicen-nugget-bot").strip()
+        target = str(args.get("target") or _default_repo(ctx.settings)).strip()
+        if not target:
+            if action == "user":
+                return _error("username is required for action='user'")
+            return _error("target is required; set REPO_URL for a default repository")
         state = str(args.get("state") or "open").lower().strip()
         if state not in {"open", "closed", "all"}:
             state = "open"
@@ -1640,7 +1887,7 @@ class Toolbox:
                 return f"execution failed (exit {proc.returncode}):\n{err_msg}"[:MAX_TOOL_RESULT]
             output = stdout or "(finished with no output)"
             return output[:MAX_TOOL_RESULT]
-        except asyncio.TimeoutError:
+        except TimeoutError:
             try:
                 proc.kill()
             except Exception:
@@ -1800,6 +2047,40 @@ class Toolbox:
         except Exception as exc:  # noqa: BLE001
             return _error(f"urban dictionary lookup failed: {exc}")
 
+    async def _tool_image_access(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can manage image access")
+        action = str(args.get("action") or "list").lower().strip()
+        settings = ctx.settings
+        env_users = sorted(settings.image_user_ids)
+        runtime_users = sorted(image_access.extra(ctx.db))
+
+        if action == "list":
+            return _json(
+                {
+                    "from_env": env_users,
+                    "added_at_runtime": runtime_users,
+                    "admins": sorted(settings.admin_user_ids),
+                }
+            )
+
+        raw = str(args.get("user") or "").strip()
+        user_id = re.sub(r"[<@>]", "", raw).split("|")[0].strip()
+        if not re.fullmatch(r"[UW][A-Z0-9]{6,}", user_id):
+            return _error("pass a Slack user id or @mention")
+
+        if action == "add":
+            if settings.is_admin(user_id):
+                return f"<@{user_id}> is already an admin and always has access"
+            image_access.add(ctx.db, user_id)
+            return f"added <@{user_id}> to the image allowlist"
+        if action == "remove":
+            image_access.remove(ctx.db, user_id)
+            if settings.is_admin(user_id):
+                return f"<@{user_id}> is an admin, so admin access still applies"
+            return f"removed <@{user_id}> from the image allowlist"
+        return _error("action must be list, add or remove")
+
     async def _tool_bot_config(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can view or change bot settings")
@@ -1815,8 +2096,14 @@ class Toolbox:
             "access": "tier2",
             "tier2_channel": "access_channel_id",
             "access_channel": "access_channel_id",
+            "admin_channel": "admin_channel_id",
+            "admin_chan": "admin_channel_id",
+            "admin_channel_id": "admin_channel_id",
             "ambient": "ambient_ai",
             "weather": "weather_location",
+            "updates": "personal_updates",
+            "personal": "personal_updates",
+            "threads": "thread_followups",
         }
         key = key_aliases.get(raw_key, raw_key)
         known_keys = [
@@ -1825,7 +2112,10 @@ class Toolbox:
             "welcomer",
             "tier2",
             "access_channel_id",
+            "admin_channel_id",
             "ambient_ai",
+            "thread_followups",
+            "personal_updates",
             "weather_location",
         ]
 
@@ -1869,18 +2159,29 @@ class Toolbox:
                 return _error("value is required when setting a config")
 
             val_lower = value.lower()
-            if val_lower in {"off", "false", "no", "disable", "disabled", "0"}:
+            if key == "admin_channel_id":
+                if val_lower in {"dm", "dms", "none", "off", "false", "no", "disable", "disabled", "0"}:
+                    normalized_val = "dm"
+                else:
+                    match = re.search(r"[CG][A-Z0-9]{8,}", value, re.IGNORECASE)
+                    normalized_val = match.group(0).upper() if match else value.strip("#")
+            elif val_lower in {"off", "false", "no", "disable", "disabled", "0"}:
                 normalized_val = "false"
             elif val_lower in {"on", "true", "yes", "enable", "enabled", "1"}:
                 normalized_val = "true"
             else:
                 if key == "access_channel_id":
-                    match = re.search(r"C[A-Z0-9]{8,}", value)
-                    normalized_val = match.group(0) if match else value.strip("#")
+                    match = re.search(r"[CG][A-Z0-9]{8,}", value, re.IGNORECASE)
+                    normalized_val = match.group(0).upper() if match else value.strip("#")
                 else:
                     normalized_val = value
 
             ctx.db.kv_set(f"config:{key}", normalized_val)
+
+            if key == "admin_channel_id":
+                if normalized_val == "dm":
+                    return "tier 2 access requests will route to admin DMs."
+                return f"tier 2 access requests will route to <#{normalized_val}>."
 
             if key == "recaps":
                 if normalized_val == "false":
@@ -1904,6 +2205,22 @@ class Toolbox:
                 except Exception:
                     pass
                 return "daily digest enabled."
+
+            if key in {"personal_updates", "thread_followups"}:
+                # Both schedulers only run at startup and on config changes.
+                try:
+                    from bot.features import scheduler
+                    scheduler._ensure_digest_job()
+                    scheduler._ensure_recap_jobs()
+                except Exception:
+                    pass
+                if key == "personal_updates":
+                    if normalized_val == "false":
+                        return "personal updates off. no digest or recap reminder DMs; public recaps keep running."
+                    return "personal updates on. digest and recap reminder DMs are back."
+                if normalized_val == "false":
+                    return "unprompted thread replies off. i'll only answer when tagged in a thread."
+                return "unprompted thread replies on."
 
             return f"updated *{key}* to `{normalized_val}`."
 
@@ -1998,4 +2315,4 @@ def format_now(settings: Settings) -> str:
     return datetime.now(tzinfo()).strftime("%A %d %B %Y, %H:%M %Z")
 
 
-__all__ = ["Toolbox", "ToolContext", "format_now", "format_when"]
+__all__ = ["ToolContext", "Toolbox", "format_now", "format_when"]

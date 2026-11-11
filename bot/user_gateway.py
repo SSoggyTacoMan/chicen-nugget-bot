@@ -20,7 +20,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from bot.ai.limits import user_retry_after
 from bot.runtime import runtime
 from bot.slack_api import fetch_slack_images
-from bot.utils.text import chunk_text, disarm_broadcasts, strip_mentions
+from bot.utils.text import chunk_text, disarm_broadcasts, format_mrkdwn, strip_mentions
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,19 @@ class UserGateway:
             await self._ws.send_json(payload)
         except Exception as exc:  # noqa: BLE001
             logger.debug("failed to send typing indicator: %s", exc)
+
+    async def _presence_loop(self) -> None:
+        """Keep the user account presence active while connected."""
+        while self._running and self._ws and not self._ws.closed:
+            if self.user_client:
+                with suppress(Exception):
+                    await self.user_client.users_setPresence(presence="auto")
+            with suppress(Exception):
+                await self._ws.send_json({"id": self._next_id(), "type": "ping"})
+            try:
+                await asyncio.sleep(45.0)
+            except asyncio.CancelledError:
+                break
 
     @asynccontextmanager
     async def typing(self, channel: str, thread_ts: str | None = None):
@@ -147,17 +160,23 @@ class UserGateway:
                             with suppress(Exception):
                                 await self.user_client.users_setPresence(presence="auto")
 
-                        async for msg in ws:
-                            if not self._running:
-                                break
-                            if msg.type == aiohttp.WSMsgType.TEXT:
-                                try:
-                                    event = msg.json()
-                                    asyncio.create_task(self._handle_event(event))
-                                except Exception as exc:  # noqa: BLE001
-                                    logger.debug("error handling gateway frame: %s", exc)
-                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                                break
+                        presence_task = asyncio.create_task(self._presence_loop())
+                        try:
+                            async for msg in ws:
+                                if not self._running:
+                                    break
+                                if msg.type == aiohttp.WSMsgType.TEXT:
+                                    try:
+                                        event = msg.json()
+                                        asyncio.create_task(self._handle_event(event))
+                                    except Exception as exc:  # noqa: BLE001
+                                        logger.debug("error handling gateway frame: %s", exc)
+                                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                    break
+                        finally:
+                            presence_task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await presence_task
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # noqa: BLE001
@@ -267,7 +286,7 @@ class UserGateway:
                 with suppress(Exception):
                     await self.user_client.chat_postMessage(
                         channel=channel,
-                        text=f"slow down a lil — try again in {retry}s :3",
+                        text=f"slow down a lil, try again in {retry}s :3",
                         thread_ts=root_ts if not is_dm else None,
                         unfurl_links=False,
                         unfurl_media=False,
@@ -316,7 +335,7 @@ class UserGateway:
             runtime.db.mark_thread(channel, root_ts)
 
         if self.user_client:
-            for chunk in chunk_text(disarm_broadcasts(answer)):
+            for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
                 try:
                     await self.user_client.chat_postMessage(
                         channel=channel,

@@ -131,7 +131,7 @@ def collect_system_diagnostics(
 
 def format_system_diagnostics(info: dict[str, Any]) -> str:
     return (
-        f"*{info['bot_name']} — system diagnostics*\n"
+        f"*{info['bot_name']}: system diagnostics*\n"
         f"• host: `{info['platform']}`\n"
         f"• runtime: `{info['python_version']}` · uptime: *{info['uptime']}*\n"
         f"• load avg (1, 5, 15m): `{info['load_avg']}` · threads: `{info['threads']}`\n"
@@ -145,7 +145,7 @@ def format_system_diagnostics(info: dict[str, Any]) -> str:
 def build_digest(db: Database, settings: Settings, tz: ZoneInfo) -> str:
     stats = collect_stats(db)
     lines = [
-        f"*good morning — {settings.bot_name} daily digest*",
+        f"*good morning - {settings.bot_name} daily digest*",
         f"_{datetime.now(tz).strftime('%A %d %B %Y, %H:%M %Z')}_",
         "",
         f"*joins:* {stats['joins_24h']} in the last 24h · {stats['joins_7d']} this week",
@@ -162,7 +162,7 @@ def build_digest(db: Database, settings: Settings, tz: ZoneInfo) -> str:
             reason = (request.get("reason") or "no reason given").replace("\n", " ")
             if len(reason) > 100:
                 reason = reason[:97] + "..."
-            lines.append(f"• `#{request['id']}` <@{request['user_id']}> — {reason}")
+            lines.append(f"• `#{request['id']}` <@{request['user_id']}>: {reason}")
 
     upcoming = db.list_reminders()
     if upcoming:
@@ -173,6 +173,6 @@ def build_digest(db: Database, settings: Settings, tz: ZoneInfo) -> str:
             body = reminder["text"].replace("\n", " ")
             if len(body) > 80:
                 body = body[:77] + "..."
-            lines.append(f"• {when.strftime('%a %H:%M')} — {body}")
+            lines.append(f"• {when.strftime('%a %H:%M')}: {body}")
 
     return "\n".join(lines)

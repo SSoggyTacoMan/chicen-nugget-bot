@@ -55,18 +55,26 @@ def settings(**overrides):
     return SimpleNamespace(**base)
 
 
-def answers(should=0.0, addressed=0.0, spam=0.0, kind="other", confidence=0.8):
+def answers(should=0.0, addressed=0.0, spam=0.0, kind="other", confidence=0.8,
+            needs_tools=0.0, recipient="everyone", recipient_bot=0.0):
     return {
         "should_reply": Answer(type="noul", noul=should, confidence=should),
         "addressed": Answer(type="noul", noul=addressed, confidence=addressed),
         "spam": Answer(type="noul", noul=spam, confidence=spam),
+        "needs_tools": Answer(type="noul", noul=needs_tools, confidence=needs_tools),
         "kind": Answer(type="choice", choice=kind, confidence=confidence),
+        "recipient": Answer(
+            type="choice",
+            choice=recipient,
+            confidence=0.8,
+            probabilities={"bot": recipient_bot, "someone_else": 1 - recipient_bot},
+        ),
     }
 
 
-def decide(jev_answers, text="hello", budget=None, user_id="U1", **overrides):
+def decide(jev_answers, text="hello", budget=None, user_id="U1", bot_last=False, **overrides):
     gate = Gate(settings(**overrides), jev=FakeJev(jev_answers), budget=budget)
-    return asyncio.run(gate.decide(text=text, user_id=user_id))
+    return asyncio.run(gate.decide(text=text, user_id=user_id, bot_last=bot_last))
 
 
 def test_high_probability_replies():
@@ -90,6 +98,40 @@ def test_addressed_wins_even_when_should_is_low():
 def test_spam_is_skipped_even_when_probable():
     result = decide(answers(should=0.95, spam=0.9), text="free nitro click here")
     assert not result.reply
+
+
+def test_message_aimed_at_someone_else_stays_quiet():
+    result = decide(
+        answers(should=0.9, kind="chatter", recipient="someone_else"),
+        text="yeah that repo is wild",
+    )
+    assert not result.reply
+    assert result.recipient == "someone_else"
+
+
+def test_recipient_bot_counts_as_directed():
+    result = decide(
+        answers(should=0.1, kind="bot", recipient="bot", recipient_bot=0.85),
+        text="you there?",
+    )
+    assert result.reply
+    assert "aimed at you" in result.hint()
+
+
+def test_hint_mentions_tools_and_bot_last():
+    result = decide(
+        answers(should=0.9, kind="question", needs_tools=0.8),
+        text="what's the weather?",
+        bot_last=True,
+    )
+    hint = result.hint()
+    assert "needs live data" in hint
+    assert "you spoke last" in hint
+
+
+def test_state_includes_bot_last():
+    state = _state("latest one", "#chan", "someone", None, bot_last=True)
+    assert "the bot spoke last: yes" in state
 
 
 def test_threshold_is_configurable():
@@ -141,9 +183,9 @@ def test_exhausted_user_skips_jev_entirely():
 
 
 def test_state_includes_recent_messages():
-    state = _state("latest one", "#chan", "maaren", ["older one", "older two"])
+    state = _state("latest one", "#chan", "someone", ["older one", "older two"])
     assert "channel: #chan" in state
-    assert "speaker: maaren" in state
+    assert "speaker: someone" in state
     assert "- older one" in state
     assert state.rstrip().endswith("latest message: latest one")
 

@@ -59,7 +59,7 @@ async def on_message(event: dict[str, Any], client) -> None:
                 await post(
                     client,
                     user_id,
-                    "hey! please don't thread on user group mentions — "
+                    "hey! please don't thread on user group mentions: "
                     "replying in the thread pings the whole group again. :3",
                 )
         return

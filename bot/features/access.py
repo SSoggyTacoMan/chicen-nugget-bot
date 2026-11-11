@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from bot.runtime import runtime
@@ -39,6 +39,21 @@ def access_channel_id() -> str | None:
         if override:
             return override
     return runtime.settings.access_channel_id
+
+
+def admin_channel_id() -> str | None:
+    """Channel ID where access requests are sent for admin review.
+
+    If 'dm', 'dms', or unset, requests route to admin DMs.
+    """
+    if runtime.db:
+        override = runtime.db.kv_get("config:admin_channel_id")
+        if override is not None:
+            val = override.strip()
+            if val.lower() in {"dm", "dms", "none", ""}:
+                return None
+            return val
+    return runtime.settings.admin_channel_id
 
 
 def access_enabled() -> bool:
@@ -80,7 +95,7 @@ async def ensure_panel(client, channel: str | None = None) -> str | None:
             ],
         },
     ]
-    text = "tier 2 access — hit the button to request it"
+    text = "tier 2 access: hit the button to request it"
     key = PANEL_KV.format(channel)
     ts = runtime.db.kv_get(key)
     if ts:
@@ -183,8 +198,7 @@ async def on_request_submit(ack, body, view, client) -> None:
             await post(
                 client,
                 user_id,
-                f"you're already inside {channel_mention(target_channel)} — "
-                "the door's already open for you. :door:",
+                f"you're already a member of {channel_mention(target_channel)}.",
             )
             return
 
@@ -197,7 +211,7 @@ async def on_request_submit(ack, body, view, client) -> None:
     if last:
         created = _parse_iso(last.get("created_at"))
         cooldown = timedelta(hours=settings.access_cooldown_hours)
-        if created and datetime.now(timezone.utc) - created < cooldown:
+        if created and datetime.now(UTC) - created < cooldown:
             if last.get("status") == "approved":
                 await post(
                     client,
@@ -206,7 +220,7 @@ async def on_request_submit(ack, body, view, client) -> None:
                     "if you're not in it, ask an admin to re-invite you.",
                 )
             else:
-                remaining = cooldown - (datetime.now(timezone.utc) - created)
+                remaining = cooldown - (datetime.now(UTC) - created)
                 hours = max(1, int(remaining.total_seconds() // 3600))
                 await post(client, user_id, f"you asked recently. try again in about {hours}h.")
             return
@@ -220,8 +234,7 @@ async def on_request_submit(ack, body, view, client) -> None:
             await post(
                 client,
                 user_id,
-                "the door swings open — you're in "
-                f"{channel_mention(target_channel)}! :tada:",
+                f"you're in {channel_mention(target_channel)}! :tada:",
             )
             await _log(
                 f"tier 2 request *#{request_id}* from <@{user_id}> auto-approved: "
@@ -232,14 +245,13 @@ async def on_request_submit(ack, body, view, client) -> None:
         await post(
             client,
             user_id,
-            f"the door's stuck (`{error}`) — i sent request *#{request_id}* to an admin.",
+            f"auto-invite failed (`{error}`). i forwarded request *#{request_id}* to the admins.",
         )
     else:
         await post(
             client,
             user_id,
-            f"the door creaks… request *#{request_id}* is with the admins. "
-            "i'll dm you when they decide.",
+            f"request *#{request_id}* submitted for admin review. you'll get a DM once decided.",
         )
 
     await _notify_admins(client, request_id, user_id, reason)
@@ -254,7 +266,7 @@ def _parse_iso(value: str | None) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value)
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     except ValueError:
         return None
 
@@ -313,7 +325,8 @@ async def _notify_admins(client, request_id: int, user_id: str, reason: str) -> 
     }
     fallback = f"tier 2 access request #{request_id} from <@{user_id}>: {escape_mrkdwn(reason) or 'no reason given'}"
     blocks = _request_blocks(request)
-    targets = [settings.admin_channel_id] if settings.admin_channel_id else sorted(settings.admin_user_ids)
+    adm_chan = admin_channel_id()
+    targets = [adm_chan] if adm_chan else (sorted(settings.admin_user_ids) or ([settings.owner_user_id] if settings.owner_user_id else []))
     first: tuple[str, str] | None = None
     for target in targets:
         result = await post(client, target, fallback, blocks=blocks)
@@ -329,12 +342,12 @@ async def _decision_blocks(
     if status == "approved":
         label = ":white_check_mark: approved"
         detail = (
-            f"the door swings open — approved by <@{admin_id}>, invited to "
+            f"approved by <@{admin_id}>, invited to "
             f"{channel_mention(access_channel_id() or '')}."
         )
     else:
         label = ":x: denied"
-        detail = f"the door stays shut — denied by <@{admin_id}>."
+        detail = f"denied by <@{admin_id}>."
         if note:
             detail += f"\nreason: {note}"
     reason = escape_mrkdwn((request.get("reason") or "no reason given").replace("\n", " "))
@@ -343,7 +356,7 @@ async def _decision_blocks(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*tier 2 request #{request['id']} — {label}*\n"
+                "text": f"*tier 2 request #{request['id']} - {label}*\n"
                 f"from <@{request['user_id']}> · {reason}\n{detail}",
             },
         }
@@ -371,7 +384,7 @@ async def on_approve(ack, body, client) -> None:
     )
     if not ok:
         hint = {
-            "not_in_channel": "i'm not in the private channel — invite me to it, then try again.",
+            "not_in_channel": "i'm not in the private channel, invite me to it then try again.",
             "missing_scope": "i need the groups:write scope to invite people.",
             "channel_not_found": "ACCESS_CHANNEL_ID doesn't point at a channel i can see.",
         }.get(error or "", "check my scopes and channel membership.")
@@ -384,8 +397,7 @@ async def on_approve(ack, body, client) -> None:
     await post(
         client,
         request["user_id"],
-        "the door swings open — you're in! welcome to "
-        f"{channel_mention(access_channel_id() or '')} :tada:",
+        f"your request was approved. welcome to {channel_mention(access_channel_id() or '')}! :tada:",
     )
     await _log(f"tier 2 request *#{request_id}* approved by <@{admin_id}> for <@{request['user_id']}>.")
 
@@ -448,7 +460,7 @@ async def on_deny(ack, body, client) -> None:
 async def on_deny_submit(ack, body, view, client) -> None:
     await ack()
     try:
-        metadata = json.loads((view.get("private_metadata") or "{}"))
+        metadata = json.loads(view.get("private_metadata") or "{}")
     except json.JSONDecodeError:
         return
     admin_id = metadata.get("admin") or (body.get("user") or {}).get("id")
@@ -474,7 +486,7 @@ async def on_deny_submit(ack, body, view, client) -> None:
     await post(
         client,
         request["user_id"],
-        f"the door stays shut for now — your tier 2 request *#{request['id']}* was denied."
+        f"your tier 2 request *#{request['id']}* was denied."
         + (f"\nreason: {note}" if note else ""),
     )
     await _log(f"tier 2 request *#{request['id']}* denied by <@{admin_id}> for <@{request['user_id']}>.")
@@ -524,8 +536,10 @@ async def cmd_pending(ack, command, client) -> None:
         created = _parse_iso(row.get("created_at"))
         when = format_when(created, tz) if created else "unknown"
         reason = escape_mrkdwn((row.get("reason") or "no reason given").replace("\n", " "))
-        lines.append(f"• `#{row['id']}` <@{row['user_id']}> — {reason} _(requested {when})_")
-    lines.append("\napprove/deny from the admin DM, or `/pending` again after acting.")
+        lines.append(f"• `#{row['id']}` <@{row['user_id']}>: {reason} _(requested {when})_")
+    adm_chan = admin_channel_id()
+    where = f"<#{adm_chan}>" if adm_chan else "the admin DM"
+    lines.append(f"\napprove/deny from {where}, or `/pending` again after acting.")
     await post_ephemeral(client, channel_id, user_id, "\n".join(lines))
 
 
@@ -565,4 +579,4 @@ async def _log(text: str) -> None:
     await post(runtime.client, channel, text)
 
 
-__all__ = ["register", "ensure_panel"]
+__all__ = ["ensure_panel", "register"]

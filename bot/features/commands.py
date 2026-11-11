@@ -8,7 +8,7 @@ import re
 import time
 from typing import Any
 
-from bot.runtime import runtime
+from bot import image_access
 from bot.features.stats import (
     build_digest,
     collect_system_diagnostics,
@@ -17,6 +17,7 @@ from bot.features.stats import (
     format_uptime,
 )
 from bot.reminders import confirmation_text, create_reminder, dm_target, reminder_line
+from bot.runtime import runtime
 from bot.slack_api import (
     all_channels,
     channel_info,
@@ -32,49 +33,50 @@ from bot.utils.tz import tzinfo
 logger = logging.getLogger(__name__)
 
 
-HELP = """*{bot} — everything lives under `/nugget`*
+HELP = """*{bot}: everything lives under `/nugget`*
 
 *basics*
-• `/nugget` — a random nugget fact
-• `/nugget help` — this message
-• `/nugget ping` — check I'm alive
-• `/nugget id` — show channel/user ids
+• `/nugget` - a random nugget fact
+• `/nugget help` - this message
+• `/nugget ping` - check I'm alive
+• `/nugget id` - show channel/user ids
 • `/nugget whois @someone`
 
 *welcoming / access*
-• `/nugget access` — request tier 2 access
-• `/nugget pending` — admin: list pending requests
-• `/nugget accesspanel` — admin: post/update the access panel
+• `/nugget access` - request tier 2 access
+• `/nugget pending` - admin: list pending requests
+• `/nugget accesspanel` - admin: post/update the access panel
 
 *reminders*
-• `/nugget reminder 10m stretch` — DM reminder
+• `/nugget reminder 10m stretch` - DM reminder
 • `/nugget reminder tomorrow 09:00 standup`
-• `/nugget reminder #general daily 09:00 good morning` — admin only
+• `/nugget reminder #general daily 09:00 good morning` - admin only
 • `/nugget reminder weekly mon 18:00 weekly recap`
-• `/nugget reminders` — list yours (`/nugget reminders all` for admins)
+• `/nugget reminders` - list yours (`/nugget reminders all` for admins)
 • `/nugget cancel <id>`
-• `/nugget schedule <#channel> <when> <text>` — admin scheduled message
-• `/nugget recap` — admin: post the daily recap prompt now
+• `/nugget schedule <#channel> <when> <text>` - admin scheduled message
+• `/nugget recap` - admin: post the daily recap prompt now
 
 *ai*
-• `/nugget ask <question>` — one-shot ai answer
-• `/nugget summarize [n]` — ai catch-up for this channel
-• `/nugget imagine <prompt> [--wide|--tall|--ratio 4:3]` — admin image generation
-• `/nugget budget` — admin: today's ai spend and limits
-• `/nugget forget` — wipe stored ai memory (DM or channel)
+• `/nugget ask <question>` - one-shot ai answer
+• `/nugget summarize [n]` - ai catch-up for this channel
+• `/nugget imagine <prompt> [--wide|--tall|--ratio 4:3]` - image generation
+• `/nugget imageaccess [list|add @user|remove @user]` - admin: who may make images
+• `/nugget budget` - admin: today's ai spend and limits
+• `/nugget forget` - wipe stored ai memory (DM or channel)
 
 *tasks*
-• `/nugget todo` — list your pending tasks (`/nugget todo all` for all)
-• `/nugget todo add <text>` — add a new task
-• `/nugget todo done <id>` — complete a task
-• `/nugget todo rm <id>` — remove a task
+• `/nugget todo` - list your pending tasks (`/nugget todo all` for all)
+• `/nugget todo add <text>` - add a new task
+• `/nugget todo done <id>` - complete a task
+• `/nugget todo rm <id>` - remove a task
 
 *developer & admin*
-• `/nugget sysinfo` — admin: host diagnostics (RAM, CPU, disk, commit)
-• `/nugget config` — view or change runtime settings (recaps, tier2, welcomer, etc.)
-• `/nugget stats` — admin workspace stats
-• `/nugget digest` — admin: daily digest now
-• `/nugget budget` — admin: today's ai spend and limits
+• `/nugget sysinfo` - admin: host diagnostics (RAM, CPU, disk, commit)
+• `/nugget config` - view or change runtime settings (recaps, tier2, admin_channel, welcomer, etc.)
+• `/nugget stats` - admin workspace stats
+• `/nugget digest` - admin: daily digest now
+• `/nugget budget` - admin: today's ai spend and limits
 
 or just DM me / mention me and talk to my AI brain."""
 
@@ -103,7 +105,7 @@ async def cmd_ping(ack, command, client) -> None:
     await post(
         client,
         command["channel_id"],
-        f":ping_pong: pong — {settings.bot_name} is awake "
+        f":ping_pong: pong - {settings.bot_name} is awake "
         f"({elapsed:.0f} ms api round trip, up {format_uptime(runtime.started_at)}). ai: {ai}",
     )
 
@@ -154,8 +156,8 @@ async def cmd_whois(ack, command, client) -> None:
         f"*{display_name(user)}* (<@{user.get('id')}>)",
         f"• id: `{user.get('id')}`",
         f"• username: `{user.get('name')}`",
-        f"• title: {profile.get('title') or '—'}",
-        f"• timezone: `{user.get('tz') or '—'}` ({user.get('tz_label') or '—'})",
+        f"• title: {profile.get('title') or '-'}",
+        f"• timezone: `{user.get('tz') or '-'}` ({user.get('tz_label') or '-'})",
         f"• bot: `{str(user.get('is_bot')).lower()}` · admin: `{str(user.get('is_admin')).lower()}`",
     ]
     await _say(client, command, "\n".join(lines), ephemeral=True)
@@ -191,7 +193,7 @@ async def _create_reminder(client, command: dict[str, Any], *, require_channel: 
         await _say(
             client,
             command,
-            "usage: `/schedule <#channel> <when> <text>` — I need a channel to post in.",
+            "usage: `/schedule <#channel> <when> <text>` - I need a channel to post in.",
             ephemeral=True,
         )
         return
@@ -362,7 +364,7 @@ async def cmd_budget(ack, command, client) -> None:
         f"${settings.ai_daily_budget_usd:.2f}/day" if settings.ai_daily_budget_usd > 0 else "off"
     )
     lines = [
-        "*ai usage — today (UTC)*",
+        "*ai usage - today (UTC)*",
         f"• you: *${mine.spent:.4f}* · *{mine.calls}* calls · limit *{my_limit}*",
         f"• workspace: *${status.spent:.4f}* · *{status.calls}* calls",
         "• resets at 00:00 UTC",
@@ -382,7 +384,7 @@ async def cmd_budget(ack, command, client) -> None:
         lines.append("*your breakdown*")
         for row in rows[:8]:
             lines.append(
-                f"• `{row['kind']}` · `{row['model']}` — {row['calls']} calls · "
+                f"• `{row['kind']}` · `{row['model']}`: {row['calls']} calls · "
                 f"${row['cost_usd']:.4f}"
             )
 
@@ -391,7 +393,7 @@ async def cmd_budget(ack, command, client) -> None:
         lines.append("")
         lines.append("*top users*")
         for row in top:
-            lines.append(f"• <@{row['user_id']}> — *${row['cost_usd']:.4f}* · {row['calls']} calls")
+            lines.append(f"• <@{row['user_id']}>: *${row['cost_usd']:.4f}* · {row['calls']} calls")
     await _say(client, command, "\n".join(lines), ephemeral=True)
 
 
@@ -421,16 +423,25 @@ async def cmd_config(ack, command, client) -> None:
         "access": "tier2",
         "tier2_channel": "access_channel_id",
         "access_channel": "access_channel_id",
+        "admin_channel": "admin_channel_id",
+        "admin_chan": "admin_channel_id",
+        "admin_channel_id": "admin_channel_id",
         "ambient": "ambient_ai",
         "weather": "weather_location",
+        "updates": "personal_updates",
+        "personal": "personal_updates",
+        "threads": "thread_followups",
     }
     known_keys = [
         "recaps",
         "daily_digest",
+        "personal_updates",
         "welcomer",
         "tier2",
         "access_channel_id",
+        "admin_channel_id",
         "ambient_ai",
+        "thread_followups",
         "weather_location",
     ]
 
@@ -500,14 +511,20 @@ async def cmd_config(ack, command, client) -> None:
         await _say(client, command, f"unknown setting `{raw_key}`. valid settings: {', '.join(known_keys)}", ephemeral=True)
         return
     val_lower = raw_val.lower()
-    if val_lower in {"off", "false", "no", "disable", "disabled", "0"}:
+    if key == "admin_channel_id":
+        if val_lower in {"dm", "dms", "none", "off", "false", "no", "disable", "disabled", "0"}:
+            norm = "dm"
+        else:
+            m = re.search(r"[CG][A-Z0-9]{8,}", raw_val, re.IGNORECASE)
+            norm = m.group(0).upper() if m else raw_val.strip("#")
+    elif val_lower in {"off", "false", "no", "disable", "disabled", "0"}:
         norm = "false"
     elif val_lower in {"on", "true", "yes", "enable", "enabled", "1"}:
         norm = "true"
     else:
         if key == "access_channel_id":
-            m = re.search(r"C[A-Z0-9]{8,}", raw_val)
-            norm = m.group(0) if m else raw_val.strip("#")
+            m = re.search(r"[CG][A-Z0-9]{8,}", raw_val, re.IGNORECASE)
+            norm = m.group(0).upper() if m else raw_val.strip("#")
         else:
             norm = raw_val
 
@@ -544,6 +561,46 @@ async def cmd_config(ack, command, client) -> None:
         return
 
     await _say(client, command, f":white_check_mark: updated *{key}* to `{norm}`.", ephemeral=True)
+
+
+async def cmd_imageaccess(ack, command, client) -> None:
+    await ack()
+    user = command.get("user_id")
+    if not runtime.settings.is_admin(user):
+        await _say(client, command, "only admins can manage image access.", ephemeral=True)
+        return
+    parts = (command.get("text") or "").split()
+    action = parts[0].lower() if parts else "list"
+    if action == "list":
+        env_users = sorted(runtime.settings.image_user_ids)
+        runtime_users = sorted(image_access.extra(runtime.db))
+        lines = ["*image generation access*"]
+        lines.append(
+            "• from `IMAGE_ALLOWED_USER_IDS`: "
+            + (", ".join(f"<@{u}>" for u in env_users) if env_users else "_none_")
+        )
+        lines.append(
+            "• added at runtime: "
+            + (", ".join(f"<@{u}>" for u in runtime_users) if runtime_users else "_none_")
+        )
+        lines.append("• admins always have access.")
+        lines.append("_use `/nugget imageaccess add @user` or `remove @user`_")
+        await _say(client, command, "\n".join(lines), ephemeral=True)
+        return
+
+    if action not in {"add", "remove"} or len(parts) < 2:
+        await _say(client, command, "usage: `/nugget imageaccess [list|add @user|remove @user]`", ephemeral=True)
+        return
+    token = extract_id(parts[1], "U")
+    if not token:
+        await _say(client, command, "pass a Slack @mention or user id.", ephemeral=True)
+        return
+    if action == "add":
+        image_access.add(runtime.db, token)
+        await _say(client, command, f":white_check_mark: <@{token}> can generate images now.", ephemeral=True)
+        return
+    image_access.remove(runtime.db, token)
+    await _say(client, command, f":white_check_mark: removed image access for <@{token}>.", ephemeral=True)
 
 
 async def cmd_sysinfo(ack, command, client) -> None:

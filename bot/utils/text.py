@@ -80,3 +80,29 @@ def disarm_broadcasts(text: str) -> str:
     """Disarm Slack broadcast mentions (<!channel>, <!everyone>, <!here>, <!subteam^...>) to prevent unwanted pings."""
     return re.sub(r"<!(channel|everyone|here|subteam\^[A-Z0-9]+)(?:\|[^>]*)?>", r"@\1", text or "")
 
+
+def format_mrkdwn(text: str) -> str:
+    """Normalize common Markdown constructs (bold, links, headings, dashes) to Slack mrkdwn.
+
+    Protects fenced code blocks and inline code spans from modification.
+    """
+    if not text:
+        return ""
+    pattern = r"(```[\s\S]*?```|`[^`\n]*`)"
+    tokens = re.split(pattern, text)
+    out: list[str] = []
+    for i, token in enumerate(tokens):
+        if i % 2 == 1:
+            out.append(token)
+            continue
+        t = token
+        t = t.replace(" — ", " - ").replace("—", " - ").replace("–", "-")
+        t = re.sub(r"\*\*\*(.+?)\*\*\*", r"*_\1_*", t)
+        t = re.sub(r"\*\*(.+?)\*\*", r"*\1*", t)
+        t = re.sub(r"~~(.+?)~~", r"~\1~", t)
+        t = re.sub(r"\[([^\]\n]+)\]\((https?://[^\)\s]+)\)", r"<\2|\1>", t)
+        t = re.sub(r"(?m)^#{1,6}\s+([^\n]+)$", r"*\1*", t)
+        out.append(t)
+    return "".join(out)
+
+

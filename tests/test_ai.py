@@ -89,6 +89,7 @@ def test_parse_slack_ref():
 
 def test_toolbox_has_expanded_tools():
     from unittest.mock import MagicMock
+
     from bot.ai.tools import Toolbox
 
     box = Toolbox(MagicMock())
@@ -116,6 +117,7 @@ def test_toolbox_has_expanded_tools():
 def test_owner_only_tools_guard():
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
+
     from bot.ai.tools import Toolbox, ToolContext
 
     box = Toolbox(MagicMock())
@@ -164,6 +166,7 @@ def test_owner_only_tools_guard():
 def test_dog_and_taco_channel_tools():
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
+
     from bot.ai.tools import Toolbox, ToolContext
 
     box = Toolbox(MagicMock())
@@ -192,6 +195,7 @@ def test_dog_and_taco_channel_tools():
 def test_run_code_execution():
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
+
     from bot.ai.tools import Toolbox, ToolContext
 
     box = Toolbox(MagicMock())
@@ -220,6 +224,7 @@ def test_email_helpers_and_unconfigured():
     import asyncio
     from email.message import EmailMessage
     from unittest.mock import AsyncMock, MagicMock
+
     from bot.ai.tools import Toolbox, ToolContext, _decode_mime, _extract_mime_body
 
     assert _decode_mime("=?utf-8?B?SGVsbG8gV29ybGQ=?=") == "Hello World"
@@ -256,6 +261,7 @@ def test_email_helpers_and_unconfigured():
 def test_bot_config_tool(tmp_path):
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
+
     from bot.ai.tools import Toolbox, ToolContext
     from bot.db import Database
 
@@ -321,13 +327,25 @@ def test_bot_config_tool(tmp_path):
         assert "C012345678" in res_ch
         assert db.kv_get("config:access_channel_id") == "C012345678"
 
+        # Set admin channel to private channel
+        res_adm = await box.execute("bot_config", {"action": "set", "key": "admin_channel", "value": "<#C99999999|admin-reviews>"}, ctx_owner)
+        assert "C99999999" in res_adm
+        assert db.kv_get("config:admin_channel_id") == "C99999999"
+
+        # Set admin channel to dm
+        res_dm = await box.execute("bot_config", {"action": "set", "key": "admin_channel", "value": "dm"}, ctx_owner)
+        assert "admin DMs" in res_dm
+        assert db.kv_get("config:admin_channel_id") == "dm"
+
     asyncio.run(run())
 
 
 def test_fetch_slack_images():
     import asyncio
     from unittest.mock import MagicMock, patch
+
     import httpx
+
     from bot.slack_api import fetch_slack_images
 
     event = {
@@ -368,6 +386,7 @@ def test_fetch_slack_images():
 def test_agent_reply_with_images(tmp_path):
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
+
     from bot.ai.agent import Agent
     from bot.db import Database
 
@@ -424,7 +443,9 @@ def test_agent_reply_with_images(tmp_path):
 def test_fetch_slack_images_from_text_urls():
     import asyncio
     from unittest.mock import MagicMock, patch
+
     import httpx
+
     from bot.slack_api import fetch_slack_images
 
     event = {
@@ -450,6 +471,7 @@ def test_fetch_slack_images_from_text_urls():
 def test_cmd_config(tmp_path):
     import asyncio
     from unittest.mock import AsyncMock, patch
+
     from bot.db import Database
     from bot.features.commands import cmd_config
     from bot.runtime import runtime
@@ -493,10 +515,11 @@ def test_cmd_config(tmp_path):
 def test_thread_continuation_image_handling(tmp_path):
     import asyncio
     from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.ai.gate import GateDecision
     from bot.db import Database
     from bot.features.agent import _handle_thread_continuation
     from bot.runtime import runtime
-    from bot.ai.gate import GateDecision
 
     db = Database(str(tmp_path / "thread_test.db"))
     db.init()
@@ -558,7 +581,9 @@ def test_security_hardening(tmp_path):
     import asyncio
     import os
     from unittest.mock import AsyncMock, MagicMock, patch
+
     import httpx
+
     from bot.ai.tools import Toolbox, ToolContext
     from bot.slack_api import ssrf_filter
     from bot.utils.text import disarm_broadcasts, escape_mrkdwn

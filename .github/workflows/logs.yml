@@ -17,6 +17,11 @@ jobs:
     env:
       SSH_OPTS: -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
       LINES: ${{ inputs.lines }}
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || 'slackbot' }}
+      SERVICE_NAME: ${{ secrets.SERVICE_NAME || 'chicen-nugget-bot' }}
     steps:
       - name: configure ssh
         env:
@@ -26,7 +31,7 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H hackclub.app >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
           chmod 600 ~/.ssh/known_hosts
 
       - name: tail log
@@ -35,19 +40,15 @@ jobs:
           case "$LINES" in
             ''|*[!0-9]*) echo "lines must be a number"; exit 1 ;;
           esac
-          ssh $SSH_OPTS maaren@hackclub.app "
+          ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "
             echo '--- service ---'
-            systemctl is-active chicen-nugget-bot || true
-            systemctl show -p ActiveEnterTimestamp --value chicen-nugget-bot || true
-            echo '--- other services ---'
-            systemctl list-units --type=service --all 2>/dev/null | grep -Ei 'nugget|mochi|novabot|slack' || true
-            echo '--- processes ---'
-            ps -eo pid,etime,cmd 2>/dev/null | grep -Ei 'python.*(main|bot|slack)' | grep -v grep || true
+            systemctl is-active $SERVICE_NAME || true
+            systemctl show -p ActiveEnterTimestamp --value $SERVICE_NAME || true
             echo '--- prompt ---'
-            md5sum ~/slackbot/prompts/system.md 2>/dev/null || true
-            head -n 6 ~/slackbot/prompts/system.md 2>/dev/null || true
+            md5sum ~/$DEPLOY_PATH/prompts/system.md 2>/dev/null || true
+            head -n 6 ~/$DEPLOY_PATH/prompts/system.md 2>/dev/null || true
             echo '--- env ---'
-            grep -E '^(AI_MODEL|AI_FALLBACK_MODEL|AI_USER_DAILY_BUDGET_USD|AI_DAILY_BUDGET_USD)=' ~/slackbot/.env 2>/dev/null || true
+            grep -E '^(AI_MODEL|AI_FALLBACK_MODEL|AI_USER_DAILY_BUDGET_USD|AI_DAILY_BUDGET_USD)=' ~/$DEPLOY_PATH/.env 2>/dev/null || true
             echo '--- log ---'
-            tail -n $LINES ~/slackbot/logs/bot.log
+            tail -n $LINES ~/$DEPLOY_PATH/logs/bot.log
           "

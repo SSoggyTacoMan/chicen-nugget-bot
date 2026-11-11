@@ -6,8 +6,8 @@ import logging
 import time
 from typing import Any
 
-from bot.runtime import runtime
 from bot.ai.limits import user_retry_after
+from bot.runtime import runtime
 from bot.slack_api import (
     channel_info,
     fetch_slack_images,
@@ -17,13 +17,22 @@ from bot.slack_api import (
     unreact,
     user_info,
 )
-from bot.utils.text import chunk_text, disarm_broadcasts, display_name, strip_mentions
+from bot.utils.text import (
+    chunk_text,
+    disarm_broadcasts,
+    display_name,
+    format_mrkdwn,
+    strip_mentions,
+)
 
 logger = logging.getLogger(__name__)
 
 # channel_id -> monotonic time of the last unprompted reply, so the gate saying
 # yes five times in a row doesn't turn into five replies in a row.
 _last_ambient: dict[str, float] = {}
+# (channel, thread_ts) -> monotonic time of the last unprompted thread reply, so
+# a busy thread can't turn into a monologue.
+_last_thread: dict[tuple[str, str], float] = {}
 _names: dict[str, str] = {}
 
 
@@ -92,7 +101,7 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
         text = "Describe or look at this image."
     retry = user_retry_after(user_id)
     if retry:
-        await post(client, event["channel"], f"slow down a lil — try again in {retry}s :3")
+        await post(client, event["channel"], f"slow down a lil, try again in {retry}s :3")
         return
     message_ts = event.get("ts")
     if message_ts:
@@ -111,10 +120,10 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
                     trigger="dm",
                     images=images,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("dm agent turn failed")
                 answer = "something broke on my side. check my logs?"
-        for chunk in chunk_text(disarm_broadcasts(answer)):
+        for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
             await post(client, event["channel"], chunk)
     finally:
         if message_ts:
@@ -131,6 +140,8 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         return
     if not runtime.db.is_thread(channel, thread_ts):
         return
+    if runtime.db.kv_get("config:thread_followups") == "false":
+        return
     text = (event.get("text") or "").strip()
     if not text:
         return
@@ -143,20 +154,44 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
 
     images = await fetch_slack_images(event, runtime.settings.slack_bot_token)
 
+    rows = runtime.db.history(f"ch:{channel}:{thread_ts}", 8)
+    bot_last = bool(rows and rows[-1].get("role") == "assistant")
+    recent = await _recent_lines(client, rows)
+
     jev_hint = ""
-    is_owner = user_id == runtime.settings.owner_user_id
-    if not is_owner and runtime.gate is not None and runtime.settings.ai_gate_enabled:
+    directed = False
+    if runtime.gate is not None and runtime.settings.ai_gate_enabled:
         user_name = await _user_name(client, user_id)
         channel_name = await _channel_name(client, channel)
         decision = await runtime.gate.decide(
-            text=text, channel_name=channel_name, user_name=user_name, user_id=user_id
+            text=text,
+            channel_name=channel_name,
+            user_name=user_name,
+            user_id=user_id,
+            recent=recent,
+            bot_last=bot_last,
         )
         if not decision.reply:
-            logger.info("gate suppressed thread continuation for %s in %s: %s", user_id, channel, decision.kind)
+            logger.info(
+                "gate suppressed thread continuation for %s in %s: %s",
+                user_id,
+                channel,
+                decision.kind,
+            )
             return
+        directed = (
+            decision.addressed >= runtime.settings.ai_gate_addressed_confidence
+            or decision.recipient_bot >= runtime.settings.ai_gate_addressed_confidence
+        )
         jev_hint = decision.hint()
 
-    await _handle_channel(
+    cooldown = runtime.settings.ai_thread_cooldown
+    key = (channel, thread_ts)
+    if cooldown and not directed and time.monotonic() - _last_thread.get(key, 0.0) < cooldown:
+        logger.info("thread followup cooldown in %s (%ss)", channel, cooldown)
+        return
+
+    posted = await _handle_channel(
         event,
         client,
         text=text,
@@ -165,6 +200,24 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         jev=jev_hint,
         images=images,
     )
+    if posted:
+        _last_thread[key] = time.monotonic()
+
+
+async def _recent_lines(client, rows: list[dict[str, Any]]) -> list[str]:
+    """Format prior turns for the gate so it can tell who is talking to whom."""
+    lines: list[str] = []
+    for row in rows[-6:]:
+        text = " ".join((row.get("text") or "").split())
+        if not text:
+            continue
+        if row.get("role") == "assistant":
+            lines.append(f"you: {text[:200]}")
+        else:
+            uid = row.get("user_id") or ""
+            name = await _user_name(client, uid) if uid else "someone"
+            lines.append(f"{name}: {text[:200]}")
+    return lines
 
 
 async def _maybe_ambient(event: dict[str, Any], client) -> None:
@@ -240,14 +293,14 @@ async def _handle_channel(
     trigger: str = "mention",
     jev: str = "",
     images: list[str] | None = None,
-) -> None:
+) -> bool:
     settings = runtime.settings
     channel = event.get("channel")
     user_id = event.get("user")
     if not channel or not user_id:
-        return
+        return False
     if not settings.ai_enabled or runtime.agent is None:
-        return
+        return False
     text = text.strip()
     if not text and not images:
         text = "hey"
@@ -256,15 +309,16 @@ async def _handle_channel(
     retry = user_retry_after(user_id)
     if retry:
         await post_ephemeral(
-            client, channel, user_id, f"slow down a lil — try again in {retry}s :3"
+            client, channel, user_id, f"slow down a lil, try again in {retry}s :3"
         )
-        return
+        return False
     root_ts = thread_ts or event.get("thread_ts") or event.get("ts")
     conversation = f"ch:{channel}:{root_ts}"
     message_ts = event.get("ts")
 
     if message_ts and trigger in {"mention", "thread_followup"}:
         await react(client, channel, message_ts, "eyes")
+    posted = False
     try:
         async with runtime.lock(conversation):
             answer = await runtime.agent.reply(
@@ -279,11 +333,12 @@ async def _handle_channel(
                 images=images,
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
-            return
-        for chunk in chunk_text(disarm_broadcasts(answer)):
+            return False
+        for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
             await post(client, channel, chunk, thread_ts=root_ts)
         runtime.db.mark_thread(channel, root_ts)
-    except Exception:  # noqa: BLE001
+        posted = True
+    except Exception:
         logger.exception("channel agent turn failed")
         await post(
             client,
@@ -291,6 +346,8 @@ async def _handle_channel(
             "something broke while i was thinking. check my logs?",
             thread_ts=root_ts,
         )
+        posted = True
     finally:
         if message_ts and trigger in {"mention", "thread_followup"}:
             await unreact(client, channel, message_ts, "eyes")
+    return posted

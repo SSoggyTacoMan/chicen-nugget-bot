@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Deploy Chicen Nugget Bot to a remote host and (re)start it as a systemd service.
-# Usage: ./deploy-remote.sh [user@host] [remote-dir]
+# Usage: ./deploy-remote.sh user@host [remote-dir]
+# Override the unit name with SERVICE_NAME=... if it differs from the default.
 set -euo pipefail
 
-REMOTE="${1:-maaren@hackclub.app}"
+REMOTE="${1:?usage: ./deploy-remote.sh user@host [remote-dir]}"
 REMOTE_DIR="${2:-slackbot}"
-SERVICE="chicen-nugget-bot"
+SERVICE="${SERVICE_NAME:-chicen-nugget-bot}"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)

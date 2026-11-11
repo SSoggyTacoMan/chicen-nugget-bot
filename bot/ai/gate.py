@@ -49,6 +49,22 @@ False when it is a general message to the channel or a conversation between
 other people.
 """
 
+RECIPIENT_INSTRUCTIONS = """\
+Who is the speaker talking to in the latest message?
+"""
+
+RECIPIENT_CRITERIA = {
+    "bot": "The bot itself: asking it, thanking it, correcting it, or replying to it.",
+    "someone_else": "Another person in the conversation, even if the bot is in the thread.",
+    "everyone": "The whole channel or nobody in particular.",
+}
+
+NEEDS_TOOLS = """\
+Would a good answer need live data, a lookup, or an action (web search, weather,
+Slack history, code execution, a file, a chart, a reminder) rather than general
+knowledge? True for anything time-sensitive, personal, or workspace-specific.
+"""
+
 SPAM = """\
 Is this message spam, a scam, a mass ping, a bare link dump, or something a
 community bot should not engage with? False for normal conversation, jokes,
@@ -72,10 +88,16 @@ QUESTIONS: dict[str, dict[str, Any]] = {
     "should_reply": {"type": "noul", "instructions": SHOULD_REPLY},
     "addressed": {"type": "noul", "instructions": ADDRESSED},
     "spam": {"type": "noul", "instructions": SPAM},
+    "needs_tools": {"type": "noul", "instructions": NEEDS_TOOLS},
     "kind": {
         "type": "choice",
         "instructions": KIND_INSTRUCTIONS,
         "criteria": KIND_CRITERIA,
+    },
+    "recipient": {
+        "type": "choice",
+        "instructions": RECIPIENT_INSTRUCTIONS,
+        "criteria": RECIPIENT_CRITERIA,
     },
 }
 
@@ -88,16 +110,29 @@ class GateDecision:
     should_reply: float = 0.0
     addressed: float = 0.0
     spam: float = 0.0
+    needs_tools: float = 0.0
     kind: str = "other"
     kind_confidence: float = 0.0
+    recipient: str = "everyone"
+    recipient_bot: float = 0.0
+    bot_last: bool = False
     probabilities: dict[str, float] = field(default_factory=dict)
     error: str | None = None
 
     def hint(self) -> str:
         """A short line the agent can use to pitch its reply."""
+        bits: list[str] = []
         if self.kind in {"question", "help", "feedback", "celebration", "bot"}:
-            return f"jev reads it as a {self.kind} message ({self.kind_confidence:.0%} confident)"
-        return ""
+            bits.append(f"jev reads it as a {self.kind} message ({self.kind_confidence:.0%} confident)")
+        if self.recipient == "someone_else" and self.recipient_bot < 0.5:
+            bits.append("it looks aimed at another person, not you")
+        elif self.recipient == "bot":
+            bits.append("it looks aimed at you")
+        if self.needs_tools >= 0.6:
+            bits.append("a correct answer needs live data or a tool call, not memory")
+        if self.bot_last:
+            bits.append("you spoke last in this conversation, so only reply if someone is clearly asking you")
+        return "; ".join(bits)
 
 
 class Gate:
@@ -119,6 +154,7 @@ class Gate:
         user_name: str = "someone",
         user_id: str | None = None,
         recent: list[str] | None = None,
+        bot_last: bool = False,
     ) -> GateDecision:
         if not self.settings.ai_gate_enabled or not text.strip():
             return GateDecision(reply=False, error="gate disabled")
@@ -128,7 +164,7 @@ class Gate:
             if user_id and self.budget.user_exhausted(user_id):
                 return GateDecision(reply=False, error="daily ai limit reached for this user")
 
-        state = _state(text, channel_name, user_name, recent)
+        state = _state(text, channel_name, user_name, recent, bot_last=bot_last)
         result: JevResult | None = None
         for attempt in (1, 2):
             try:
@@ -158,33 +194,48 @@ class Gate:
         should = answers.get("should_reply")
         addressed = answers.get("addressed")
         spam = answers.get("spam")
+        needs_tools = answers.get("needs_tools")
         kind = answers.get("kind")
+        recipient = answers.get("recipient")
         if should is None:
             return GateDecision(reply=False, error="jev returned no should_reply answer")
 
         p_should = should.probability
         p_addressed = addressed.probability if addressed else 0.0
         p_spam = spam.probability if spam else 0.0
+        p_needs_tools = needs_tools.probability if needs_tools else 0.0
+        recipient_choice = recipient.choice if recipient and recipient.choice else "everyone"
+        p_recipient_bot = (recipient.probabilities.get("bot", 0.0) if recipient else 0.0)
 
         directed = p_addressed >= self.settings.ai_gate_addressed_confidence
+        aimed = directed or p_recipient_bot >= self.settings.ai_gate_addressed_confidence
         spammy = p_spam >= self.settings.ai_gate_spam_threshold
-        reply = (p_should >= self.settings.ai_gate_min_confidence or directed) and not spammy
+        helpful = p_should >= self.settings.ai_gate_min_confidence
+        # Never spend an agent turn on a message aimed at someone else unless the
+        # speaker is clearly directing it at the bot too.
+        reply = not spammy and (aimed or (helpful and recipient_choice != "someone_else"))
 
         decision = GateDecision(
             reply=reply,
             should_reply=p_should,
             addressed=p_addressed,
             spam=p_spam,
+            needs_tools=p_needs_tools,
             kind=kind.choice if kind and kind.choice else "other",
             kind_confidence=kind.confidence if kind else 0.0,
+            recipient=recipient_choice,
+            recipient_bot=p_recipient_bot,
+            bot_last=bot_last,
             probabilities=kind.probabilities if kind else {},
         )
         logger.info(
-            "jev %s p=%.2f addressed=%.2f spam=%.2f kind=%s (%.2f) for %r",
+            "jev %s p=%.2f addressed=%.2f aimed_at=%s spam=%.2f needs_tools=%.2f kind=%s (%.2f) for %r",
             "YES" if reply else "NO",
             p_should,
             p_addressed,
+            recipient_choice,
             p_spam,
+            p_needs_tools,
             decision.kind,
             decision.kind_confidence,
             text[:70],
@@ -214,21 +265,26 @@ def _state(
     channel_name: str,
     user_name: str,
     recent: list[str] | None,
+    bot_last: bool = False,
 ) -> str:
     lines = [f"channel: {channel_name}", f"speaker: {user_name}"]
+    lines.append(f"the bot spoke last: {'yes' if bot_last else 'no'}")
     if recent:
         lines.append("recent messages:")
-        lines.extend(f"- {line}" for line in recent[-4:])
+        lines.extend(f"- {line}" for line in recent[-6:])
     lines.append(f"latest message: {text.strip()}")
     return "\n".join(lines)
 
 
 __all__ = [
+    "ADDRESSED",
     "Gate",
     "GateDecision",
+    "NEEDS_TOOLS",
     "QUESTIONS",
+    "RECIPIENT_CRITERIA",
+    "RECIPIENT_INSTRUCTIONS",
     "SHOULD_REPLY",
-    "ADDRESSED",
     "SPAM",
     "_state",
 ]
