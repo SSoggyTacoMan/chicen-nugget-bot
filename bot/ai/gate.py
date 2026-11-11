@@ -54,7 +54,7 @@ Who is the speaker talking to in the latest message?
 """
 
 RECIPIENT_CRITERIA = {
-    "bot": "The bot itself: asking it, thanking it, correcting it, or replying to it.",
+    "bot": "The bot itself: asking it, thanking it, correcting it, or replying directly to it. Note: in threads with multiple humans, mark 'someone_else' unless clearly addressing the bot.",
     "someone_else": "Another person in the conversation, even if the bot is in the thread.",
     "everyone": "The whole channel or nobody in particular.",
 }

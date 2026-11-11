@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -158,8 +159,18 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
     bot_last = bool(rows and rows[-1].get("role") == "assistant")
     recent = await _recent_lines(client, rows)
 
+    bot_names = {runtime.settings.bot_name.lower(), "nugget", "chicen", "chicennugget"}
+    text_lower = text.lower()
+    explicitly_named = any(re.search(rf"\b{re.escape(name)}\b", text_lower) for name in bot_names if name)
+
+    if not explicitly_named:
+        human_users = {r.get("user_id") for r in rows if r.get("role") == "user" and r.get("user_id")}
+        if len(human_users) >= 2 and "?" not in text and not images:
+            return
+        if not images and len(text.split()) < 3 and "?" not in text:
+            return
+
     jev_hint = ""
-    directed = False
     if runtime.gate is not None and runtime.settings.ai_gate_enabled:
         user_name = await _user_name(client, user_id)
         channel_name = await _channel_name(client, channel)
@@ -179,17 +190,14 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
                 decision.kind,
             )
             return
-        directed = (
-            decision.addressed >= runtime.settings.ai_gate_addressed_confidence
-            or decision.recipient_bot >= runtime.settings.ai_gate_addressed_confidence
-        )
         jev_hint = decision.hint()
 
     cooldown = runtime.settings.ai_thread_cooldown
-    key = (channel, thread_ts)
-    if cooldown and not directed and time.monotonic() - _last_thread.get(key, 0.0) < cooldown:
-        logger.info("thread followup cooldown in %s (%ss)", channel, cooldown)
-        return
+    if isinstance(cooldown, (int, float)) and cooldown > 0:
+        key = (channel, thread_ts)
+        if not explicitly_named and time.monotonic() - _last_thread.get(key, 0.0) < cooldown:
+            logger.info("thread followup cooldown in %s (%ss)", channel, cooldown)
+            return
 
     posted = await _handle_channel(
         event,

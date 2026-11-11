@@ -112,6 +112,8 @@ def test_toolbox_has_expanded_tools():
     assert "urban_dict" in names
     assert "system_diagnostics" in names
     assert "manage_tasks" in names
+    assert "inspect_code" in names
+    assert "clone_repo" in names
 
 
 def test_owner_only_tools_guard():
@@ -159,6 +161,12 @@ def test_owner_only_tools_guard():
 
         res8 = await box.execute("system_diagnostics", {}, ctx)
         assert "only the owner/admin" in res8
+
+        res9 = await box.execute("inspect_code", {"action": "list"}, ctx)
+        assert "only the owner/admin" in res9
+
+        res10 = await box.execute("clone_repo", {"repo_url": "test/repo"}, ctx)
+        assert "only the owner/admin" in res10
 
     asyncio.run(run())
 
@@ -661,6 +669,178 @@ def test_security_hardening(tmp_path):
         assert "unknown setting" in res_cfg
 
     asyncio.run(run_ssrf_and_run_code())
+
+
+def test_inspect_code_tool():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.tools import Toolbox, ToolContext
+
+    box = Toolbox(MagicMock())
+    ctx = ToolContext(
+        db=MagicMock(),
+        settings=MagicMock(),
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="D1",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+    )
+
+    async def run():
+        lst = await box.execute("inspect_code", {"action": "list", "path": "prompts"}, ctx)
+        assert "prompts/system.md" in lst
+
+        rd = await box.execute("inspect_code", {"action": "read", "path": "prompts/system.md", "limit": 5}, ctx)
+        assert "1: # who you are" in rd
+
+        srch = await box.execute("inspect_code", {"action": "search", "pattern": "TOOL_RESULT"}, ctx)
+        assert "MAX_TOOL_RESULT" in srch
+
+        sec = await box.execute("inspect_code", {"action": "read", "path": ".env"}, ctx)
+        assert "sensitive file" in sec or "file not found" in sec
+
+        esc = await box.execute("inspect_code", {"action": "read", "path": "../../etc/passwd"}, ctx)
+        assert "escapes repository root" in esc
+
+    asyncio.run(run())
+
+
+def test_clone_repo_tool(tmp_path):
+    import asyncio
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.ai.tools import Toolbox, ToolContext
+
+    box = Toolbox(MagicMock())
+    ctx = ToolContext(
+        db=MagicMock(),
+        settings=MagicMock(),
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="D1",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+    )
+
+    created_dirs = []
+
+    async def fake_subprocess_exec(*cmd, **kwargs):
+        dest = Path(cmd[-1])
+        created_dirs.append(dest.parent)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "README.md").write_text("# Demo Repo\nhello world\n", encoding="utf-8")
+        (dest / "app.py").write_text("def greet():\n    return 'hi'\n", encoding="utf-8")
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    async def run():
+        # Bad URL rejection
+        bad = await box.execute("clone_repo", {"repo_url": "--upload-pack=evil"}, ctx)
+        assert "invalid repo_url" in bad
+
+        priv = await box.execute("clone_repo", {"repo_url": "http://127.0.0.1/repo"}, ctx)
+        assert "private" in priv or "invalid" in priv
+
+        with patch("bot.ai.tools.asyncio.create_subprocess_exec", side_effect=fake_subprocess_exec):
+            res_list = await box.execute("clone_repo", {"repo_url": "owner/demo", "action": "list"}, ctx)
+            assert "README.md" in res_list
+            assert "app.py" in res_list
+
+            res_read = await box.execute("clone_repo", {"repo_url": "owner/demo", "action": "read", "path": "app.py"}, ctx)
+            assert "1: def greet():" in res_read
+
+            res_search = await box.execute("clone_repo", {"repo_url": "owner/demo", "action": "search", "pattern": "hello world"}, ctx)
+            assert "README.md:2: hello world" in res_search
+
+            res_esc = await box.execute("clone_repo", {"repo_url": "owner/demo", "action": "read", "path": "../secret"}, ctx)
+            assert "escapes" in res_esc
+
+        assert len(created_dirs) == 4
+        for d in created_dirs:
+            assert not d.exists()
+
+    asyncio.run(run())
+
+
+def test_thread_chatter_suppression_and_speaker_tags(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.ai.agent import fit_history
+    from bot.ai.gate import GateDecision
+    from bot.db import Database
+    from bot.features.agent import _handle_thread_continuation, _last_thread
+    from bot.runtime import runtime
+
+    # 1. fit_history adds speaker tags when user_id is present
+    kept = fit_history(
+        [
+            {"role": "user", "user_id": "U1", "text": "hello"},
+            {"role": "assistant", "user_id": None, "text": "hi"},
+            {"role": "user", "user_id": "U2", "text": "what's up"},
+        ],
+        "",
+        max_chars=500,
+    )
+    assert kept == [
+        {"role": "user", "content": "<@U1>: hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "<@U2>: what's up"},
+    ]
+
+    # 2. Thread suppression of short fragments and multi-human chatter
+    db = Database(str(tmp_path / "chatter_test.db"))
+    db.init()
+    db.mark_thread("C_CHAT", "500.000")
+    db.add_message("ch:C_CHAT:500.000", "user", "U_ALICE", "is this novabot?")
+    db.add_message("ch:C_CHAT:500.000", "assistant", None, "nope")
+    db.add_message("ch:C_CHAT:500.000", "user", "U_BOB", "i copied it")
+    runtime.db = db
+
+    client = AsyncMock()
+    mock_gate = MagicMock()
+    mock_gate.decide = AsyncMock(return_value=GateDecision(reply=True, kind="chatter"))
+    old_gate = runtime.gate
+    runtime.gate = mock_gate
+    _last_thread.clear()
+
+    async def run():
+        with patch("bot.features.agent._user_name", return_value="alice"), \
+             patch("bot.features.agent._channel_name", return_value="general"), \
+             patch("bot.features.agent.fetch_slack_images", AsyncMock(return_value=[])), \
+             patch("bot.features.agent._handle_channel", AsyncMock(return_value=True)) as mock_handle:
+            # Multi-human thread without '?' and without naming bot -> suppressed before gate
+            await _handle_thread_continuation(
+                {"channel": "C_CHAT", "thread_ts": "500.000", "user": "U_ALICE", "text": "the code is messy"},
+                client,
+            )
+            mock_handle.assert_not_called()
+
+            # Explicitly naming the bot bypasses multi-human suppression
+            await _handle_thread_continuation(
+                {"channel": "C_CHAT", "thread_ts": "500.000", "user": "U_ALICE", "text": "hey nugget what do you think"},
+                client,
+            )
+            mock_handle.assert_called_once()
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.gate = old_gate
+
 
 
 

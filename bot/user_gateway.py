@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import urllib.parse
 from collections import deque
 from contextlib import asynccontextmanager, suppress
@@ -45,6 +46,7 @@ class UserGateway:
         self._seen_ts: set[str] = set()
         self._seen_order: deque[str] = deque()
         self._reconnect_url: str | None = None
+        self._last_thread: dict[tuple[str, str], float] = {}
 
     def _next_id(self) -> int:
         mid = self._msg_id
@@ -258,14 +260,26 @@ class UserGateway:
         if not (is_dm or is_mention or is_thread_continuation):
             return
 
+        settings = runtime.settings
         # If bot account was explicitly tagged, let the bot account handle it
         if runtime.bot_user_id and f"<@{runtime.bot_user_id}>" in text:
             return
 
-        if is_thread_continuation and not is_mention and not is_dm and len(text) < 4:
-            return
+        if is_thread_continuation and not is_mention and not is_dm:
+            has_files = bool(event.get("files") or event.get("file") or event.get("subtype") == "file_share")
+            if not has_files and len(text) < 4:
+                return
+            if runtime.db and runtime.db.kv_get("config:thread_followups") == "false":
+                return
+            if not has_files and len(text.split()) < 3 and "?" not in text:
+                return
+            cooldown = getattr(settings, "ai_thread_cooldown", 0)
+            if isinstance(cooldown, (int, float)) and cooldown > 0:
+                key = (channel, root_ts)
+                if time.monotonic() - self._last_thread.get(key, 0.0) < cooldown:
+                    return
+                self._last_thread[key] = time.monotonic()
 
-        settings = runtime.settings
         # Permission check
         if is_dm:
             allowed = sender_id == settings.owner_user_id or (
