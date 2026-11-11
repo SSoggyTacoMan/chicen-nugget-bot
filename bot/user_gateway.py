@@ -2,7 +2,7 @@
 
 Maintains a client WebSocket connection to Slack for:
 1. Real-time typing indicators in DMs and threads ("User is typing...").
-2. Direct message handling and mentions for the personal AI assistant identity.
+2. Direct message handling, mentions, and thread continuations for the personal AI assistant identity.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import urllib.parse
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
@@ -41,6 +42,9 @@ class UserGateway:
         self._session: aiohttp.ClientSession | None = None
         self._msg_id = 1
         self._task: asyncio.Task | None = None
+        self._seen_ts: set[str] = set()
+        self._seen_order: deque[str] = deque()
+        self._reconnect_url: str | None = None
 
     def _next_id(self) -> int:
         mid = self._msg_id
@@ -98,34 +102,39 @@ class UserGateway:
 
         while self._running:
             try:
+                ws_url = self._reconnect_url
+                self._reconnect_url = None
+
                 async with aiohttp.ClientSession(headers=headers) as session:
                     self._session = session
-                    async with session.post(
-                        "https://slack.com/api/client.getWebSocketURL",
-                        data={"token": self.token},
-                    ) as resp:
-                        data = await resp.json()
+                    if not ws_url:
+                        async with session.post(
+                            "https://slack.com/api/client.getWebSocketURL",
+                            data={"token": self.token},
+                        ) as resp:
+                            data = await resp.json()
 
-                    if not data.get("ok"):
-                        logger.warning("failed to fetch gateway websocket URL: %s", data.get("error"))
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 30.0)
-                        continue
+                        if not data.get("ok"):
+                            logger.warning("failed to fetch gateway websocket URL: %s", data.get("error"))
+                            await asyncio.sleep(backoff)
+                            backoff = min(backoff * 2, 30.0)
+                            continue
 
-                    primary_ws = data.get("primary_websocket_url")
-                    routing_context = data.get("routing_context")
-                    params = {
-                        "token": self.token,
-                        "sync_desync": "1",
-                        "slack_client": "desktop",
-                        "start_args": "?agent=client&org_wide_aware=true&connect_only=true",
-                        "no_query_on_subscribe": "1",
-                        "flannel": "3",
-                        "lazy_channels": "1",
-                        "gateway_server": routing_context or "",
-                        "batch_presence_aware": "1",
-                    }
-                    ws_url = f"{primary_ws}?{urllib.parse.urlencode(params)}"
+                        primary_ws = data.get("primary_websocket_url")
+                        routing_context = data.get("routing_context")
+                        params = {
+                            "token": self.token,
+                            "sync_desync": "1",
+                            "slack_client": "desktop",
+                            "start_args": "?agent=client&org_wide_aware=true&connect_only=true",
+                            "no_query_on_subscribe": "1",
+                            "flannel": "3",
+                            "lazy_channels": "1",
+                            "gateway_server": routing_context or "",
+                            "batch_presence_aware": "1",
+                        }
+                        ws_url = f"{primary_ws}?{urllib.parse.urlencode(params)}"
+
                     logger.info("connecting to user gateway websocket...")
 
                     async with session.ws_connect(ws_url, heartbeat=20.0) as ws:
@@ -173,6 +182,24 @@ class UserGateway:
         if not isinstance(event, dict):
             return
         event_type = event.get("type")
+
+        # Fast reconnect URL cache
+        if event_type == "reconnect_url":
+            url = event.get("url")
+            if url:
+                self._reconnect_url = url
+            return
+
+        # Handle ping frame from gateway
+        if event_type == "ping":
+            pong: dict[str, Any] = {"type": "pong"}
+            if "id" in event:
+                pong["reply_to"] = event["id"]
+            if self._ws and not self._ws.closed:
+                with suppress(Exception):
+                    await self._ws.send_json(pong)
+            return
+
         if event_type != "message":
             return
 
@@ -180,16 +207,43 @@ class UserGateway:
         if subtype and subtype != "file_share":
             return
 
-        sender_id = event.get("user")
-        if not sender_id or sender_id == self.user_id:
+        # Ignore other bots and loopbacks between identities
+        if event.get("bot_id"):
             return
+
+        sender_id = event.get("user")
+        if not sender_id or sender_id == self.user_id or (runtime.bot_user_id and sender_id == runtime.bot_user_id):
+            return
+
+        # Message deduplication
+        msg_ts = event.get("ts")
+        if msg_ts:
+            if msg_ts in self._seen_ts:
+                return
+            self._seen_ts.add(msg_ts)
+            self._seen_order.append(msg_ts)
+            if len(self._seen_order) > 1000:
+                old = self._seen_order.popleft()
+                self._seen_ts.discard(old)
 
         channel = event.get("channel") or ""
         text = (event.get("text") or "").strip()
         is_dm = channel.startswith("D")
-        is_mention = self.user_id and f"<@{self.user_id}>" in text
+        is_mention = bool(self.user_id and f"<@{self.user_id}>" in text)
+        thread_ts = event.get("thread_ts")
+        root_ts = thread_ts or event.get("ts")
+        is_thread_continuation = bool(
+            thread_ts and runtime.db and runtime.db.is_thread(channel, thread_ts)
+        )
 
-        if not (is_dm or is_mention):
+        if not (is_dm or is_mention or is_thread_continuation):
+            return
+
+        # If bot account was explicitly tagged, let the bot account handle it
+        if runtime.bot_user_id and f"<@{runtime.bot_user_id}>" in text:
+            return
+
+        if is_thread_continuation and not is_mention and not is_dm and len(text) < 4:
             return
 
         settings = runtime.settings
@@ -214,12 +268,11 @@ class UserGateway:
                     await self.user_client.chat_postMessage(
                         channel=channel,
                         text=f"slow down a lil — try again in {retry}s :3",
-                        thread_ts=event.get("thread_ts") or event.get("ts"),
+                        thread_ts=root_ts if not is_dm else None,
+                        unfurl_links=False,
+                        unfurl_media=False,
                     )
             return
-
-        thread_ts = event.get("thread_ts")
-        root_ts = thread_ts or event.get("ts")
 
         images = await fetch_slack_images(event, self.token)
         clean_text = strip_mentions(text).strip()
@@ -227,6 +280,13 @@ class UserGateway:
             clean_text = "What is in this image?"
         if not clean_text and not images:
             return
+
+        if is_dm:
+            trigger = "dm"
+        elif is_thread_continuation and not is_mention:
+            trigger = "thread_followup"
+        else:
+            trigger = "mention"
 
         conv_key = f"user_dm:{sender_id}" if is_dm else f"user_ch:{channel}:{root_ts}"
         try:
@@ -241,7 +301,7 @@ class UserGateway:
                     channel_id=channel,
                     thread_ts=root_ts if not is_dm else None,
                     is_dm=is_dm,
-                    trigger="dm" if is_dm else "mention",
+                    trigger=trigger,
                     images=images,
                     client=self.user_client,
                 )
@@ -252,6 +312,9 @@ class UserGateway:
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return
 
+        if not is_dm and runtime.db and root_ts:
+            runtime.db.mark_thread(channel, root_ts)
+
         if self.user_client:
             for chunk in chunk_text(disarm_broadcasts(answer)):
                 try:
@@ -259,6 +322,8 @@ class UserGateway:
                         channel=channel,
                         text=chunk,
                         thread_ts=root_ts if not is_dm else None,
+                        unfurl_links=False,
+                        unfurl_media=False,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("failed to post user reply to %s: %s", channel, exc)
