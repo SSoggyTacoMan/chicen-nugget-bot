@@ -490,5 +490,70 @@ def test_cmd_config(tmp_path):
     asyncio.run(run())
 
 
+def test_thread_continuation_image_handling(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from bot.db import Database
+    from bot.features.agent import _handle_thread_continuation
+    from bot.runtime import runtime
+    from bot.ai.gate import GateDecision
+
+    db = Database(str(tmp_path / "thread_test.db"))
+    db.init()
+    db.mark_thread("C_TEST", "100.000")
+    runtime.db = db
+
+    client = AsyncMock()
+    # Mock gate
+    mock_gate = MagicMock()
+    old_gate = runtime.gate
+    runtime.gate = mock_gate
+
+    async def run():
+        with patch("bot.features.agent._user_name", return_value="alice"), \
+             patch("bot.features.agent._channel_name", return_value="general"):
+            # Case 1: Image only, no text -> ignored, fetch_slack_images not even called
+            with patch("bot.features.agent.fetch_slack_images") as mock_fetch, \
+                 patch("bot.features.agent._handle_channel") as mock_handle:
+                await _handle_thread_continuation(
+                    {"channel": "C_TEST", "thread_ts": "100.000", "user": "U_USER", "text": ""},
+                    client,
+                )
+                mock_fetch.assert_not_called()
+                mock_handle.assert_not_called()
+
+            # Case 2: Image with text, gate suppresses -> no reply
+            mock_gate.decide = AsyncMock(return_value=GateDecision(reply=False, kind="chatter"))
+            with patch("bot.features.agent.fetch_slack_images", return_value=["data:image/png;base64,abc"]) as mock_fetch, \
+                 patch("bot.features.agent._handle_channel") as mock_handle:
+                await _handle_thread_continuation(
+                    {"channel": "C_TEST", "thread_ts": "100.000", "user": "U_USER", "text": "check this out"},
+                    client,
+                )
+                mock_fetch.assert_called_once()
+                mock_gate.decide.assert_called_once()
+                mock_handle.assert_not_called()
+
+            # Case 3: Image with text, gate allows -> handled with image and jev hint
+            mock_gate.decide = AsyncMock(return_value=GateDecision(reply=True, kind="question"))
+            with patch("bot.features.agent.fetch_slack_images", return_value=["data:image/png;base64,abc"]) as mock_fetch, \
+                 patch("bot.features.agent._handle_channel") as mock_handle:
+                await _handle_thread_continuation(
+                    {"channel": "C_TEST", "thread_ts": "100.000", "user": "U_USER", "text": "what is this error?"},
+                    client,
+                )
+                mock_fetch.assert_called_once()
+                mock_handle.assert_called_once()
+                _, kwargs = mock_handle.call_args
+                assert kwargs["images"] == ["data:image/png;base64,abc"]
+                assert kwargs["text"] == "what is this error?"
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.gate = old_gate
+
+
+
 
 

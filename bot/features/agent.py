@@ -128,22 +128,21 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         return
     if not runtime.db.is_thread(channel, thread_ts):
         return
-    images = await fetch_slack_images(event, runtime.settings.slack_bot_token)
     text = (event.get("text") or "").strip()
-    if not text and not images:
+    if not text:
         return
-    if not text and images:
-        text = "What is this?"
     if f"<@{runtime.bot_user_id}>" in text:
         return  # app_mention owns this one
     if user_retry_after(user_id):
         return
-    if len(text) < 4 and not images:
+    if len(text) < 4:
         return
+
+    images = await fetch_slack_images(event, runtime.settings.slack_bot_token)
 
     jev_hint = ""
     is_owner = user_id == runtime.settings.owner_user_id
-    if not is_owner and not images and runtime.gate is not None and runtime.settings.ai_gate_enabled:
+    if not is_owner and runtime.gate is not None and runtime.settings.ai_gate_enabled:
         user_name = await _user_name(client, user_id)
         channel_name = await _channel_name(client, channel)
         decision = await runtime.gate.decide(
