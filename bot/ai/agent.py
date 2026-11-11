@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
+from slack_sdk.web.async_client import AsyncWebClient
 
 from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens
 from bot.ai.tools import ToolContext, Toolbox, format_now
@@ -95,14 +96,16 @@ class Agent:
         trigger: str = "mention",
         jev: str = "",
         images: list[str] | None = None,
+        client: AsyncWebClient | None = None,
     ) -> str:
         """Run one agent turn (with tools) and persist both sides of it."""
         if not self.settings.ai_enabled:
             return "my ai brain isn't configured yet. add AI_API_KEY and restart me."
 
+        active_client = client or self.client
         history = self.db.history(conversation, self.settings.ai_history_limit)
         role = "owner" if user_id == self.settings.owner_user_id else "guest"
-        location = await self._location(channel_id, is_dm)
+        location = await self._location(channel_id, is_dm, client=active_client)
         system = (
             self.system_template.replace("{bot_name}", self.settings.bot_name)
             .replace("{now}", format_now(self.settings))
@@ -138,7 +141,7 @@ class Agent:
         ctx = ToolContext(
             db=self.db,
             settings=self.settings,
-            client=self.client,
+            client=active_client,
             user_client=self.user_client,
             bot_user_id=self.bot_user_id,
             user_id=user_id,
@@ -312,12 +315,12 @@ class Agent:
             completion_tokens=completion_tokens,
         )
 
-    async def _location(self, channel_id: str | None, is_dm: bool) -> str:
+    async def _location(self, channel_id: str | None, is_dm: bool, client: AsyncWebClient | None = None) -> str:
         if is_dm:
             return "a direct message"
         if not channel_id:
             return "a slack channel"
-        info = await channel_info(self.client, channel_id)
+        info = await channel_info(client or self.client, channel_id)
         if info:
             kind = "private channel" if info.get("is_private") else "channel"
             return f"the {kind} #{info.get('name')} (<#{channel_id}>)"

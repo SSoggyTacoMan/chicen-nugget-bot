@@ -66,6 +66,7 @@ class Settings:
     slack_bot_token: str
     slack_app_token: str
     slack_user_token: str | None
+    slack_user_cookie: str | None
     bot_name: str
     owner_user_id: str
     admin_user_ids: frozenset[str]
@@ -231,6 +232,7 @@ def load_settings() -> Settings:
         slack_bot_token=_str("SLACK_BOT_TOKEN"),
         slack_app_token=_str("SLACK_APP_TOKEN"),
         slack_user_token=_str("SLACK_USER_TOKEN") or None,
+        slack_user_cookie=_str("SLACK_USER_COOKIE") or None,
         bot_name=_str("BOT_NAME", "Chicen Nugget Bot") or "Chicen Nugget Bot",
         owner_user_id=owner,
         admin_user_ids=frozenset(admins),

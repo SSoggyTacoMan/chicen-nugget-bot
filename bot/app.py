@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import logging
 import time
 
@@ -52,10 +53,22 @@ async def run() -> None:
 
     user_client = None
     if settings.slack_user_token:
-        user_client = AsyncWebClient(token=settings.slack_user_token)
+        headers = {}
+        if settings.slack_user_cookie:
+            headers["Cookie"] = f"d={settings.slack_user_cookie}"
+        user_client = AsyncWebClient(token=settings.slack_user_token, headers=headers)
         try:
             user_auth = await user_client.auth_test()
-            logger.info("user token active as %s", user_auth.get("user_id"))
+            runtime.user_id = user_auth.get("user_id") or ""
+            logger.info("user token active as %s (%s)", user_auth.get("user"), runtime.user_id)
+            if settings.slack_user_cookie:
+                from bot.user_gateway import UserGateway
+                runtime.user_gateway = UserGateway(
+                    token=settings.slack_user_token,
+                    cookie=settings.slack_user_cookie,
+                    user_id=runtime.user_id,
+                    user_client=user_client,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("SLACK_USER_TOKEN is set but invalid: %s", exc)
             user_client = None
@@ -165,10 +178,20 @@ async def run() -> None:
     )
     logger.info("starting socket mode...")
 
+    gateway_task = None
+    if runtime.user_gateway:
+        gateway_task = asyncio.create_task(runtime.user_gateway.start())
+
     handler = AsyncSocketModeHandler(app, settings.slack_app_token)
     try:
         await handler.start_async()
     finally:
+        if runtime.user_gateway:
+            await runtime.user_gateway.stop()
+        if gateway_task:
+            gateway_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await gateway_task
         await scheduler.stop()
 
 
