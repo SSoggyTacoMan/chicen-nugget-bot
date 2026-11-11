@@ -59,6 +59,23 @@ def display_name(user: dict | None) -> str:
 def extract_id(value: str, prefix: str) -> str | None:
     """Pull `U123` / `C123` out of a raw id or `<@U123|name>` / `<#C123|name>`."""
     value = (value or "").strip()
+    if not value:
+        return None
+    p = prefix.upper()
+    if p in {"@", "U", "W"}:
+        m = re.match(r"^<@?([UW][A-Z0-9]+)(?:\|[^>]+)?>$", value, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+        m = re.match(r"^@?([UW][A-Z0-9]+)$", value, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+    elif p in {"#", "C", "G"}:
+        m = re.match(r"^<#?([CG][A-Z0-9]+)(?:\|[^>]+)?>$", value, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+        m = re.match(r"^#?([CG][A-Z0-9]+)$", value, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
     match = re.match(rf"^<[{prefix}]([A-Z0-9]+)(?:\|[^>]+)?>$", value, re.IGNORECASE)
     if match:
         return match.group(1).upper()
@@ -84,18 +101,25 @@ def disarm_broadcasts(text: str) -> str:
 def format_mrkdwn(text: str) -> str:
     """Normalize common Markdown constructs (bold, links, headings, dashes) to Slack mrkdwn.
 
-    Protects fenced code blocks and inline code spans from modification.
+    Protects fenced code blocks and inline code spans from modification, strips
+    unsupported code block language tags, and auto-closes dangling code fences.
     """
     if not text:
         return ""
+    if text.count("```") % 2 == 1:
+        text = text + "\n```"
     pattern = r"(```[\s\S]*?```|`[^`\n]*`)"
     tokens = re.split(pattern, text)
     out: list[str] = []
     for i, token in enumerate(tokens):
         if i % 2 == 1:
+            if token.startswith("```"):
+                token = re.sub(r"^```[a-zA-Z0-9_\-\+\.]*[ \t]*\n", "```\n", token)
             out.append(token)
             continue
         t = token
+        if t.count("`") % 2 == 1:
+            t = t + "`"
         t = t.replace(" — ", " - ").replace("—", " - ").replace("–", "-")
         t = re.sub(r"\*\*\*(.+?)\*\*\*", r"*_\1_*", t)
         t = re.sub(r"\*\*(.+?)\*\*", r"*\1*", t)

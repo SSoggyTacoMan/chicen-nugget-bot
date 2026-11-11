@@ -1,7 +1,7 @@
 import random
 
 from bot.utils.dice import roll
-from bot.utils.text import chunk_text, format_mrkdwn
+from bot.utils.text import chunk_text, extract_id, format_mrkdwn
 
 
 def test_dice_basic():
@@ -67,3 +67,29 @@ def test_format_mrkdwn():
     assert "`**keep literal**`" in res
     assert "def test(**kwargs):" in res
     assert "# **keep comment**" in res
+    assert "```python" not in res
+    assert "```\ndef test(**kwargs):" in res
+
+
+def test_format_mrkdwn_closes_dangling_fences():
+    truncated = "```toml\n[package]\nname = \"spotifast\""
+    res = format_mrkdwn(truncated)
+    assert "```toml" not in res
+    assert res.startswith("```\n")
+    assert res.endswith("\n```")
+
+    dangling_inline = "use `reqwest"
+    assert format_mrkdwn(dangling_inline) == "use `reqwest`"
+
+
+def test_extract_id():
+    assert extract_id("<@U091GMQ14KV|maaren>", "@") == "U091GMQ14KV"
+    assert extract_id("<@U091GMQ14KV>", "@") == "U091GMQ14KV"
+    assert extract_id("@U091GMQ14KV", "@") == "U091GMQ14KV"
+    assert extract_id("U091GMQ14KV", "@") == "U091GMQ14KV"
+    assert extract_id("<@U091GMQ14KV|maaren>", "U") == "U091GMQ14KV"
+    assert extract_id("W0123456789", "@") == "W0123456789"
+    assert extract_id("<#C0C83BAUZCK|general>", "#") == "C0C83BAUZCK"
+    assert extract_id("C0C83BAUZCK", "#") == "C0C83BAUZCK"
+    assert extract_id("G0C83BAUZCK", "#") == "G0C83BAUZCK"
+    assert extract_id("maaren", "@") is None

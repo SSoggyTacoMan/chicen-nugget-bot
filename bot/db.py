@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS bot_threads (
     channel_id TEXT NOT NULL,
     thread_ts TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT 'bot',
     PRIMARY KEY (channel_id, thread_ts)
 );
 
@@ -181,6 +182,14 @@ class Database:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage (day, user_id)"
                 )
+
+                thread_columns = {
+                    row["name"] for row in conn.execute("PRAGMA table_info(bot_threads)").fetchall()
+                }
+                if "owner" not in thread_columns:
+                    conn.execute(
+                        "ALTER TABLE bot_threads ADD COLUMN owner TEXT NOT NULL DEFAULT 'bot'"
+                    )
                 conn.commit()
             finally:
                 conn.close()
@@ -683,18 +692,32 @@ class Database:
         )
 
     # ---------------------------------------------------------------- threads
-    def mark_thread(self, channel_id: str, thread_ts: str) -> None:
+    def mark_thread(self, channel_id: str, thread_ts: str, owner: str = "bot") -> None:
         self._write(
-            "INSERT OR IGNORE INTO bot_threads (channel_id, thread_ts, created_at) VALUES (?, ?, ?)",
-            (channel_id, thread_ts, iso()),
+            "INSERT INTO bot_threads (channel_id, thread_ts, created_at, owner) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(channel_id, thread_ts) DO UPDATE SET owner = excluded.owner",
+            (channel_id, thread_ts, iso(), owner),
         )
 
-    def is_thread(self, channel_id: str, thread_ts: str) -> bool:
+    def is_thread(self, channel_id: str, thread_ts: str, owner: str | None = None) -> bool:
+        if owner:
+            row = self._one(
+                "SELECT 1 AS ok FROM bot_threads WHERE channel_id = ? AND thread_ts = ? AND owner = ?",
+                (channel_id, thread_ts, owner),
+            )
+        else:
+            row = self._one(
+                "SELECT 1 AS ok FROM bot_threads WHERE channel_id = ? AND thread_ts = ?",
+                (channel_id, thread_ts),
+            )
+        return bool(row)
+
+    def thread_owner(self, channel_id: str, thread_ts: str) -> str | None:
         row = self._one(
-            "SELECT 1 AS ok FROM bot_threads WHERE channel_id = ? AND thread_ts = ?",
+            "SELECT owner FROM bot_threads WHERE channel_id = ? AND thread_ts = ?",
             (channel_id, thread_ts),
         )
-        return bool(row)
+        return str(row["owner"]) if row and row.get("owner") else None
 
     # ------------------------------------------------------------------ stats
     def stats(self) -> dict[str, int]:
