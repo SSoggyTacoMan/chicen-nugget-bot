@@ -1148,10 +1148,29 @@ class Toolbox:
         if not _need_owner(ctx):
             return _error("only the owner/admin can create reminders")
         tz = tzinfo()
-        parsed = parse_when(str(args.get("when") or ""), tz=tz)
+        raw_when = str(args.get("when") or "").strip()
+        raw_text = str(args.get("text") or "").strip()
+
+        parsed = None
+        extracted_from_when = False
+        if not raw_text:
+            parsed = parse_when(raw_when, tz=tz, require_rest=True)
+            if parsed:
+                raw_text = parsed.rest
+                extracted_from_when = True
         if not parsed:
-            return _error("could not parse the time. try 10m, tomorrow 09:00, daily 08:30 or weekly mon 18:00.")
-        text = str(args.get("text") or "").strip()
+            parsed = parse_when(raw_when, tz=tz, require_rest=False)
+            if not parsed and raw_text:
+                parsed = parse_when(f"{raw_when} {raw_text}", tz=tz, require_rest=True)
+                if parsed:
+                    raw_text = parsed.rest
+                    extracted_from_when = True
+
+        if not parsed:
+            return _error("could not parse the time. try 10m, tomorrow 09:00, tomorrow 12am, daily 08:30 or weekly mon 18:00.")
+
+        text = re.sub(r"^(?:to|that)\s+", "", raw_text, flags=re.IGNORECASE).strip() if extracted_from_when else raw_text
+        text = text or raw_text
         if not text:
             return _error("the reminder needs some text")
 
@@ -1904,8 +1923,8 @@ class Toolbox:
                     dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
                     return dt if dt.tzinfo else dt.replace(tzinfo=tz)
                 except ValueError:
-                    parsed = parse_when(val, ctx.settings.timezone)
-                    return datetime.fromtimestamp(parsed.due_at, tz=tz) if parsed else None
+                    parsed = parse_when(val, tz=tz, require_rest=False)
+                    return parsed.when if parsed else None
 
             start_dt = _parse_dt(start_raw)
             if not start_dt:
@@ -3474,6 +3493,10 @@ class Toolbox:
                 else:
                     status = "(default)"
                 lines.append(f"- *{k}*: {status}")
+            if ctx.db and hasattr(ctx.db, "kv_prefix"):
+                for ok, ov in ctx.db.kv_prefix("config:recaps:"):
+                    cid = ok.removeprefix("config:recaps:")
+                    lines.append(f"- *recaps (<#{cid}>)*: `{ov}`")
             return "\n".join(lines)
 
         if not key:

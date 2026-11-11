@@ -105,3 +105,31 @@ def test_next_occurrence_every():
     assert next_occurrence("every:10", after, UTC) == datetime(
         2026, 11, 9, 12, 10, tzinfo=timezone.utc
     )
+
+
+def test_12h_and_standalone_times():
+    r1 = parse("tomorrow at 12am respond to email")
+    assert r1 is not None
+    assert r1.when == datetime(2026, 11, 10, 0, 0, tzinfo=timezone.utc)
+    assert r1.rest == "respond to email"
+
+    r2 = parse("tomorrow midnight check mail")
+    assert r2 is not None
+    assert r2.when == datetime(2026, 11, 10, 0, 0, tzinfo=timezone.utc)
+
+    r3 = parse("3pm coffee")
+    assert r3 is not None
+    assert r3.when == datetime(2026, 11, 9, 15, 0, tzinfo=timezone.utc)
+
+    r4 = parse("12:30 pm lunch")
+    assert r4 is not None
+    assert r4.when == datetime(2026, 11, 9, 12, 30, tzinfo=timezone.utc)
+
+    r5 = parse_when("tomorrow 00:00", now=NOW, tz=UTC, require_rest=False)
+    assert r5 is not None
+    assert r5.when == datetime(2026, 11, 10, 0, 0, tzinfo=timezone.utc)
+    assert r5.rest == ""
+
+    r6 = parse_when("in 85m", now=NOW, tz=UTC, require_rest=False)
+    assert r6 is not None
+    assert r6.when == datetime(2026, 11, 9, 13, 25, tzinfo=timezone.utc)

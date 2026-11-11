@@ -58,6 +58,7 @@ _UNIT_MINUTES = {
 }
 
 _UNIT_RE = r"(?:weeks?|w|days?|d|hours?|hrs?|h|minutes?|mins?|m)"
+_TIME_PAT = r"(?:(\d{1,2}):(\d{2})(?:\s*(am|pm))?|(\d{1,2})\s*(am|pm)|(midnight|noon))\b"
 _DURATION_RE = re.compile(
     rf"^(?:in\s+)?((?:\d+\s*{_UNIT_RE}\b\s*)+)", re.IGNORECASE
 )
@@ -65,19 +66,45 @@ _DURATION_PART_RE = re.compile(rf"(\d+)\s*({_UNIT_RE})\b", re.IGNORECASE)
 _EVERY_RE = re.compile(
     rf"^every\s+(\d+)\s*({_UNIT_RE})\b\s*", re.IGNORECASE
 )
-_DAILY_RE = re.compile(r"^(?:daily|every day)\s+(?:at\s+)?(\d{1,2}):(\d{2})\b\s*", re.IGNORECASE)
+_DAILY_RE = re.compile(rf"^(?:daily|every day)\s+(?:at\s+)?{_TIME_PAT}\s*", re.IGNORECASE)
 _WEEKLY_RE = re.compile(
-    rf"^(?:weekly|every)\s+({'|'.join(WEEKDAYS)})\s+(?:at\s+)?(\d{{1,2}}):(\d{{2}})\b\s*",
+    rf"^(?:weekly|every)\s+({'|'.join(WEEKDAYS)})\s+(?:at\s+)?{_TIME_PAT}\s*",
     re.IGNORECASE,
 )
-_TOMORROW_RE = re.compile(r"^tomorrow\s+(?:at\s+)?(\d{1,2}):(\d{2})\b\s*", re.IGNORECASE)
-_TODAY_RE = re.compile(r"^today\s+(?:at\s+)?(\d{1,2}):(\d{2})\b\s*", re.IGNORECASE)
+_TOMORROW_RE = re.compile(rf"^tomorrow\s+(?:at\s+)?{_TIME_PAT}\s*", re.IGNORECASE)
+_TODAY_RE = re.compile(rf"^today\s+(?:at\s+)?{_TIME_PAT}\s*", re.IGNORECASE)
 _WEEKDAY_RE = re.compile(
-    rf"^({'|'.join(WEEKDAYS)})(?:day)?\s+(?:at\s+)?(\d{{1,2}}):(\d{{2}})\b\s*",
+    rf"^({'|'.join(WEEKDAYS)})(?:day)?\s+(?:at\s+)?{_TIME_PAT}\s*",
     re.IGNORECASE,
 )
 _ISO_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})[T ](\d{1,2}):(\d{2})\b\s*")
-_CLOCK_RE = re.compile(r"^(?:at\s+)?(\d{1,2}):(\d{2})\b\s*", re.IGNORECASE)
+_CLOCK_RE = re.compile(rf"^(?:at\s+)?{_TIME_PAT}\s*", re.IGNORECASE)
+
+
+def _extract_hm(groups: tuple[str | None, ...]) -> tuple[int, int] | None:
+    h_col, m_col, ap_col, h_bare, ap_bare, word = groups
+    if word:
+        return (0, 0) if word.lower() == "midnight" else (12, 0)
+    hour_str = h_col if h_col is not None else h_bare
+    min_str = m_col if h_col is not None else "0"
+    ampm = ap_col if h_col is not None else ap_bare
+    if hour_str is None:
+        return None
+    hour = int(hour_str)
+    minute = int(min_str)
+    if not (0 <= minute <= 59):
+        return None
+    if ampm:
+        if not (1 <= hour <= 12):
+            return None
+        ap = ampm.lower()
+        if ap == "am":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+    elif not (0 <= hour <= 23):
+        return None
+    return hour, minute
 
 
 @dataclass(frozen=True)
@@ -115,7 +142,12 @@ def _duration_minutes(value: str) -> int | None:
     return total if found and total > 0 else None
 
 
-def parse_when(text: str, now: datetime | None = None, tz: ZoneInfo | None = None) -> ParsedWhen | None:
+def parse_when(
+    text: str,
+    now: datetime | None = None,
+    tz: ZoneInfo | None = None,
+    require_rest: bool = True,
+) -> ParsedWhen | None:
     """Pull a time expression off the front of `text`.
 
     `now` must be timezone-aware when supplied; otherwise it is built in `tz`
@@ -137,22 +169,25 @@ def parse_when(text: str, now: datetime | None = None, tz: ZoneInfo | None = Non
             return None
         rest = source[end:].strip()
         rest = rest.lstrip(" -–—:|,").strip()
-        if not rest:
+        if require_rest and not rest:
             return None
         return ParsedWhen(when=when, recurrence=recurrence, rest=rest, matched=source[:end].strip())
 
     # Recurring schedules first, so "every 2h" doesn't look like a one-shot.
     match = _DAILY_RE.match(source)
     if match:
-        hour, minute = int(match.group(1)), int(match.group(2))
-        first = _next_clock(now, hour, minute)
-        return result(first, match.end(), f"daily:{hour:02d}:{minute:02d}")
+        hm = _extract_hm(match.groups())
+        if hm:
+            hour, minute = hm
+            first = _next_clock(now, hour, minute)
+            return result(first, match.end(), f"daily:{hour:02d}:{minute:02d}")
 
     match = _WEEKLY_RE.match(source)
     if match:
         weekday = WEEKDAYS[match.group(1).lower()]
-        hour, minute = int(match.group(2)), int(match.group(3))
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
+        hm = _extract_hm(match.groups()[1:])
+        if hm:
+            hour, minute = hm
             days = (weekday - now.weekday()) % 7
             first = _at(now, days, hour, minute)
             if first and first <= now:
@@ -174,22 +209,28 @@ def parse_when(text: str, now: datetime | None = None, tz: ZoneInfo | None = Non
 
     match = _TOMORROW_RE.match(source)
     if match:
-        return result(_at(now, 1, int(match.group(1)), int(match.group(2))), match.end())
+        hm = _extract_hm(match.groups())
+        if hm:
+            return result(_at(now, 1, hm[0], hm[1]), match.end())
 
     match = _TODAY_RE.match(source)
     if match:
-        when = _at(now, 0, int(match.group(1)), int(match.group(2)))
-        return result(when, match.end()) if when and when > now else None
+        hm = _extract_hm(match.groups())
+        if hm:
+            when = _at(now, 0, hm[0], hm[1])
+            return result(when, match.end()) if when and when > now else None
 
     match = _WEEKDAY_RE.match(source)
     if match:
         weekday = WEEKDAYS[match.group(1).lower()]
-        hour, minute = int(match.group(2)), int(match.group(3))
-        days = (weekday - now.weekday()) % 7
-        when = _at(now, days, hour, minute)
-        if when and when <= now:
-            when += timedelta(days=7)
-        return result(when, match.end())
+        hm = _extract_hm(match.groups()[1:])
+        if hm:
+            hour, minute = hm
+            days = (weekday - now.weekday()) % 7
+            when = _at(now, days, hour, minute)
+            if when and when <= now:
+                when += timedelta(days=7)
+            return result(when, match.end())
 
     match = _ISO_RE.match(source)
     if match:
@@ -201,8 +242,10 @@ def parse_when(text: str, now: datetime | None = None, tz: ZoneInfo | None = Non
 
     match = _CLOCK_RE.match(source)
     if match:
-        when = _next_clock(now, int(match.group(1)), int(match.group(2)))
-        return result(when, match.end())
+        hm = _extract_hm(match.groups())
+        if hm:
+            when = _next_clock(now, hm[0], hm[1])
+            return result(when, match.end())
 
     return None
 
