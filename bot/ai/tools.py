@@ -7,8 +7,10 @@ checked here against the real Slack sender, not just the prompt.
 from __future__ import annotations
 
 import asyncio
+import base64
 import email
 import email.header
+from email.message import EmailMessage
 import html
 import imaplib
 import io
@@ -21,7 +23,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -574,6 +576,10 @@ class Toolbox:
                         "type": "boolean",
                         "description": "Send as personal user assistant (Boi) instead of bot app. Default false.",
                     },
+                    "thread_ts": {
+                        "type": "string",
+                        "description": "Optional parent message timestamp to reply inside a thread.",
+                    },
                 },
                 ["channel", "text"],
             ),
@@ -611,6 +617,84 @@ class Toolbox:
                         "type": "integer",
                         "description": "Number of minutes to snooze notifications (required for action='snooze').",
                     },
+                },
+                ["action"],
+            ),
+            tool(
+                "slack_react",
+                "Add or remove an emoji reaction on a Slack message as the bot app or user assistant. Owner/admin only.",
+                {
+                    "action": {"type": "string", "enum": ["add", "remove"], "description": "Action: 'add' or 'remove'."},
+                    "channel": {"type": "string", "description": "Channel id, #name, or link."},
+                    "timestamp": {"type": "string", "description": "Message timestamp to react to."},
+                    "emoji": {"type": "string", "description": "Emoji name without colons (e.g. 'eyes', 'thumbsup', 'white_check_mark')."},
+                    "as_user": {"type": "boolean", "description": "React as personal user account (Boi) instead of bot app. Default false."},
+                },
+                ["channel", "timestamp", "emoji"],
+            ),
+            tool(
+                "slack_activity",
+                "Check recent Slack activity: mentions, unread DMs, or discussions directed at you. Owner/admin only.",
+                {
+                    "query": {"type": "string", "description": "Optional search filter. Defaults to messages mentioning you."},
+                    "limit": {"type": "integer", "description": "Max results to return (1-20, default 10)."},
+                },
+                [],
+            ),
+            tool(
+                "google_calendar",
+                "Check upcoming schedule, search events, or create events in Google Calendar. Owner/admin only.",
+                {
+                    "action": {"type": "string", "enum": ["list", "search", "create"], "description": "Action: 'list' (agenda), 'search', or 'create'."},
+                    "query": {"type": "string", "description": "Search term for events."},
+                    "days": {"type": "integer", "description": "Number of days ahead to list (default 7)."},
+                    "summary": {"type": "string", "description": "Title/summary for a new event (for action='create')."},
+                    "start_time": {"type": "string", "description": "Start time in ISO format or relative (e.g. '2026-11-12T14:00:00' or 'tomorrow 3pm')."},
+                    "end_time": {"type": "string", "description": "End time in ISO format or relative (e.g. '2026-11-12T15:00:00' or '1 hour')."},
+                    "description": {"type": "string", "description": "Optional event description."},
+                    "attendees": {"type": "array", "items": {"type": "string"}, "description": "Optional email addresses to invite."},
+                },
+                ["action"],
+            ),
+            tool(
+                "gmail",
+                "Search, read, or send emails through Gmail. Owner/admin only.",
+                {
+                    "action": {"type": "string", "enum": ["list", "read", "search", "send"], "description": "Action: 'list' (recent/unread), 'search', 'read', or 'send'."},
+                    "query": {"type": "string", "description": "Search query (e.g. 'is:unread', 'from:alice', or keywords)."},
+                    "message_id": {"type": "string", "description": "Message ID to read."},
+                    "to": {"type": "string", "description": "Recipient email address for action='send'."},
+                    "subject": {"type": "string", "description": "Email subject for action='send'."},
+                    "body": {"type": "string", "description": "Email body text for action='send'."},
+                    "limit": {"type": "integer", "description": "Max messages to list (default 5)."},
+                },
+                ["action"],
+            ),
+            tool(
+                "google_drive",
+                "Search files, list recent documents, or read/export Google Drive files and Google Docs. Owner/admin only.",
+                {
+                    "action": {"type": "string", "enum": ["search", "list", "read"], "description": "Action: 'search', 'list', or 'read'."},
+                    "query": {"type": "string", "description": "Search term for file names or content."},
+                    "file_id": {"type": "string", "description": "Drive file ID to read/export."},
+                    "limit": {"type": "integer", "description": "Max files to return (default 10)."},
+                },
+                ["action"],
+            ),
+            tool(
+                "mac_control",
+                "Control or inspect your Mac: system status, frontmost app, battery, volume, open URLs/files, notifications, clipboard, running apps, or AppleScript. Owner/admin only.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["status", "frontmost", "open", "notify", "clipboard", "applescript", "apps", "run"],
+                        "description": "Action: 'status' (Mac info, battery, volume), 'frontmost' (active app), 'open' (open URL/file/app), 'notify' (system notification), 'clipboard' (read/set), 'applescript' (run AppleScript), 'apps' (list visible apps), or 'run' (shell command).",
+                    },
+                    "target": {"type": "string", "description": "URL, file path, or app name for action='open'."},
+                    "text": {"type": "string", "description": "Text for notification or setting clipboard."},
+                    "title": {"type": "string", "description": "Notification title (default 'Chicen Nugget')."},
+                    "script": {"type": "string", "description": "AppleScript source code for action='applescript'."},
+                    "command": {"type": "string", "description": "Terminal command for action='run'."},
                 },
                 ["action"],
             ),
@@ -1549,11 +1633,13 @@ class Toolbox:
         target_client, err = self._get_target_client(ctx, as_user)
         if err or not target_client:
             return _error(err or "slack client not available")
-        result = await post(target_client, channel_id, disarm_broadcasts(format_mrkdwn(text)))
+        thread_ts = str(args.get("thread_ts") or "").strip() or None
+        result = await post(target_client, channel_id, disarm_broadcasts(format_mrkdwn(text)), thread_ts=thread_ts)
         if not result:
             return _error("slack rejected the message")
         sender = "Boi (user account)" if as_user else "Bot app"
-        return f"posted to <#{channel_id}> (ts {result.get('ts')}) as {sender}."
+        loc = f"<#{channel_id}> (thread {thread_ts})" if thread_ts else f"<#{channel_id}>"
+        return f"posted to {loc} (ts {result.get('ts')}) as {sender}."
 
     async def _tool_slack_status(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
@@ -1646,6 +1732,516 @@ class Toolbox:
             except Exception as exc:  # noqa: BLE001
                 return _error(f"failed to end snooze: {exc}")
         return _error(f"unknown slack_dnd action: {action}")
+
+    async def _tool_slack_react(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can react to messages")
+        action = str(args.get("action") or "add").lower().strip()
+        channel_val = str(args.get("channel") or "").strip()
+        ts = str(args.get("timestamp") or "").strip()
+        if channel_val and not ts:
+            ref_cid, ref_ts = parse_slack_ref(channel_val)
+            if ref_cid and ref_ts:
+                channel_val, ts = ref_cid, ref_ts
+        emoji = str(args.get("emoji") or "").strip().strip(":")
+        as_user = bool(args.get("as_user", False))
+        if not emoji:
+            return _error("emoji name is required")
+        if not ts:
+            return _error("timestamp is required")
+        channel_id = await self._resolve_channel(ctx, channel_val)
+        if not channel_id:
+            return _error(f"could not resolve channel {channel_val!r}")
+        target_client, err = self._get_target_client(ctx, as_user)
+        if err or not target_client:
+            return _error(err or "slack client not available")
+        sender = "Boi" if as_user else "Bot app"
+        try:
+            if action == "add":
+                await target_client.reactions_add(channel=channel_id, timestamp=ts, name=emoji)
+                return f"added :{emoji}: to {ts} in <#{channel_id}> as {sender}."
+            if action == "remove":
+                await target_client.reactions_remove(channel=channel_id, timestamp=ts, name=emoji)
+                return f"removed :{emoji}: from {ts} in <#{channel_id}> as {sender}."
+            return _error(f"unknown reaction action: {action}")
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"slack reaction failed: {error_code(exc)}")
+
+    async def _tool_slack_activity(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can check Slack activity")
+        if ctx.user_client is None:
+            return _error("SLACK_USER_TOKEN is not configured (needs search:read)")
+        owner_id = ctx.settings.owner_user_id
+        query = str(args.get("query") or "").strip() or f"to:me OR <@{owner_id}>"
+        try:
+            limit = max(1, min(20, int(args.get("limit") or 10)))
+        except (TypeError, ValueError):
+            limit = 10
+        try:
+            resp = await ctx.user_client.search_messages(
+                query=query, count=limit, sort="timestamp", sort_dir="desc"
+            )
+            matches = ((resp.get("messages") or {}).get("matches") or [])[:limit]
+            if not matches:
+                return "no recent Slack activity matched."
+            return _json(
+                [
+                    {
+                        "text": (m.get("text") or "")[:500],
+                        "user": m.get("user"),
+                        "username": m.get("username"),
+                        "channel": (m.get("channel") or {}).get("name"),
+                        "channel_id": (m.get("channel") or {}).get("id"),
+                        "permalink": m.get("permalink"),
+                        "ts": m.get("ts"),
+                    }
+                    for m in matches
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"slack activity check failed: {error_code(exc)}")
+
+    async def _get_google_token(self, ctx: ToolContext) -> str | None:
+        kv = ctx.db.kv_get if ctx.db else (lambda _k: None)
+        token = kv("config:google_access_token") or ctx.settings.google_access_token
+        refresh_token = kv("config:google_refresh_token") or ctx.settings.google_refresh_token
+        client_id = kv("config:google_client_id") or ctx.settings.google_client_id
+        client_secret = kv("config:google_client_secret") or ctx.settings.google_client_secret
+
+        if refresh_token and client_id and client_secret:
+            cached = kv("cache:google_access_token")
+            cached_exp = kv("cache:google_token_exp")
+            if cached and cached_exp:
+                try:
+                    if float(cached_exp) > time.time() + 60:
+                        return cached
+                except ValueError:
+                    pass
+            try:
+                async with httpx.AsyncClient(timeout=10) as http:
+                    resp = await http.post(
+                        "https://oauth2.googleapis.com/token",
+                        data={
+                            "client_id": client_id,
+                            "client_secret": client_secret,
+                            "refresh_token": refresh_token,
+                            "grant_type": "refresh_token",
+                        },
+                    )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    new_token = data.get("access_token")
+                    if new_token:
+                        if ctx.db:
+                            exp = time.time() + int(data.get("expires_in") or 3600)
+                            ctx.db.kv_set("cache:google_access_token", new_token)
+                            ctx.db.kv_set("cache:google_token_exp", str(exp))
+                        return new_token
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("google token refresh failed: %s", exc)
+        return token
+
+    async def _tool_google_calendar(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can access Google Calendar")
+        token = await self._get_google_token(ctx)
+        if not token:
+            return _error("Google credentials not configured (set GOOGLE_ACCESS_TOKEN or GOOGLE_REFRESH_TOKEN)")
+        action = str(args.get("action") or "list").lower().strip()
+        headers = {"Authorization": f"Bearer {token}"}
+        tz = tzinfo()
+        now = datetime.now(tz)
+
+        if action in {"list", "search"}:
+            try:
+                days = max(1, min(90, int(args.get("days") or 7)))
+            except (TypeError, ValueError):
+                days = 7
+            params: dict[str, Any] = {
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "maxResults": 25,
+                "timeMin": now.isoformat(),
+            }
+            if action == "list":
+                params["timeMax"] = (now + timedelta(days=days)).isoformat()
+            query = str(args.get("query") or "").strip()
+            if query:
+                params["q"] = query
+            async with httpx.AsyncClient(timeout=15, headers=headers) as http:
+                resp = await http.get(
+                    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                    params=params,
+                )
+            if resp.status_code != 200:
+                return _error(f"calendar API error ({resp.status_code}): {resp.text[:300]}")
+            items = resp.json().get("items") or []
+            if not items:
+                return "no upcoming calendar events found."
+            return _json(
+                [
+                    {
+                        "id": ev.get("id"),
+                        "summary": ev.get("summary") or "(no title)",
+                        "start": (ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date"),
+                        "end": (ev.get("end") or {}).get("dateTime") or (ev.get("end") or {}).get("date"),
+                        "location": ev.get("location"),
+                        "link": ev.get("htmlLink"),
+                    }
+                    for ev in items
+                ]
+            )
+
+        if action == "create":
+            summary = str(args.get("summary") or "").strip()
+            start_raw = str(args.get("start_time") or "").strip()
+            if not summary or not start_raw:
+                return _error("summary and start_time are required")
+
+            def _parse_dt(val: str) -> datetime | None:
+                try:
+                    dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    return dt if dt.tzinfo else dt.replace(tzinfo=tz)
+                except ValueError:
+                    parsed = parse_when(val, ctx.settings.timezone)
+                    return datetime.fromtimestamp(parsed.due_at, tz=tz) if parsed else None
+
+            start_dt = _parse_dt(start_raw)
+            if not start_dt:
+                return _error(f"could not parse start_time: {start_raw!r}")
+            end_raw = str(args.get("end_time") or "").strip()
+            end_dt = _parse_dt(end_raw) if end_raw else (start_dt + timedelta(hours=1))
+            if not end_dt or end_dt <= start_dt:
+                end_dt = start_dt + timedelta(hours=1)
+
+            body: dict[str, Any] = {
+                "summary": summary,
+                "start": {"dateTime": start_dt.isoformat()},
+                "end": {"dateTime": end_dt.isoformat()},
+            }
+            if args.get("description"):
+                body["description"] = str(args["description"])
+            attendees = args.get("attendees")
+            if isinstance(attendees, list) and attendees:
+                body["attendees"] = [{"email": str(a).strip()} for a in attendees if str(a).strip()]
+
+            async with httpx.AsyncClient(timeout=15, headers=headers) as http:
+                resp = await http.post(
+                    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                    json=body,
+                )
+            if resp.status_code not in {200, 201}:
+                return _error(f"calendar create error ({resp.status_code}): {resp.text[:300]}")
+            ev = resp.json()
+            return f"created event '{ev.get('summary')}' at {start_dt.strftime('%Y-%m-%d %H:%M %Z')} ({ev.get('htmlLink')})."
+
+        return _error(f"unknown google_calendar action: {action}")
+
+    async def _tool_gmail(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can access Gmail")
+        token = await self._get_google_token(ctx)
+        if not token:
+            return _error("Google credentials not configured (set GOOGLE_ACCESS_TOKEN or GOOGLE_REFRESH_TOKEN)")
+        action = str(args.get("action") or "list").lower().strip()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        if action in {"list", "search"}:
+            query = str(args.get("query") or ("is:unread" if action == "list" else "")).strip()
+            try:
+                limit = max(1, min(20, int(args.get("limit") or 5)))
+            except (TypeError, ValueError):
+                limit = 5
+            params: dict[str, Any] = {"maxResults": limit}
+            if query:
+                params["q"] = query
+            async with httpx.AsyncClient(timeout=15, headers=headers) as http:
+                resp = await http.get("https://gmail.googleapis.com/gmail/v1/users/me/messages", params=params)
+                if resp.status_code != 200:
+                    return _error(f"gmail API error ({resp.status_code}): {resp.text[:300]}")
+                msgs = resp.json().get("messages") or []
+                if not msgs:
+                    return "no matching Gmail messages found."
+                results = []
+                for m in msgs[:limit]:
+                    detail = await http.get(
+                        f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{m['id']}",
+                        params={"format": "metadata", "metadataHeaders": ["Subject", "From", "Date"]},
+                    )
+                    if detail.status_code != 200:
+                        continue
+                    data = detail.json()
+                    hdrs = {h["name"].lower(): h["value"] for h in ((data.get("payload") or {}).get("headers") or [])}
+                    results.append(
+                        {
+                            "id": m["id"],
+                            "from": hdrs.get("from", ""),
+                            "subject": hdrs.get("subject", "(no subject)"),
+                            "date": hdrs.get("date", ""),
+                            "snippet": html.unescape(data.get("snippet") or "")[:300],
+                        }
+                    )
+            return _json(results)
+
+        if action == "read":
+            msg_id = str(args.get("message_id") or "").strip()
+            if not msg_id:
+                return _error("message_id is required")
+            async with httpx.AsyncClient(timeout=15, headers=headers) as http:
+                resp = await http.get(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{quote(msg_id)}",
+                    params={"format": "full"},
+                )
+            if resp.status_code != 200:
+                return _error(f"gmail read error ({resp.status_code}): {resp.text[:300]}")
+            data = resp.json()
+            payload = data.get("payload") or {}
+            hdrs = {h["name"].lower(): h["value"] for h in (payload.get("headers") or [])}
+
+            def _extract_body(part: dict[str, Any]) -> str:
+                if part.get("mimeType") == "text/plain" and (part.get("body") or {}).get("data"):
+                    raw_b = part["body"]["data"]
+                    return base64.urlsafe_b64decode(raw_b + "===").decode("utf-8", errors="replace")
+                for sub in part.get("parts") or []:
+                    found = _extract_body(sub)
+                    if found:
+                        return found
+                raw_b = (part.get("body") or {}).get("data")
+                if raw_b:
+                    txt = base64.urlsafe_b64decode(raw_b + "===").decode("utf-8", errors="replace")
+                    if "html" in (part.get("mimeType") or ""):
+                        parser = _TextExtractor()
+                        parser.feed(txt[:30000])
+                        return "".join(parser.parts)
+                    return txt
+                return ""
+
+            body_text = _extract_body(payload) or html.unescape(data.get("snippet") or "")
+            return _json(
+                {
+                    "id": msg_id,
+                    "from": hdrs.get("from", ""),
+                    "to": hdrs.get("to", ""),
+                    "subject": hdrs.get("subject", ""),
+                    "date": hdrs.get("date", ""),
+                    "body": body_text[:4000],
+                }
+            )
+
+        if action == "send":
+            to = str(args.get("to") or "").strip()
+            subject = str(args.get("subject") or "").strip()
+            body = str(args.get("body") or "").strip()
+            if not to or not subject or not body:
+                return _error("to, subject, and body are required to send email")
+            msg = EmailMessage()
+            msg["To"] = to
+            msg["Subject"] = subject
+            msg.set_content(body)
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+            async with httpx.AsyncClient(timeout=15, headers=headers) as http:
+                resp = await http.post(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                    json={"raw": raw},
+                )
+            if resp.status_code not in {200, 201}:
+                return _error(f"gmail send error ({resp.status_code}): {resp.text[:300]}")
+            return f"sent email to {to} with subject '{subject}' (id {resp.json().get('id')})."
+
+        return _error(f"unknown gmail action: {action}")
+
+    async def _tool_google_drive(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can access Google Drive")
+        token = await self._get_google_token(ctx)
+        if not token:
+            return _error("Google credentials not configured (set GOOGLE_ACCESS_TOKEN or GOOGLE_REFRESH_TOKEN)")
+        action = str(args.get("action") or "list").lower().strip()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        if action in {"list", "search"}:
+            query_str = str(args.get("query") or "").strip()
+            try:
+                limit = max(1, min(25, int(args.get("limit") or 10)))
+            except (TypeError, ValueError):
+                limit = 10
+            if query_str:
+                q_esc = query_str.replace("\\", "\\\\").replace("'", "\\'")
+                q = f"(name contains '{q_esc}' or fullText contains '{q_esc}') and trashed = false"
+            else:
+                q = "trashed = false"
+            async with httpx.AsyncClient(timeout=15, headers=headers) as http:
+                resp = await http.get(
+                    "https://www.googleapis.com/drive/v3/files",
+                    params={
+                        "q": q,
+                        "pageSize": limit,
+                        "orderBy": "modifiedTime desc",
+                        "fields": "files(id,name,mimeType,modifiedTime,webViewLink)",
+                    },
+                )
+            if resp.status_code != 200:
+                return _error(f"drive API error ({resp.status_code}): {resp.text[:300]}")
+            files = resp.json().get("files") or []
+            if not files:
+                return "no matching Drive files found."
+            return _json(files)
+
+        if action == "read":
+            file_id = str(args.get("file_id") or "").strip()
+            if not file_id:
+                return _error("file_id is required")
+            async with httpx.AsyncClient(timeout=15, headers=headers) as http:
+                meta = await http.get(
+                    f"https://www.googleapis.com/drive/v3/files/{quote(file_id)}",
+                    params={"fields": "id,name,mimeType"},
+                )
+                if meta.status_code != 200:
+                    return _error(f"drive metadata error ({meta.status_code}): {meta.text[:300]}")
+                info = meta.json()
+                mime = info.get("mimeType") or ""
+                export_map = {
+                    "application/vnd.google-apps.document": "text/plain",
+                    "application/vnd.google-apps.spreadsheet": "text/csv",
+                    "application/vnd.google-apps.presentation": "text/plain",
+                }
+                if mime in export_map:
+                    content = await http.get(
+                        f"https://www.googleapis.com/drive/v3/files/{quote(file_id)}/export",
+                        params={"mimeType": export_map[mime]},
+                    )
+                elif mime.startswith("application/vnd.google-apps."):
+                    return _error(f"cannot export Google workspace file of type {mime}")
+                else:
+                    content = await http.get(
+                        f"https://www.googleapis.com/drive/v3/files/{quote(file_id)}",
+                        params={"alt": "media"},
+                    )
+            if content.status_code != 200:
+                return _error(f"drive read error ({content.status_code}): {content.text[:300]}")
+            return _json({"id": info.get("id"), "name": info.get("name"), "mimeType": mime, "content": content.text[:6000]})
+
+        return _error(f"unknown google_drive action: {action}")
+
+    async def _tool_mac_control(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can control the Mac")
+        kv = ctx.db.kv_get if ctx.db else (lambda _k: None)
+        bridge_url = kv("config:mac_bridge_url") or ctx.settings.mac_bridge_url
+        bridge_token = kv("config:mac_bridge_token") or ctx.settings.mac_bridge_token
+
+        if bridge_url:
+            headers = {"Authorization": f"Bearer {bridge_token}"} if bridge_token else {}
+            try:
+                async with httpx.AsyncClient(timeout=20, headers=headers) as http:
+                    resp = await http.post(f"{bridge_url.rstrip('/')}/action", json=args)
+                if resp.status_code != 200:
+                    return _error(f"mac bridge error ({resp.status_code}): {resp.text[:300]}")
+                return resp.text[:4000]
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"mac bridge request failed: {exc}")
+
+        if sys.platform != "darwin":
+            return _error("Mac link unavailable: not running on macOS and MAC_BRIDGE_URL is not configured.")
+
+        async def _run(*cmd: str, stdin_data: bytes | None = None, timeout: float = 15.0) -> tuple[int, str, str]:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                out_b, err_b = await asyncio.wait_for(proc.communicate(stdin_data), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return -1, "", "command timed out"
+            return (
+                proc.returncode or 0,
+                out_b.decode("utf-8", errors="replace").strip(),
+                err_b.decode("utf-8", errors="replace").strip(),
+            )
+
+        action = str(args.get("action") or "status").lower().strip()
+        if action == "status":
+            _, batt, _ = await _run("pmset", "-g", "batt")
+            _, vol, _ = await _run("osascript", "-e", "get volume settings")
+            _, up, _ = await _run("uptime")
+            return _json({"battery": batt, "volume": vol, "uptime": up})
+
+        if action == "frontmost":
+            code, out, err = await _run(
+                "osascript",
+                "-e",
+                'tell application "System Events" to get name of first process whose frontmost is true',
+            )
+            return out if code == 0 else _error(err or "failed to get frontmost app")
+
+        if action == "apps":
+            code, out, err = await _run(
+                "osascript",
+                "-e",
+                'tell application "System Events" to get name of every process whose visible is true',
+            )
+            return out if code == 0 else _error(err or "failed to list apps")
+
+        if action == "open":
+            target = str(args.get("target") or "").strip()
+            if not target:
+                return _error("target is required for open")
+            if target.startswith(("http://", "https://", "/", "~")) or "." in target:
+                path_or_url = os.path.expanduser(target) if target.startswith("~") else target
+                code, _, err = await _run("open", path_or_url)
+            else:
+                code, _, err = await _run("open", "-a", target)
+                if code != 0:
+                    code, _, err = await _run("open", target)
+            return f"opened {target}." if code == 0 else _error(err or f"failed to open {target}")
+
+        if action == "notify":
+            text = str(args.get("text") or "").strip()
+            title = str(args.get("title") or "Chicen Nugget").strip()
+            if not text:
+                return _error("text is required for notify")
+            code, _, err = await _run(
+                "osascript",
+                "-e",
+                "on run argv",
+                "-e",
+                "display notification (item 1 of argv) with title (item 2 of argv)",
+                "-e",
+                "end run",
+                "--",
+                text,
+                title,
+            )
+            return "sent Mac notification." if code == 0 else _error(err or "notification failed")
+
+        if action == "clipboard":
+            if "text" in args and args["text"] is not None:
+                code, _, err = await _run("pbcopy", stdin_data=str(args["text"]).encode("utf-8"))
+                return "updated Mac clipboard." if code == 0 else _error(err or "pbcopy failed")
+            code, out, err = await _run("pbpaste")
+            return out[:4000] if code == 0 else _error(err or "pbpaste failed")
+
+        if action == "applescript":
+            script = str(args.get("script") or "").strip()
+            if not script:
+                return _error("script is required")
+            code, out, err = await _run("osascript", "-e", script)
+            return out[:4000] if code == 0 else _error(err or f"osascript exited with {code}")
+
+        if action == "run":
+            command = str(args.get("command") or "").strip()
+            if not command:
+                return _error("command is required")
+            code, out, err = await _run("/bin/zsh", "-c", command)
+            combined = "\n".join(x for x in (out, err) if x)
+            return f"exit {code}:\n{combined[:4000]}" if combined else f"exit {code} (no output)"
+
+        return _error(f"unknown mac_control action: {action}")
 
     async def _tool_pending_access_requests(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
@@ -2836,6 +3432,11 @@ class Toolbox:
             "updates": "personal_updates",
             "personal": "personal_updates",
             "threads": "thread_followups",
+            "github": "github_username",
+            "gh_user": "github_username",
+            "google_token": "google_access_token",
+            "google_auth": "google_access_token",
+            "mac_url": "mac_bridge_url",
         }
         key = key_aliases.get(raw_key, raw_key)
         known_keys = [
@@ -2851,14 +3452,28 @@ class Toolbox:
             "thread_followups",
             "personal_updates",
             "weather_location",
+            "github_username",
+            "google_access_token",
+            "google_refresh_token",
+            "google_client_id",
+            "google_client_secret",
+            "mac_bridge_url",
+            "mac_bridge_token",
         ]
+
+        secret_keys = {"google_access_token", "google_refresh_token", "google_client_secret", "mac_bridge_token"}
 
         if action == "list":
             lines = ["current bot runtime settings:"]
             for k in known_keys:
                 db_val = ctx.db.kv_get(f"config:{k}")
-                status = db_val if db_val is not None else "(default)"
-                lines.append(f"- *{k}*: `{status}`")
+                if db_val is not None and k in secret_keys:
+                    status = f"`{db_val[:4]}...{db_val[-4:]}`" if len(db_val) > 8 else "`****`"
+                elif db_val is not None:
+                    status = f"`{db_val}`"
+                else:
+                    status = "(default)"
+                lines.append(f"- *{k}*: {status}")
             return "\n".join(lines)
 
         if not key:
@@ -2898,6 +3513,9 @@ class Toolbox:
             db_val = ctx.db.kv_get(f"config:{key}")
             if db_val is None:
                 return f"setting *{key}* is not set (using default)."
+            if key in secret_keys:
+                masked = f"`{db_val[:4]}...{db_val[-4:]}`" if len(db_val) > 8 else "`****`"
+                return f"setting *{key}* is currently {masked}."
             return f"setting *{key}* is currently `{db_val}`."
 
         if action == "reset":

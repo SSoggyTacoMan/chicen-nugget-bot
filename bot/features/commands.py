@@ -435,6 +435,11 @@ async def cmd_config(ack, command, client) -> None:
         "updates": "personal_updates",
         "personal": "personal_updates",
         "threads": "thread_followups",
+        "github": "github_username",
+        "gh_user": "github_username",
+        "google_token": "google_access_token",
+        "google_auth": "google_access_token",
+        "mac_url": "mac_bridge_url",
     }
     known_keys = [
         "recaps",
@@ -449,13 +454,26 @@ async def cmd_config(ack, command, client) -> None:
         "ambient_ai",
         "thread_followups",
         "weather_location",
+        "github_username",
+        "google_access_token",
+        "google_refresh_token",
+        "google_client_id",
+        "google_client_secret",
+        "mac_bridge_url",
+        "mac_bridge_token",
     ]
 
     if action in {"list", "show"} or not parts:
         lines = ["*bot runtime settings*"]
+        secret_keys = {"google_access_token", "google_refresh_token", "google_client_secret", "mac_bridge_token"}
         for k in known_keys:
             val = runtime.db.kv_get(f"config:{k}") if runtime.db else None
-            status = f"`{val}`" if val is not None else "_(default)_"
+            if val is not None and k in secret_keys:
+                status = f"`{val[:4]}...{val[-4:]}`" if len(val) > 8 else "`****`"
+            elif val is not None:
+                status = f"`{val}`"
+            else:
+                status = "_(default)_"
             lines.append(f"• *{k}*: {status}")
         lines.append("\n_use `/nugget config <key> <value>` or `/nugget config reset <key>`_")
         await _say(client, command, "\n".join(lines), ephemeral=True)
