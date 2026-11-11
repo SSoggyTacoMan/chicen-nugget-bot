@@ -842,6 +842,79 @@ def test_thread_chatter_suppression_and_speaker_tags(tmp_path):
         runtime.gate = old_gate
 
 
+def test_markdown_notes_memory(tmp_path):
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.tools import Toolbox, ToolContext
+    from bot.db import Database
+
+    db = Database(str(tmp_path / "notes_test.db"))
+    db.init()
+    settings = MagicMock()
+    settings.data_dir = tmp_path
+
+    box = Toolbox(settings)
+    ctx = ToolContext(
+        db=db,
+        settings=settings,
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="D1",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+    )
+
+    async def run():
+        # 1. remember with topic
+        res = await box.execute(
+            "remember",
+            {"text": "never serve cold fries", "topic": "rules", "description": "standing kitchen rules"},
+            ctx,
+        )
+        assert "saved note #1 to notes/rules.md" in res
+        rules_file = tmp_path / "notes" / "rules.md"
+        assert rules_file.exists()
+        content = rules_file.read_text(encoding="utf-8")
+        assert "standing kitchen rules" in content
+        assert "never serve cold fries" in content
+
+        # 2. remember append
+        res2 = await box.execute(
+            "remember",
+            {"text": "always season with salt", "topic": "rules"},
+            ctx,
+        )
+        assert "saved note #2 to notes/rules.md" in res2
+        content2 = rules_file.read_text(encoding="utf-8")
+        assert "- never serve cold fries" in content2
+        assert "- always season with salt" in content2
+
+        # 3. recall specific topic
+        read_topic = await box.execute("recall", {"topic": "rules"}, ctx)
+        assert "content of notes/rules.md:" in read_topic
+        assert "always season with salt" in read_topic
+
+        # 4. recall with search query matching both markdown and sqlite
+        search_res = await box.execute("recall", {"query": "season"}, ctx)
+        parsed = json.loads(search_res)
+        assert any("always season with salt" in m for m in parsed["markdown_matches"])
+        assert any("always season with salt" in n["text"] for n in parsed["notes"])
+
+        # 5. recall empty query returns index
+        index_res = await box.execute("recall", {}, ctx)
+        index_parsed = json.loads(index_res)
+        assert any("notes/rules.md: standing kitchen rules" in line for line in index_parsed["notes_files"])
+
+    asyncio.run(run())
+
+
+
 
 
 

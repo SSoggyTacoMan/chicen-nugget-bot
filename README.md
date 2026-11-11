@@ -130,11 +130,13 @@ The agent is provider-agnostic: any OpenAI-compatible chat completions endpoint 
 ```dotenv
 AI_API_KEY=sk-hc-v1-...
 AI_BASE_URL=https://ai.hackclub.com/proxy/v1
-AI_MODEL=anthropic/claude-haiku-5.5
-AI_FALLBACK_MODEL=google/gemini-2.5-flash
+AI_MODEL=deepseek/deepseek-v4.1-flash
+AI_FALLBACK_MODEL=anthropic/claude-haiku-5.5
 AI_MAX_TOKENS=1200
 AI_HISTORY_LIMIT=24
 AI_CHANNELS=*
+IMAGINE_MODEL=google/gemini-3.1-flash-image
+IMAGINE_FALLBACK_MODEL=google/gemini-2.5-flash-image
 ```
 
 The fallback model is tried when the primary errors or times out. Turns and notes live in `data/bot.db`.
@@ -317,8 +319,8 @@ AI:
 |---|---|---|
 | `AI_API_KEY` | — | enables the agent |
 | `AI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
-| `AI_MODEL` | `anthropic/claude-haiku-5.5` | primary model, must support tools |
-| `AI_FALLBACK_MODEL` | `google/gemini-2.5-flash` | retried on failure |
+| `AI_MODEL` | `deepseek/deepseek-v4.1-flash` | primary model, must support tools |
+| `AI_FALLBACK_MODEL` | `anthropic/claude-haiku-5.5` | retried on failure |
 | `AI_MAX_TOKENS` | `1200` | max reply length |
 | `AI_HISTORY_LIMIT` | `24` | turns loaded per reply |
 | `AI_MAX_CONTEXT_CHARS` | `24000` | trim older turns above this size |
@@ -338,7 +340,7 @@ AI:
 | `AI_AMBIENT_CHANNELS` | — | channels for unprompted replies; `*` = all |
 | `AI_AMBIENT_COOLDOWN` | `120` | min seconds between ambient replies per channel |
 | `AI_THREAD_COOLDOWN` | `120` | min seconds between unprompted thread replies |
-| `IMAGINE_MODEL` | — | image model; empty disables `/imagine` and `generate_image` |
+| `IMAGINE_MODEL` | `google/gemini-3.1-flash-image` | image model; empty disables `/imagine` and `generate_image` |
 | `IMAGINE_FALLBACK_MODEL` | `google/gemini-2.5-flash-image` | image fallback |
 | `AI_IMAGE_COST_USD` | `0.04` | per-image budget charge |
 | `WEATHER_DEFAULT_LOCATION` | — | default weather location |
