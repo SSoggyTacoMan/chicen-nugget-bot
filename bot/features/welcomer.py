@@ -11,8 +11,8 @@ from bot.slack_api import (
     post,
     post_ephemeral,
     update,
-    usergroup_members,
     user_info,
+    usergroup_members,
 )
 from bot.utils.text import display_name
 
@@ -209,7 +209,7 @@ async def on_usergroup_join(ack, body, action, client, respond) -> None:
             client,
             body,
             respond,
-            "i can't manage the ping group right now — i need a user token with `usergroups:write`.",
+            "i can't manage the ping group right now - i need a user token with `usergroups:write`.",
         )
         return
     result = await ensure_usergroup_member(runtime.user_client, group, user_id)
@@ -229,7 +229,7 @@ async def on_usergroup_leave(ack, body, action, client, respond) -> None:
             client,
             body,
             respond,
-            "i can't manage the ping group right now — i need a user token with `usergroups:write`.",
+            "i can't manage the ping group right now - i need a user token with `usergroups:write`.",
         )
         return
     result = await ensure_usergroup_not_member(runtime.user_client, group, user_id)
@@ -242,7 +242,7 @@ async def on_usergroup_skip(ack, body, client, respond) -> None:
         client,
         body,
         respond,
-        "no worries — not added. you can join any time with `/pinggroup`.",
+        "no worries - not added. you can join any time with `/pinggroup`.",
     )
 
 
@@ -265,7 +265,7 @@ def join_text(result: str) -> str:
     if result == "already":
         return ":bell: you're already in the ping group."
     return (
-        "couldn't add you to the ping group — my user token may be missing the "
+        "couldn't add you to the ping group: my user token may be missing the "
         "`usergroups:write` scope. an admin can add you manually."
     )
 
@@ -275,7 +275,7 @@ def leave_text(result: str) -> str:
         return ":wave: removed you from the ping group."
     if result == "not_member":
         return "you weren't in the ping group anyway."
-    return "couldn't remove you from the ping group — check my `usergroups:write` scope."
+    return "couldn't remove you from the ping group: check my `usergroups:write` scope."
 
 
 # ------------------------------------------------------------------ command
@@ -313,7 +313,7 @@ async def cmd_pinggroup(ack, command, client) -> None:
             client,
             channel,
             user_id,
-            "couldn't check the ping group — my user token may be missing `usergroups:read`.",
+            "couldn't check the ping group: my user token may be missing `usergroups:read`.",
         )
         return
     if user_id in members:

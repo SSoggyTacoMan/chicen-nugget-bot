@@ -1,76 +1,88 @@
-# Chicen Nugget Bot — a personal Slack bot
+# Chicen Nugget Bot
 
-A small, friendly Slack bot for a personal workspace. It welcomes new members, runs a button-based **tier 2 private-channel access request** flow, chats as a **personal AI agent** with tools and memory, nudges people about **usergroup pings**, runs a **daily recap** routine, and ships with slash commands, reminders, scheduled messages, polls and dice.
-
-Built with Python, [Slack Bolt](https://slack.dev/bolt-python/) and **socket mode**, so it runs on your laptop or a small VPS without a public URL or webhook server.
+A Slack workspace assistant with a pluggable AI agent, a dual-identity mode for human-feeling replies, and a small set of moderation and scheduling features. Built with Python, Slack Bolt, asyncio and SQLite in socket mode, so it runs without a public URL.
 
 ```
-member joins ──▶ public welcome + DM + ping group
-member clicks "request tier 2 access" ──▶ modal ──▶ DM to admin
-admin clicks Approve ──▶ bot invites member to private channel ──▶ DM "you're in"
+welcome / tier-2 access / ping group / daily recap
+AI mentions + DMs + thread follows + ambient chime-ins
+optional second identity: replies as a real user, with native typing indicators
 ```
 
-## What it does
+## Features
 
-- **Welcomer** — watches channels for joins/leaves, posts a public welcome, DMs an onboarding message once, optionally pings a user group and adds/removes members from it.
-- **Tier 2 access requests** — a panel button or `/nugget access` opens a short modal. Requests are stored in SQLite and sent to the admin with Approve/Deny buttons. Approving invites the member to your private channel automatically. Already-members are told the door is open, and `ACCESS_AUTO_APPROVE=true` skips the queue.
-- **Usergroup helpers** — DMs anyone who replies in a thread under a usergroup ping (replies re-ping the whole group), and posts a “thread here!” anchor when a ping includes 🧵 (or offers yes/no buttons when it doesn't).
-- **Daily recap** — a scheduled public prompt asks how your day went. Marking it done links your reply, adds ✨, optionally pings a usergroup, and can open a second private recap.
-- **Personal AI agent** — DM it (owner/admins only) or mention it in a channel. It has conversation memory in SQLite and tools for weather, dice, reminders, Slack search, channel history, DMs, notes, stats, URLs and optional web search. It also powers `/nugget ask`, `/nugget summarize` and `/nugget imagine`.
-- **Jev gate** — in channels listed in `AI_AMBIENT_CHANNELS`, the bot asks Jev (`jev-latest`) four typed questions about every message: should it reply, was it addressed to the bot, is it spam, and what kind of message is it. Only a confident yes runs the expensive agent turn, so it can chime in on questions and help without replying to every message.
-- **One slash command** — everything lives under `/nugget`, so it never collides with other apps: `/nugget help`, `/nugget ping`, `/nugget roll 2d6`, `/nugget poll ...`, `/nugget ask ...`, `/nugget imagine ...`, `/nugget pinggroup`, and more.
-- **Reminders & scheduled messages** — one-off and recurring (`10m`, `tomorrow 09:00`, `daily 08:30`, `weekly mon 18:00`, `every 2h`), delivered by DM or posted to a channel by an admin.
-- **Polls** — `/nugget poll "question" "a" "b"` posts live button tallies with bars; click another option to change your vote.
-- **Daily digest** — optional DM summary of joins, leaves, pending access requests and upcoming reminders.
-- **Optional user token** — enables Slack message search and user-group automation without changing the main bot identity.
+- **AI agent** — mentions, DMs, thread follow-ups and optional ambient replies. Tool calling, SQLite memory, per-user budgets and rate limits. Works with any OpenAI-compatible endpoint; defaults to Hack Club AI.
+- **Dual identity (optional)** — a second Slack account replies through a client WebSocket gateway, so messages look human and show native `… is typing`. The bot account keeps handling workspace events in parallel.
+- **Jev gate** — a typed classifier decides whether an unaddressed message deserves a reply, who it is aimed at, and whether answering needs live data. Fails closed.
+- **Rich artifacts** — AI images, rendered charts (`make_chart` → PNG) and PowerPoint decks (`make_deck` → PPTX), uploaded into the conversation.
+- **Welcomer** — public welcome, onboarding DM, optional ping-group opt-in.
+- **Tier-2 access** — request modal, admin approve/deny buttons, automatic channel invite.
+- **Daily recap** — scheduled prompt with a done button, optional private follow-up and usergroup ping.
+- **Reminders, polls, dice** — one-off and recurring reminders, button polls with live tallies, dice notation.
+- **Runtime settings** — recaps, digest, personal updates, thread follows, welcomer, tier-2 and ambient AI can be toggled from chat.
+- **Slack-native output** — mrkdwn sanitising, broadcast-ping disarming, link-unfurl suppression, chunking for long replies.
+
+## Architecture
+
+```
+Slack ──socket mode──▶ bot account (xoxb / xapp) ──▶ features, scheduler, slash commands
+   │
+   └──client websocket──▶ user account (xoxc / xoxd) ──▶ personal assistant replies + typing
+```
+
+Both identities share one process, one SQLite database, one model configuration and one toolbox. The bot account owns everything that needs app scopes (events, buttons, slash commands). The user account is a normal Slack session: it can read what the user can read, post as the user, and emit typing frames the Slack client renders natively.
+
+### The user account
+
+The user gateway connects to `wss://wss-primary.slack.com` using a browser session token (`xoxc-…`) and the matching cookie (`xoxd-…`). It is not an app token and needs no OAuth install.
+
+- **Typing indicators** — while the model runs, the gateway sends `{"type": "typing", "channel": …}` frames every 2.5 seconds. Slack renders them as a normal human typing state.
+- **Message flow** — the socket delivers `message` events. The gateway ignores bots, its own messages, the bot account, duplicate timestamps and thread chatter that is not addressed to it.
+- **Threads** — if the thread is already known to the agent, the user account follows it; otherwise it answers mentions and DMs only.
+- **Reconnects** — Slack sends a `reconnect_url` frame after connect. The gateway caches it and reconnects with it, falling back to `client.getWebSocketURL` when it expires. Exponential backoff caps at 30 seconds.
+- **Presence** — on connect the gateway asks Slack for `auto` presence so the account does not look permanently away.
+- **Isolation** — the user gateway never handles workspace admin actions. Those stay on the bot account, so a stolen user session cannot approve access or change settings.
+- **Deployment** — set `SLACK_USER_TOKEN` and `SLACK_USER_COOKIE`; leave them empty to run bot-only.
+
+> Session tokens expire when the browser session is revoked. Treat `xoxc` and `xoxd` as passwords: they grant full access to the account, including reading private channels. Rotate them by signing out and in again, then updating `.env`.
 
 ## Quick start
 
-### 1. Create the Slack app from the manifest
+### 1. Create the Slack app
 
-1. Go to <https://api.slack.com/apps> → **Create New App** → **From an app manifest**.
-2. Pick your workspace.
-3. Paste the contents of [`slack-app-manifest.json`](slack-app-manifest.json). The app/bot name is set to `Chicen Nugget Bot`; edit it if you like.
-4. Create the app, then **Install to Workspace** and allow it.
-5. Open **App Home → Messages Tab** and check **Allow users to send messages from the Messages tab**. The manifest enables it, but apps created before that setting was added need the toggle flipped manually. Without it Slack says *Sending messages to this app has been turned off*.
+1. Open <https://api.slack.com/apps> → **Create New App** → **From an app manifest**.
+2. Pick the workspace and paste [`slack-app-manifest.json`](slack-app-manifest.json).
+3. Install the app and approve the requested scopes.
+4. In **App Home → Messages Tab**, enable **Allow users to send messages from the Messages tab**.
 
-If you change the name, also set `BOT_NAME` in `.env` (and optionally change the app name in Slack later).
+The manifest enables socket mode, events, interactivity and the single `/nugget` slash command.
 
-> The bot registers exactly **one** slash command, `/nugget`, and routes everything through subcommands. That avoids the workspace-wide collisions you get from registering `/poll`, `/roll`, `/ping` and friends. If your workspace rejects the optional user scopes in the manifest, remove the `oauth_config.scopes.user` block; everything except Slack search and usergroup automation still works.
-
-### 2. Collect three values
+### 2. Collect credentials
 
 | value | where |
 |---|---|
-| `SLACK_BOT_TOKEN` (`xoxb-…`) | **OAuth & Permissions** → Bot User OAuth Token |
-| `SLACK_APP_TOKEN` (`xapp-…`) | **Basic Information** → App-Level Tokens → generate with `connections:write` |
-| `OWNER_USER_ID` (`U…`) | Your Slack profile → **More** → **Copy member ID** |
-
-Socket mode is already enabled by the manifest, and so are the events, interactivity and slash commands.
+| `SLACK_BOT_TOKEN` (`xoxb-…`) | OAuth & Permissions → Bot User OAuth Token |
+| `SLACK_APP_TOKEN` (`xapp-…`) | Basic Information → App-Level Tokens, with `connections:write` |
+| `OWNER_USER_ID` (`U…`) | your profile → More → Copy member ID |
+| `SLACK_USER_TOKEN` | optional, see [the user account](#the-user-account) |
+| `SLACK_USER_COOKIE` (`xoxd-…`) | optional, required alongside an `xoxc` token |
 
 ### 3. Configure
 
 ```bash
 cp .env.example .env
-# edit .env: tokens, OWNER_USER_ID, TIMEZONE, WATCHED_CHANNEL_IDS, ACCESS_CHANNEL_ID, ...
 ```
 
-Minimum useful setup:
+Minimum:
 
 ```dotenv
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 OWNER_USER_ID=U012ABCDEF
-BOT_NAME="Chicen Nugget Bot"
 TIMEZONE=Europe/Amsterdam
-
-WATCHED_CHANNEL_IDS=C012WELCOME
-ACCESS_CHANNEL_ID=C012TIER2PRIVATE
-ACCESS_PANEL_CHANNEL_ID=C012WELCOME
-LOGS_CHANNEL_ID=C012LOGS
+AI_API_KEY=sk-hc-v1-...
 ```
 
-### 4. Run it
+### 4. Run
 
 ```bash
 python3 -m venv .venv
@@ -79,233 +91,160 @@ pip install -r requirements.txt
 python main.py
 ```
 
-You should see `Chicen Nugget Bot online as bot user …` and `starting socket mode...`. DM the bot or run `/ping`.
+A healthy start logs `online as bot user …`, plus `user token active as …` when the second identity is configured.
 
-> Prefer `uv`? `uv venv && uv pip install -r requirements.txt && uv run main.py`.
+### 5. Invite the bot
 
-### 5. Invite the bot to the right channels
+Invite it to the welcome, logs and panel channels, and to the private tier-2 channel. Slack only lets an app add members to a private channel the app itself is already in.
 
-The bot can only read/post where it is a member.
+## Personal controls
 
-- `/invite @Chicen Nugget Bot` in the welcome channel, logs channel and panel channel.
-- **Invite it to the private tier 2 channel too.** This is required: Slack only lets an app add people to a private channel that the app itself is in.
+Settings live in SQLite and change from chat through the `bot_config` tool, or with `/nugget config`. Owner/admin only.
 
-## Tier 2 access flow
+| key | effect |
+|---|---|
+| `recaps` | daily recap flow on/off |
+| `daily_digest` | owner digest DM on/off |
+| `personal_updates` | owner DMs: digest and recap reminder. public recaps keep running |
+| `thread_followups` | unprompted replies in threads the bot is already in |
+| `ambient_ai` | unprompted chime-ins in `AI_AMBIENT_CHANNELS` |
+| `welcomer` | joins/leaves and onboarding DMs |
+| `tier2` | access request flow |
+| `weather_location` | default location for the weather tool |
 
-1. A member clicks **Request access** on the panel (or in their welcome DM), or runs `/access`.
-2. A modal asks why they want access and makes them agree to the rules.
-3. The bot checks whether they're already in `ACCESS_CHANNEL_ID`; if so, it tells them the door is already open.
-4. The bot DMs the admin (or posts in `ADMIN_CHANNEL_ID`) with **Approve** / **Deny** buttons.
-5. Approve → `conversations.invite` adds them to `ACCESS_CHANNEL_ID`, the bot DMs them “the door swings open”, and the request is marked approved.
-6. Deny → the admin can leave a short reason, which is DM'd to the requester.
+Examples:
 
-Set `ACCESS_AUTO_APPROVE=true` to invite people immediately when they submit the modal. If the invite fails, the request stays pending and still goes to an admin.
-
-Requests are stored so you can see pending/approved/denied history. Duplicate pending requests and a per-person cooldown (`ACCESS_COOLDOWN_HOURS`, default 24) prevent spam.
-
-If approval fails with `not_in_channel`, invite the bot to the private channel. If it fails with `missing_scope`, reinstall the app with the manifest's `groups:write` scope.
-
-## Usergroup helpers
-
-These need no extra scopes, just `message.channels` / `message.groups` (already in the manifest).
-
-- **Ping group opt-in** (`USERGROUP_ID`, `USERGROUP_PROMPT=true`) — when someone joins a watched channel, the bot DMs them a short intro with **:bell: add me** / **no thanks** buttons. Clicking adds them to the usergroup (via `SLACK_USER_TOKEN`). Each person is asked once. Set `USERGROUP_PROMPT=false` for the old auto-add behaviour. `/pinggroup` lets anyone join, leave, or check their status any time.
-- **Ping guard** (`USERGROUP_GUARD=true`) — when someone replies in a thread whose parent contains a usergroup mention, the bot DMs them: “please don't thread on user group mentions”. Thread replies re-ping the whole group.
-- **Thread helper** (`THREAD_HELPER=true`) — when a message pings the group and includes 🧵 (or `:thread:`), the bot posts a `🧵 thread here!` anchor for people to reply under. If the ping has no 🧵 marker, the poster gets ephemeral **yes** / **no** buttons instead.
-
-The bot needs to be able to read the parent message, so it only works in channels it's a member of.
-
-## Daily recap
-
-The recap is a small daily ritual:
-
-```dotenv
-RECAP_CHANNEL_ID=C012GENERAL
-RECAP_TIME=20:00
-RECAP_PRIVATE_CHANNEL_ID=C012PRIVATE   # optional
-RECAP_REMINDER_MINUTES=10              # 0 disables the heads-up DM
-RECAP_PING=S0123456789                 # optional usergroup ping
-RECAP_PRIVATE_PING=S0123456789         # optional private-channel ping
+```text
+turn off personal updates
+enable thread followups
+disable ambient
+set weather_location to Amsterdam
 ```
 
-At `RECAP_TIME` the bot posts a public “how was your day?” prompt with a 🌙 **done!** button. The owner replies in the thread, then clicks done: the bot marks the prompt ✨, links the owner's latest reply, and optionally pings the group. If `RECAP_PRIVATE_CHANNEL_ID` is set, it then posts a private follow-up recap prompt with its own done button.
-
-Admins can trigger a prompt immediately with `/recap`. Recaps are disabled until `RECAP_CHANNEL_ID` and `RECAP_TIME` are set.
+`AI_THREAD_COOLDOWN` (default 120s) limits how often an unprompted thread reply can happen. Mentions and DMs bypass it.
 
 ## AI agent
 
-The agent is wired for **Hack Club AI** by default, and also works with any **OpenAI-compatible** chat completions endpoint. It needs a model with function/tool calling.
+The agent is provider-agnostic: any OpenAI-compatible chat completions endpoint with function calling works. Default is Hack Club AI.
 
 ```dotenv
 AI_API_KEY=sk-hc-v1-...
 AI_BASE_URL=https://ai.hackclub.com/proxy/v1
-AI_MODEL=openai/gpt-5.6-luna
-AI_FALLBACK_MODEL=anthropic/claude-haiku-5.5
-AI_RATE_LIMIT_PER_MINUTE=12
-AI_GLOBAL_RATE_LIMIT_PER_MINUTE=30
-AI_USER_DAILY_BUDGET_USD=0.50
-AI_DAILY_BUDGET_USD=0
+AI_MODEL=anthropic/claude-haiku-5.5
+AI_FALLBACK_MODEL=google/gemini-2.5-flash
+AI_MAX_TOKENS=1200
+AI_HISTORY_LIMIT=24
+AI_CHANNELS=*
 ```
 
-Get a key from <https://ai.hackclub.com/dashboard>. The fallback model is tried automatically when the primary model errors or times out. `AI_RATE_LIMIT_PER_MINUTE=0` disables the per-user limit.
+The fallback model is tried when the primary errors or times out. Turns and notes live in `data/bot.db`.
 
-`gpt-5.6-luna` is the default because it matched `gpt-5.5` on tool calls and Slack-style answers in testing, at about 1/25th the price and roughly the same latency. `claude-haiku-5.5` is the fallback: a different provider, faster, and cheap enough that a bad day doesn't matter. Both handle function calling.
+### Tools
 
-### The jev gate
+| group | tools |
+|---|---|
+| web/research | `search_web`, `fetch_url`, `http_status`, `hacker_news`, `ocr_document` |
+| code/dev | `run_code`, `github_info`, `hackatime_stats`, `system_diagnostics` |
+| slack | `search_slack`, `fetch_slack_message`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `send_dm`, `post_message` |
+| workspace | `flaron`, `pending_access_requests`, `get_stats`, `bot_config` |
+| personal | `remember`, `recall`, `manage_tasks`, `remind`, `list_reminders`, `cancel_reminder` |
+| media | `generate_image`, `make_chart`, `make_deck` |
+| misc | `get_weather`, `public_holidays`, `roll_dice`, `dog_fact`, `taco_recipe`, `urban_dict`, `nugget_fact` |
 
-In a busy channel a bot that answers everything is noise. Jev is TypeSafe's *System One* model: it doesn't write text, it returns a typed probability for each question you ask it, in one pass. Hack Club AI serves it at `/jev/systemone`, so the bot asks four questions about every ambient message:
+Owner/admin checks run in code against the real Slack sender, not only in the prompt.
 
-| question | type | what it decides |
+### Artifacts
+
+- **Charts** — `make_chart` renders bar, line, pie, scatter and histogram charts with matplotlib and uploads a PNG. Pass `labels`, `values`, optional `series`, a title and axis labels.
+- **Decks** — `make_deck` builds a real PPTX with python-pptx: a title slide plus title/bullet slides with optional speaker notes, capped at 30 slides.
+- **Images** — `generate_image` (or `/imagine`) uploads an AI image with the configured image model.
+
+Uploads land in the current channel or thread. Link unfurling is disabled so conversations stay compact.
+
+## The Jev gate
+
+A bot that replies to everything is noise. Jev is a typed classifier: it writes no prose, it returns a probability or choice per question in one pass. For any unaddressed message the bot asks six questions.
+
+| question | type | purpose |
 |---|---|---|
 | `should_reply` | `noul` | would a reply genuinely add something? |
 | `addressed` | `noul` | is the message aimed at the bot? |
 | `spam` | `noul` | is it spam, a mass ping, or a link dump? |
+| `needs_tools` | `noul` | does a correct answer need live data or an action? |
 | `kind` | `choice` | question, help, feedback, celebration, bot, chatter, spam, other |
+| `recipient` | `choice` | bot, someone_else, everyone |
 
-A message is answered when `should_reply` clears `AI_GATE_MIN_CONFIDENCE` (or `addressed` clears `AI_GATE_ADDRESSED_CONFIDENCE`) and `spam` stays below `AI_GATE_SPAM_THRESHOLD`. The `kind` answer is passed to the agent as a hint, so it knows whether to troubleshoot, congratulate, or keep it short.
+Decision rule:
+
+```text
+reply = not spam
+        and (aimed_at_bot or (worth_replying and recipient != someone_else))
+```
+
+A message aimed at another person never triggers an agent turn, even in a thread the bot is part of, unless it is also addressed to the bot. `needs_tools` becomes a hint in the turn prompt so the model fetches data instead of guessing. `recipient`, `kind`, `bot_last` and `needs_tools` are summarised into one short hint line.
 
 ```dotenv
 AI_GATE_ENABLED=true
 AI_GATE_MODEL=jev-latest
 AI_GATE_TIMEOUT=8
-# defaults to <AI_BASE_URL>/jev/systemone
 AI_JEV_URL=
 AI_GATE_MIN_CONFIDENCE=0.5
 AI_GATE_ADDRESSED_CONFIDENCE=0.6
 AI_GATE_SPAM_THRESHOLD=0.7
-# channels where the bot listens to every message; empty = off
 AI_AMBIENT_CHANNELS=
-# minimum seconds between unprompted replies in one channel
 AI_AMBIENT_COOLDOWN=120
+AI_THREAD_COOLDOWN=120
 ```
 
-Mentions and DMs always skip the gate. If Jev errors or times out, the gate fails closed (no reply), so a broken gate never turns into spam. Set `AI_AMBIENT_CHANNELS=*` to let it do this everywhere. The gate needs a Jev-capable endpoint; the rest of the bot still works with any OpenAI-compatible one.
+Mentions and DMs skip the gate. Errors and timeouts fail closed. `AI_AMBIENT_CHANNELS=*` enables ambient replies everywhere the bot is a member.
 
-### Spend limits
+## Spend limits
 
-The bot accounts for every completion it makes — chat, Jev decisions, and `/imagine` — in `data/bot.db` and prices it from a small table. Hack Club AI already stops the account at its daily allowance, so the bot does not add a second global stop by default. What it does enforce is a **per-user** daily cap: once one person reaches `AI_USER_DAILY_BUDGET_USD`, their AI requests stop until 00:00 UTC. The owner is exempt. A guest with one very large request therefore can't spend the whole day's allowance.
+Every completion is priced and recorded: chat, Jev calls, images and token-billed tools. Hack Club AI also enforces an account-wide daily allowance.
 
 ```dotenv
-AI_USER_DAILY_BUDGET_USD=0.50   # owner is exempt; 0 disables
-AI_DAILY_BUDGET_USD=0           # optional extra bot-wide stop
+AI_USER_DAILY_BUDGET_USD=0.50   # owner exempt; 0 disables
+AI_DAILY_BUDGET_USD=0            # optional bot-wide stop
+AI_RATE_LIMIT_PER_MINUTE=12
 AI_GLOBAL_RATE_LIMIT_PER_MINUTE=30
 AI_MAX_CONTEXT_CHARS=24000
 AI_IMAGE_COST_USD=0.04
 ```
 
-Three limits work together:
-
-- per-user rate limit (`AI_RATE_LIMIT_PER_MINUTE`) stops one person from spamming;
-- workspace rate limit (`AI_GLOBAL_RATE_LIMIT_PER_MINUTE`) stops a burst across the whole server;
-- per-user daily cap stops one person from quietly spending the day.
-
-Usage is attributed to the Slack user who asked, so `/nugget budget` shows your own spend, the workspace total, and the top users for the day. Unknown models are priced pessimistically ($1/$5 per million) so a typo can't under-count.
-
-Other endpoints still work:
-
-```dotenv
-# OpenRouter
-AI_BASE_URL=https://openrouter.ai/api/v1
-AI_MODEL=openai/gpt-4o-mini
-
-# local Ollama
-AI_BASE_URL=http://localhost:11434/v1
-AI_API_KEY=ollama
-AI_MODEL=llama3.2
-```
-
-Who can use it:
-
-- **DMs:** owner always; admins too when `AI_ALLOW_ADMINS=true`. Other users are silently ignored.
-- **Channels:** anyone can mention the bot in a channel allowed by `AI_CHANNELS` (`*` = every channel the bot is in). It replies in a thread. Once it has replied in a thread, it keeps following that thread without a fresh mention.
-- **Ambient:** in channels listed in `AI_AMBIENT_CHANNELS` it also listens to unaddressed messages and replies only when the jev gate says yes, at most once per `AI_AMBIENT_COOLDOWN` seconds.
-- **Commands:** `/ask` and `/summarize` follow `AI_CHANNELS`; `/imagine` and `/forget` in channels are admin-only.
-
-Conversation history and notes are stored in `data/bot.db`. Nothing is sent anywhere except your Slack workspace, your chosen AI endpoint, and the optional tools you enable.
-
-### Persona
-
-The bot's voice and rules live in [`prompts/system.md`](prompts/system.md): who it is, how it talks, when to use a tool, how to behave when it chimed in unprompted, and how to keep private data private. Edit that file to change the personality — no code changes needed. Each turn is also given the current time, the channel or DM it's in, who is speaking, and why it is replying (mention, thread follow-up, DM, or unprompted).
-
-Changing the persona also tells the bot to drop its stored chat turns on the next start. The model learns tone from its own old replies, so a rewrite would otherwise keep sounding like the previous version. Owner notes and other data are untouched.
-
-### AI commands
-
-| command | what it does |
-|---|---|
-| `/ask <question>` | one-shot answer without touching thread memory |
-| `/summarize [n]` | AI catch-up for the last `n` channel messages (default 50, max 200) |
-| `/imagine <prompt>` | generate an image and upload it (admin; needs `files:write`) |
-| `/forget` | wipe stored AI turns for the current DM, or every AI thread in a channel (admin) |
-| `/nugget` | a random nugget fact |
-
-Image generation uses `google/gemini-3.1-flash-lite-image` by default:
-
-```dotenv
-IMAGINE_MODEL=google/gemini-3.1-flash-lite-image
-IMAGINE_FALLBACK_MODEL=google/gemini-2.5-flash-image
-```
-
-Aspect ratios: `--square` (default), `--wide` / `--landscape`, `--tall` / `--portrait`, or `--ratio 4:3`. Example: `/imagine a nugget astronaut on the moon --wide`.
-
-If `/imagine` returns `missing_scope`, reinstall the app so it picks up the manifest's `files:write` scope.
-
-### Tools
-
-| tool | what it does | who |
-|---|---|---|
-| `get_weather` | current weather + 1–7 day forecast via open-meteo | anyone |
-| `roll_dice` | `d20`, `2d6+3`, `coin` | anyone |
-| `nugget_fact` | random nugget trivia | anyone |
-| `remind` | create one-off/recurring reminders, DM or channel | owner/admin |
-| `list_reminders` / `cancel_reminder` | manage reminders | owner/admin |
-| `search_slack` | search workspace messages | needs user token |
-| `lookup_user` / `lookup_channel` | resolve names to real ids | anyone |
-| `get_channel_history` | read recent channel messages | owner/admin |
-| `send_dm` | DM someone as the bot | owner/admin |
-| `remember` / `recall` | durable notes + past AI turns | owner/admin |
-| `post_message` | post as the bot to a channel | owner/admin |
-| `pending_access_requests` | list pending tier 2 requests | owner/admin |
-| `get_stats` | workspace stats | owner/admin |
-| `fetch_url` | read a public page as text (SSRF guarded) | owner/admin |
-| `search_web` | Tavily web search, if `TAVILY_API_KEY` is set | owner/admin |
-
-Owner-only is enforced against the real Slack sender id in code, not just in the prompt.
+Three limits work together: per-user rate limit, workspace rate limit and a per-user daily cap. `/nugget budget` shows your spend, the workspace total and the day's top users.
 
 ## Commands
 
-Everything is a subcommand of `/nugget`.
+Everything lives under `/nugget`, so it never collides with other apps.
 
 | command | what it does | who |
 |---|---|---|
 | `/nugget` | random nugget fact | anyone |
 | `/nugget help` | command list | anyone |
-| `/nugget ping` | bot + Slack API latency | anyone |
-| `/nugget id` | channel/user/team ids and feature flags for this channel | anyone |
-| `/nugget access` | open the tier 2 request modal | anyone |
-| `/nugget accesspanel [channel]` | post/update the access panel | admin |
-| `/nugget pending` | list pending tier 2 requests | admin |
+| `/nugget ping` | bot and Slack API latency | anyone |
+| `/nugget id` | ids and feature flags for this channel | anyone |
+| `/nugget access` | open the tier-2 request modal | anyone |
+| `/nugget accesspanel [channel]` | post or update the access panel | admin |
+| `/nugget pending` | list pending tier-2 requests | admin |
 | `/nugget reminder <when> <text>` | create a DM reminder | anyone |
 | `/nugget reminder <#channel> <when> <text>` | channel reminder | admin |
-| `/nugget schedule <#channel> <when> <text>` | same, with a required channel | admin |
 | `/nugget reminders [all]` | list active reminders | anyone / admin |
-| `/nugget cancel <id>` | cancel a reminder | owner / admin |
-| `/nugget poll "q" "a" "b"` | live button poll (2–5 options) | anyone |
-| `/nugget pollclose <id>` | close a poll | creator / admin |
+| `/nugget cancel <id>` | cancel a reminder | owner/admin |
+| `/nugget poll "q" "a" "b"` | live button poll, 2–5 options | anyone |
+| `/nugget pollclose <id>` | close a poll | creator/admin |
 | `/nugget roll 2d6+3` | dice | anyone |
 | `/nugget choose a \| b \| c` | random pick | anyone |
 | `/nugget stats` | workspace stats | admin |
-| `/nugget budget` | today's AI spend, remaining budget, and limits | admin |
+| `/nugget budget` | AI spend and limits | admin |
 | `/nugget digest` | build the daily digest now | admin |
 | `/nugget recap` | post the daily recap prompt now | admin |
 | `/nugget ask <question>` | one-shot AI answer | anyone in `AI_CHANNELS` |
 | `/nugget summarize [n]` | AI catch-up for this channel | anyone in `AI_CHANNELS` |
 | `/nugget imagine <prompt>` | generate and upload an image | admin |
 | `/nugget forget` | wipe stored AI memory | DM / admin |
-| `/nugget pinggroup [join\|leave]` | join, leave, or check the ping group | anyone |
+| `/nugget pinggroup [join\|leave]` | manage the ping group | anyone |
+| `/nugget config` | view or change runtime settings | admin |
 | `/nugget whois @user` | user lookup | anyone |
-
-Admins are `OWNER_USER_ID` plus anyone in `ADMIN_USER_IDS`.
 
 ### Reminder syntax
 
@@ -322,230 +261,191 @@ weekly mon 18:00 weekly recap
 every 2h drink water
 ```
 
-Times use `TIMEZONE`. The first time expression is removed from the front; everything after it is the reminder body. `/reminders` shows ids and next run times.
+Times use `TIMEZONE`. The first time expression is removed from the front; the rest is the reminder body.
 
 ## Environment reference
+
+Core:
 
 | variable | default | meaning |
 |---|---|---|
 | `SLACK_BOT_TOKEN` | — | bot token (`xoxb-…`), required |
 | `SLACK_APP_TOKEN` | — | app-level socket mode token (`xapp-…`), required |
-| `SLACK_USER_TOKEN` | — | optional user token (`xoxp-…`) for search + usergroups |
-| `OWNER_USER_ID` | — | your Slack member id, required |
+| `OWNER_USER_ID` | — | owner Slack member id, required |
 | `ADMIN_USER_IDS` | owner | comma-separated extra admins |
-| `BOT_NAME` | `Chicen Nugget Bot` | display name used in messages |
-| `TIMEZONE` | `UTC` | IANA timezone for reminders/digest |
+| `BOT_NAME` | `Chicen Nugget Bot` | name used in messages |
+| `TIMEZONE` | `UTC` | IANA timezone for reminders and recaps |
 | `DATA_DIR` / `LOG_DIR` | `data` / `logs` | storage paths |
-| `WATCHED_CHANNEL_IDS` | — | welcome/leave channels; `*` for every channel |
+| `SLACK_USER_TOKEN` | — | optional user token (`xoxp`/`xoxc`) |
+| `SLACK_USER_COOKIE` | — | `d` cookie (`xoxd`) for `xoxc` sessions |
+
+Welcomer and access:
+
+| variable | default | meaning |
+|---|---|---|
+| `WATCHED_CHANNEL_IDS` | — | join/leave channels; `*` for every channel |
 | `WELCOME_PUBLIC` | `true` | post a public welcome |
-| `WELCOME_MESSAGE` | welcome text | supports `{user}`, `{channel}`, `{bot}`, `{name}` |
-| `WELCOME_DM` | onboarding text | same placeholders; sent once per member by default |
+| `WELCOME_MESSAGE` | built-in | supports `{user}`, `{channel}`, `{bot}`, `{name}` |
+| `WELCOME_DM` | built-in | onboarding DM, sent once by default |
 | `WELCOME_DM_ONCE` | `true` | only DM a member on their first join |
-| `WELCOME_PING` | — | raw Slack usergroup mention appended to the public welcome |
-| `LOGS_CHANNEL_ID` | — | join/leave/access audit log |
-| `USERGROUP_ID` | — | ping group to offer joiners (needs user token) |
-| `USERGROUP_PROMPT` | `true` | DM joiners and let them opt in; `false` = auto-add |
-| `USERGROUP_PROMPT_TEXT` | built-in | opt-in DM copy; supports `{user}`, `{channel}`, `{bot}` |
-| `USERGROUP_PROMPT_ONCE` | `true` | only ask each person once |
-| `ACCESS_CHANNEL_ID` | — | private channel to invite approved members to |
+| `WELCOME_PING` | — | raw usergroup mention appended to the welcome |
+| `LOGS_CHANNEL_ID` | — | audit log channel |
+| `USERGROUP_ID` | — | ping group, needs a user token |
+| `USERGROUP_PROMPT` | `true` | ask joiners to opt in; `false` = auto-add |
+| `USERGROUP_GUARD` | `true` | DM people who reply under a usergroup ping |
+| `THREAD_HELPER` | `true` | post thread anchors and yes/no prompts for pings |
+| `ACCESS_CHANNEL_ID` | — | private channel for approved members |
 | `ACCESS_PANEL_CHANNEL_ID` | first watched | where the request panel lives |
-| `ACCESS_PANEL_TEXT` | built-in | panel copy |
 | `ACCESS_COOLDOWN_HOURS` | `24` | minimum gap between requests |
 | `ADMIN_CHANNEL_ID` | — | shared approval channel; empty = DM each admin |
-| `ACCESS_AUTO_APPROVE` | `false` | invite requesters immediately instead of queuing |
-| `USERGROUP_GUARD` | `true` | DM people who reply under a usergroup ping |
-| `THREAD_HELPER` | `true` | post 🧵 thread anchors / yes-no prompt for pings |
-| `RECAP_CHANNEL_ID` | — | public daily recap channel; empty disables recaps |
-| `RECAP_PRIVATE_CHANNEL_ID` | — | optional private follow-up recap channel |
-| `RECAP_TIME` | — | `HH:MM` in `TIMEZONE` for the public recap |
-| `RECAP_REMINDER_MINUTES` | `10` | heads-up DM before the recap; `0` disables |
-| `RECAP_PING` | — | usergroup id to ping when the public recap is done |
-| `RECAP_PRIVATE_PING` | — | usergroup id to ping when the private recap is done |
-| `AI_API_KEY` | — | enables the AI agent |
+| `ACCESS_AUTO_APPROVE` | `false` | invite requesters immediately |
+
+Recap and digest:
+
+| variable | default | meaning |
+|---|---|---|
+| `RECAP_CHANNEL_ID` | — | public recap channel; empty disables recaps |
+| `RECAP_PRIVATE_CHANNEL_ID` | — | optional private follow-up |
+| `RECAP_TIME` | — | `HH:MM` in `TIMEZONE` |
+| `RECAP_REMINDER_MINUTES` | `10` | heads-up DM; `0` disables |
+| `RECAP_PING` / `RECAP_PRIVATE_PING` | — | usergroups pinged when a recap is done |
+| `DAILY_DIGEST_TIME` | — | `HH:MM` for the owner digest; empty disables |
+
+AI:
+
+| variable | default | meaning |
+|---|---|---|
+| `AI_API_KEY` | — | enables the agent |
 | `AI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
-| `AI_MODEL` | `openai/gpt-5.6-luna` | model id (must support tools) |
-| `AI_FALLBACK_MODEL` | `anthropic/claude-haiku-5.5` | retried automatically when the primary model fails |
+| `AI_MODEL` | `anthropic/claude-haiku-5.5` | primary model, must support tools |
+| `AI_FALLBACK_MODEL` | `google/gemini-2.5-flash` | retried on failure |
 | `AI_MAX_TOKENS` | `1200` | max reply length |
-| `AI_HISTORY_LIMIT` | `24` | conversation turns loaded per reply |
+| `AI_HISTORY_LIMIT` | `24` | turns loaded per reply |
 | `AI_MAX_CONTEXT_CHARS` | `24000` | trim older turns above this size |
-| `AI_CHANNELS` | `*` | channels where mentions and `/ask` are answered |
-| `AI_ALLOW_ADMINS` | `true` | let admins DM the agent too |
-| `AI_RATE_LIMIT_PER_MINUTE` | `12` | per-user AI request cap; `0` disables |
-| `AI_GLOBAL_RATE_LIMIT_PER_MINUTE` | `30` | workspace-wide AI request cap; `0` disables |
-| `AI_USER_DAILY_BUDGET_USD` | `0.50` | per-user UTC-day spend cap; owner exempt; `0` disables |
-| `AI_DAILY_BUDGET_USD` | `0` | optional bot-wide UTC-day stop; off by default |
-| `AI_GATE_ENABLED` | `true` | ask jev whether to reply in ambient channels |
-| `AI_GATE_MODEL` | `jev-latest` | System One model used for gate decisions |
-| `AI_GATE_TIMEOUT` | `8` | seconds before the gate fails closed |
+| `AI_CHANNELS` | `*` | channels where mentions and `/ask` work |
+| `AI_ALLOW_ADMINS` | `true` | admins may DM the agent |
+| `AI_RATE_LIMIT_PER_MINUTE` | `12` | per-user cap; `0` disables |
+| `AI_GLOBAL_RATE_LIMIT_PER_MINUTE` | `30` | workspace cap; `0` disables |
+| `AI_USER_DAILY_BUDGET_USD` | `0.50` | per-user daily cap; owner exempt |
+| `AI_DAILY_BUDGET_USD` | `0` | optional bot-wide daily stop |
+| `AI_GATE_ENABLED` | `true` | run the Jev gate on unprompted messages |
+| `AI_GATE_MODEL` | `jev-latest` | gate model id |
+| `AI_GATE_TIMEOUT` | `8` | seconds before failing closed |
 | `AI_JEV_URL` | `<AI_BASE_URL>/jev/systemone` | Jev endpoint override |
-| `AI_GATE_MIN_CONFIDENCE` | `0.5` | min `should_reply` probability to chime in |
+| `AI_GATE_MIN_CONFIDENCE` | `0.5` | min `should_reply` to chime in |
 | `AI_GATE_ADDRESSED_CONFIDENCE` | `0.6` | min probability the message is for the bot |
-| `AI_GATE_SPAM_THRESHOLD` | `0.7` | spam probability that always suppresses a reply |
-| `AI_AMBIENT_CHANNELS` | — | channels where the bot may reply unprompted; `*` = all |
-| `AI_AMBIENT_COOLDOWN` | `120` | min seconds between unprompted replies per channel |
-| `IMAGINE_MODEL` | `google/gemini-3.1-flash-lite-image` | image model for `/imagine`; empty disables |
-| `IMAGINE_FALLBACK_MODEL` | `google/gemini-2.5-flash-image` | retried when image generation fails |
-| `AI_IMAGE_COST_USD` | `0.04` | rough per-image charge recorded against the daily budget |
-| `DAILY_DIGEST_TIME` | — | `HH:MM` in `TIMEZONE`; empty disables |
-| `WEATHER_DEFAULT_LOCATION` | — | default place for the weather tool |
-| `TAVILY_API_KEY` | — | enables `search_web` |
+| `AI_GATE_SPAM_THRESHOLD` | `0.7` | spam probability that always suppresses |
+| `AI_AMBIENT_CHANNELS` | — | channels for unprompted replies; `*` = all |
+| `AI_AMBIENT_COOLDOWN` | `120` | min seconds between ambient replies per channel |
+| `AI_THREAD_COOLDOWN` | `120` | min seconds between unprompted thread replies |
+| `IMAGINE_MODEL` | — | image model; empty disables `/imagine` and `generate_image` |
+| `IMAGINE_FALLBACK_MODEL` | `google/gemini-2.5-flash-image` | image fallback |
+| `AI_IMAGE_COST_USD` | `0.04` | per-image budget charge |
+| `WEATHER_DEFAULT_LOCATION` | — | default weather location |
+| `TAVILY_API_KEY` | — | optional search backend |
 | `MAX_REMINDERS` | `200` | active reminder cap |
 
-## Optional user token
+## Deployment
 
-`SLACK_USER_TOKEN` is only used for:
+The included workflow ships the repo to a server over ssh and restarts a systemd unit.
 
-- `search.messages` (tool: `search_slack`), scope `search:read`
-- adding/removing users from a usergroup, scopes `usergroups:read` + `usergroups:write`
+1. Add repository secrets:
+   - `ENV_FILE` — the entire production `.env`.
+   - `SSH_HOST`, `SSH_USER`, `SSH_KEY`, `SSH_PORT` (default 22).
+   - `DEPLOY_PATH`, `SERVICE_NAME`.
+2. Push to `main`. `.github/workflows/deploy.yml` rsyncs the tree, writes `.env`, reinstalls requirements and restarts the service.
+3. Tail logs with the `logs` workflow or `journalctl -u <SERVICE_NAME> -f` on the host.
 
-The manifest requests those user scopes. Some workspaces do not expose a user token for internal apps; in that case the bot still works, those two features just report that the token is missing. This project intentionally does **not** depend on a user account for normal bot events, which keeps it reliable and within Slack's normal app model.
+Secrets never enter the repo. `.env`, `data/` and `logs/` are gitignored.
 
-> The original `noodle` project runs as a dedicated user account. That gives a more "human" presence but is fragile and not the standard Slack app path. This bot keeps the same personality/agent ideas on a normal bot identity, with an optional user token only for reading/search.
+## Data and privacy
 
-## Docker
+- **Storage** — one SQLite file at `data/bot.db`: conversation history, AI notes, reminders, polls, access requests, runtime settings and a key/value store.
+- **Retention** — history is per conversation and trimmed to `AI_HISTORY_LIMIT` turns. `/nugget forget` wipes your stored AI memory. Deleting `data/bot.db` resets everything.
+- **Logs** — stdout plus rotating files in `logs/`. Tool arguments and reply text can appear in debug logs; do not enable debug logging on a shared host.
+- **Third parties** — prompts go to your configured model provider (Hack Club AI by default), Jev calls go to the same base URL, tool calls reach the public services they query.
+- **Prompt injection** — retrieved web pages, files and Slack messages are treated as untrusted data. They are never treated as instructions.
+
+## Troubleshooting
+
+| symptom | cause | fix |
+|---|---|---|
+| `invalid_auth` on start | stale bot token | reinstall the app, update `SLACK_BOT_TOKEN` |
+| `not_authed` / `missing_scope` | scope or install missing | update scopes, reinstall |
+| bot ignores mentions | channel not in `AI_CHANNELS`, or mention in a channel it was not invited to | check `/nugget id` |
+| bot replies to everything | gate disabled or thresholds too low | `AI_GATE_ENABLED=true`, raise `AI_GATE_MIN_CONFIDENCE` |
+| bot is silent in threads | `thread_followups` off or cooldown active | enable it, lower `AI_THREAD_COOLDOWN` |
+| user account not connecting | expired `xoxc`/`xoxd` | sign out and in, refresh both values |
+| no typing indicator | second identity not configured | set `SLACK_USER_TOKEN` and `SLACK_USER_COOKIE` |
+| `enterprise_is_restricted` from `rtm.connect` | workspace blocks classic RTM | expected; the user gateway uses the client WebSocket |
+| charts or decks fail | missing optional libs | `pip install matplotlib python-pptx` |
+| reminders never fire | wrong `TIMEZONE` | fix the timezone and re-create the reminder |
+| approval button does nothing | bot not in the admin channel | invite it, or set `ADMIN_CHANNEL_ID` |
+
+Run `python main.py` in the foreground first; startup failures print a plain error before socket mode begins.
+
+### Alternative: Docker
 
 ```bash
-mkdir -p data logs
 docker compose up -d --build
 docker compose logs -f
 ```
 
-The container reads `.env` and bind-mounts `./data` and `./logs`. The container runs as a non-root user, so if the host directories are created by Docker as root, fix permissions once:
+Mount `.env` and persist `data/` and `logs/` as volumes. The compose file matches the systemd deployment: one process, socket mode, no exposed ports.
 
-```bash
-sudo chown -R 10001:10001 data logs
-```
+### Alternative: script
 
-## Hosting notes
-
-Socket mode needs an outbound WebSocket, not an inbound port. It runs fine on a laptop, Raspberry Pi, small VPS, Fly.io, Railway, etc. Keep exactly **one** process running per app token. For systemd:
-
-```ini
-[Unit]
-Description=Chicen Nugget Bot
-After=network-online.target
-
-[Service]
-WorkingDirectory=/opt/chicen-nugget-bot
-ExecStart=/opt/chicen-nugget-bot/.venv/bin/python /opt/chicen-nugget-bot/main.py
-Restart=always
-RestartSec=5
-User=nugget
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### Deploying with GitHub Actions
-
-`.github/workflows/deploy.yml` rsyncs the repo to the host, writes `.env` from the
-`ENV_FILE` secret, installs requirements and restarts the unit. It runs on every
-push to `main`, and on demand:
-
-```bash
-gh workflow run deploy.yml
-gh run watch
-```
-
-Secrets it needs: `SSH_PRIVATE_KEY` (a key that can log in to the host) and
-`ENV_FILE` (the full contents of `.env`). This is handy when your network blocks
-outbound SSH — the runner connects for you.
-
-To read the log from anywhere, `.github/workflows/logs.yml` tails it the same way:
-
-```bash
-gh workflow run logs.yml -f lines=200
-gh run watch
-```
-
-## Data & privacy
-
-- Everything is stored locally in `data/bot.db` (SQLite): members/join stats, access requests, reminders, polls, AI conversation turns and notes.
-- The AI agent sends the current conversation and tool results to your configured AI endpoint.
-- Weather uses open-meteo (no key). Optional web search uses Tavily. Optional URL fetch is SSRF-guarded and never follows redirects.
-- No analytics, no telemetry, no third-party database.
-- Delete `data/bot.db` to wipe everything. Back it up by copying the file (and its `-wal`/`-shm` siblings while stopped).
-
-## Troubleshooting
-
-| symptom | fix |
-|---|---|
-| `Sending messages to this app has been turned off` | **App Home → Messages Tab** → enable **Allow users to send messages from the Messages tab** (also in the manifest as `features.app_home.messages_tab_enabled`). |
-| `missing_scope` | add the scope in **OAuth & Permissions**, reinstall the app, restart. The manifest already includes what the built-in features need. |
-| `/imagine` says `missing_scope` | the app was installed before `files:write` was added; reinstall from the manifest. |
-| AI says budget used up (`402`) | Hack Club AI's daily limit reset at 00:00 UTC, or use a different endpoint/key. |
-| AI says rate limited (`429`) | wait the `Retry-After` time, or lower `AI_RATE_LIMIT_PER_MINUTE`. |
-| `not_in_channel` when approving access | invite the bot to the private tier 2 channel. |
-| slash commands say `dispatch_failed` | the bot process is down, or socket mode/app token is wrong. |
-| welcome DM never arrives | the member may have DMs from apps restricted; check logs. Also `WELCOME_DM_ONCE=true` only sends on the first join. |
-| AI ignores channel mentions | channel must be in `AI_CHANNELS`; mention with the bot's real `@handle`; make sure the model supports tool calling. |
-| AI errors about tools | pick a tool-capable model in `AI_MODEL`. |
-| reminders fire at the wrong time | set `TIMEZONE` to your IANA zone and restart; recurring reminders keep their wall-clock time. |
-| `invalid_auth` | regenerate the bot token after reinstalling and update `.env`. |
-| user-token features missing | set `SLACK_USER_TOKEN` with `search:read` and usergroup scopes, or ignore them. |
-
-Logs go to the console and `logs/bot.log` (rotating).
+`./deploy-remote.sh user@host remote-dir` rsyncs the tree and restarts the `chicen-nugget-bot` systemd unit.
 
 ## Project layout
 
-```
-main.py                     entrypoint
-slack-app-manifest.json     paste into api.slack.com/apps
+```text
+main.py                    entry point
 bot/
-  app.py                    builds Bolt, authenticates, starts socket mode + scheduler
-  config.py                 env settings
-  db.py                     SQLite schema + queries
-  handlers.py               event registration
-  runtime.py                shared app/db/client state
-  reminders.py              reminder creation/formatting helpers
-  slack_api.py              resilient Slack Web API wrappers
+  app.py                   startup, Bolt wiring, task lifecycle, user gateway
+  config.py                Settings, env parsing, allowlists
+  runtime.py               shared state: db, agent, gate, clients, locks
+  db.py                    SQLite schema, history, kv store, reminders
+  handlers.py              socket mode event registration
+  slack_api.py             post/react/upload helpers, retries, member checks
+  user_gateway.py          user WebSocket, typing frames, dedup, reconnect
+  reminders.py             reminder creation and delivery
   ai/
-    agent.py                OpenAI-compatible tool loop + memory
-    budget.py               daily spend tracking and hard stops
-    gate.py                 jev decisions: reply, addressed, spam, kind
-    jev.py                  typed System One client (/jev/systemone)
-    limits.py               per-user AI rate limiter
-    tools.py                model-callable tools
+    agent.py               prompt assembly, history, tool loop, prompt digest
+    tools.py               tool registry and implementations
+    gate.py                Jev gate: questions, thresholds, decision
+    jev.py                 typed Jev client
+    budget.py / limits.py  spend tracking and rate limits
   features/
-    ai_commands.py          /ask, /summarize, /forget, /imagine
-    welcomer.py             joins/leaves, welcome DM, ping-group opt-in
-    access.py               tier 2 modal + approval + invite
-    agent.py                Slack message/mention glue
-    commands.py             slash commands
-    nuggets.py              /nugget facts
-    polls.py                button polls
-    recaps.py               daily public/private recap flow
-    scheduler.py            reminders + digest + recap loop
-    stats.py                stats/digest formatting
-    threads.py              usergroup ping guard + thread helper
-  utils/
-    timeparse.py            "when" parsing + recurrence math
-    dice.py                 dice notation
-    text.py                 chunking/mentions
-prompts/system.md           agent persona
-tests/                      pytest suite
-data/                       SQLite (created at runtime, gitignored)
-logs/                       bot.log (created at runtime, gitignored)
+    router.py              slash command routing
+    commands.py            command implementations
+    agent.py               mention, DM, thread and ambient handling
+    scheduler.py           reminder tick, digest, recap jobs
+    welcomer.py            join/leave, onboarding DM, ping group
+    access.py              tier-2 request flow
+    recaps.py              daily recap and private follow-up
+    polls.py, threads.py, stats.py, nuggets.py, ai_commands.py
+prompts/system.md          agent system prompt
+tests/                     pytest suite
+.github/workflows/         deploy and log tailing
 ```
 
 ## Development
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-pip install pytest
-pytest
+./.venv/bin/pytest
+./.venv/bin/ruff check bot tests
 ```
 
-The tests cover time parsing/recurrence, dice, text chunking, AI rate limits/commands, usergroup/thread helpers, recap scheduling and the SQLite layer. They do not need Slack credentials.
+Tests are plain pytest with asyncio.run, no network access and no Slack credentials.
 
-## Ideas for v2
+## Contributing
 
-- Reaction roles (emoji → usergroup), using the existing user-token path.
-- Thread summaries and "catch me up" for a channel.
-- Voice-note transcription.
-- A small web dashboard for access requests and stats.
-- Starboard / highlight feeds.
-- Per-user quiet hours for proactive DMs.
-- Embedding-based semantic memory search (the SQLite layer is already the single source of truth).
+Open an issue or a pull request. Keep changes small, keep the gate failing closed, and add a test when behaviour is non-obvious.
 
-Have fun, be kind. MIT-style: do whatever you want with it.
+## License
+
+MIT. See [LICENSE](LICENSE).

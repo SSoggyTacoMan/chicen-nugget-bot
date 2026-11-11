@@ -16,6 +16,11 @@ jobs:
       contents: read
     env:
       SSH_OPTS: -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || 'slackbot' }}
+      SERVICE_NAME: ${{ secrets.SERVICE_NAME || 'chicen-nugget-bot' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -27,7 +32,7 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H hackclub.app >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
           chmod 600 ~/.ssh/known_hosts
 
       - name: test ssh
@@ -36,7 +41,7 @@ jobs:
           for i in 1 2 3 4 5; do
             # `if` keeps `bash -e` (GitHub's default) from killing the loop
             # when ssh exits 255 even though the remote command succeeded.
-            if out=$(ssh $SSH_OPTS maaren@hackclub.app 'echo SSH_OK' 2>&1); then
+            if out=$(ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" 'echo SSH_OK' 2>&1); then
               code=0
             else
               code=$?
@@ -56,7 +61,7 @@ jobs:
           set -uo pipefail
           for i in 1 2 3 4; do
             if rsync -az --partial \
-              -e "ssh $SSH_OPTS" \
+              -e "ssh $SSH_OPTS -p $SSH_PORT" \
               --exclude '.git/' \
               --exclude '.github/' \
               --exclude '.env' \
@@ -69,7 +74,7 @@ jobs:
               --exclude '*.db' \
               --exclude '*.db-wal' \
               --exclude '*.db-shm' \
-              ./ maaren@hackclub.app:slackbot/; then
+              ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"; then
               echo "sync ok"
               exit 0
             fi
@@ -84,7 +89,7 @@ jobs:
         run: |
           set -uo pipefail
           for i in 1 2 3 4; do
-            if out=$(printf '%s\n' "$ENV_FILE" | ssh $SSH_OPTS maaren@hackclub.app 'cat > ~/slackbot/.env && chmod 600 ~/slackbot/.env && echo ENV_OK' 2>&1); then
+            if out=$(printf '%s\n' "$ENV_FILE" | ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "cat > \$HOME/$DEPLOY_PATH/.env && chmod 600 \$HOME/$DEPLOY_PATH/.env && echo ENV_OK" 2>&1); then
               code=0
             else
               code=$?
@@ -103,19 +108,19 @@ jobs:
         run: |
           set -uo pipefail
           for i in 1 2 3 4; do
-            if out=$(ssh $SSH_OPTS maaren@hackclub.app 'set -e
-              cd slackbot
+            if out=$(ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "set -e
+              cd $DEPLOY_PATH
               mkdir -p logs data
               if command -v python3.13 >/dev/null; then PY=python3.13; else PY=python3; fi
-              $PY -m venv .venv
+              \$PY -m venv .venv
               .venv/bin/pip install -q --upgrade pip
               .venv/bin/pip install -q -r requirements.txt
-              systemctl restart chicen-nugget-bot
+              systemctl restart $SERVICE_NAME
               sleep 3
-              systemctl --no-pager --full status chicen-nugget-bot | head -15
-              echo "--- log ---"
+              systemctl --no-pager --full status $SERVICE_NAME | head -15
+              echo '--- log ---'
               tail -20 logs/bot.log || true
-              echo DEPLOY_OK' 2>&1); then
+              echo DEPLOY_OK" 2>&1); then
               code=0
             else
               code=$?

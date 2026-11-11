@@ -14,7 +14,7 @@ from bot.ai.tools import ToolContext, Toolbox, format_now
 from bot.config import Settings
 from bot.db import Database
 from bot.slack_api import channel_info, user_info
-from bot.utils.text import display_name
+from bot.utils.text import display_name, format_mrkdwn
 from bot.utils.tz import tzinfo
 
 logger = logging.getLogger(__name__)
@@ -201,6 +201,8 @@ class Agent:
             logger.exception("agent completion failed")
             answer = self._friendly_error(exc)
 
+        answer = format_mrkdwn(answer)
+
         if answer and answer.strip() not in {"[NO_REPLY]", "NO_REPLY"}:
             self.db.add_message(conversation, "assistant", self.bot_user_id, answer)
             return answer
@@ -232,7 +234,8 @@ class Agent:
                 max_tokens=max_tokens or self.settings.ai_max_tokens,
                 user_id=user_id,
             )
-            return (response.choices[0].message.content or "").strip() or "i blanked. try again?"
+            raw = (response.choices[0].message.content or "").strip()
+            return format_mrkdwn(raw) or "i blanked. try again?"
         except BudgetExceeded as exc:
             logger.warning("ai budget exhausted: %s", exc)
             return _budget_text(exc)

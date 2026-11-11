@@ -99,8 +99,10 @@ class Settings:
     ai_gate_spam_threshold: float
     ai_ambient_channels: frozenset[str]
     ai_ambient_cooldown: int
+    ai_thread_cooldown: int
     imagine_model: str | None
     imagine_fallback_model: str | None
+    image_user_ids: frozenset[str]
 
     # welcomer
     watched_channel_ids: frozenset[str]
@@ -143,6 +145,7 @@ class Settings:
     tavily_api_key: str | None
     max_reminders: int
     repo_url: str
+    github_username: str | None
 
     # email (imap)
     imap_host: str | None = None
@@ -184,6 +187,12 @@ class Settings:
 
     def is_admin(self, user_id: str | None) -> bool:
         return bool(user_id) and (user_id in self.admin_user_ids)
+
+    def image_allowed(self, user_id: str | None) -> bool:
+        """Admins always may; everyone else needs IMAGE_ALLOWED_USER_IDS."""
+        return self.is_admin(user_id) or (
+            bool(user_id) and user_id in self.image_user_ids
+        )
 
     def watches(self, channel_id: str | None) -> bool:
         if not channel_id:
@@ -262,8 +271,10 @@ def load_settings() -> Settings:
         ai_gate_spam_threshold=_float("AI_GATE_SPAM_THRESHOLD", 0.7),
         ai_ambient_channels=frozenset(_list("AI_AMBIENT_CHANNELS")),
         ai_ambient_cooldown=max(0, _int("AI_AMBIENT_COOLDOWN", 120)),
+        ai_thread_cooldown=max(0, _int("AI_THREAD_COOLDOWN", 120)),
         imagine_model=_str("IMAGINE_MODEL") or None,
         imagine_fallback_model=_str("IMAGINE_FALLBACK_MODEL") or None,
+        image_user_ids=frozenset(_list("IMAGE_ALLOWED_USER_IDS")),
         watched_channel_ids=frozenset(_list("WATCHED_CHANNEL_IDS")),
         welcome_public=_bool("WELCOME_PUBLIC", True),
         welcome_message=_str(
@@ -308,7 +319,8 @@ def load_settings() -> Settings:
         weather_default_location=_str("WEATHER_DEFAULT_LOCATION") or None,
         tavily_api_key=_str("TAVILY_API_KEY") or None,
         max_reminders=max(1, _int("MAX_REMINDERS", 200)),
-        repo_url=_str("REPO_URL", "https://github.com/SSoggyTacoMan/chicen-nugget-bot"),
+        repo_url=_str("REPO_URL"),
+        github_username=_str("GITHUB_USERNAME") or None,
         imap_host=_str("IMAP_HOST") or None,
         imap_port=_int("IMAP_PORT", 993),
         imap_user=_str("IMAP_USER") or None,

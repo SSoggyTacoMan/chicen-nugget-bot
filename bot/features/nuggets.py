@@ -8,7 +8,7 @@ from bot.slack_api import post
 
 FACTS = (
     "the chicken nugget was popularised in the 1950s by Robert C. Baker, a Cornell food scientist.",
-    "nuggets are usually made from ground meat, not a single cut — shaping is part of the magic.",
+    "nuggets are usually made from ground meat, not a single cut: shaping is part of the magic.",
     "the word 'nugget' originally meant a small lump of native metal, usually gold.",
     "a nugget's crispy shell is a Maillard reaction: sugars and proteins browning together.",
     "the average chicken nugget is roughly 15–20% breading, depending on who you ask.",

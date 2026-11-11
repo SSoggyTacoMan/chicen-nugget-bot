@@ -62,7 +62,7 @@ def _blocks(poll: dict[str, Any], counts: list[int], total: int) -> list[dict[st
     for idx, option in enumerate(poll["options"]):
         count = counts[idx] if idx < len(counts) else 0
         pct = round(100 * count / total) if total else 0
-        lines.append(f"`{_bar(count, total)}` {option} — *{count}* ({pct}%)")
+        lines.append(f"`{_bar(count, total)}` {option}: *{count}* ({pct}%)")
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
 
     if not poll.get("closed"):

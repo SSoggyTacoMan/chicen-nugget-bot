@@ -11,10 +11,11 @@ from typing import Any
 
 import httpx
 
-from bot.runtime import runtime
+from bot import image_access
 from bot.ai.limits import user_retry_after
+from bot.runtime import runtime
 from bot.slack_api import error_code, post, post_ephemeral
-from bot.utils.text import chunk_text, disarm_broadcasts, escape_mrkdwn
+from bot.utils.text import chunk_text, disarm_broadcasts, escape_mrkdwn, format_mrkdwn
 from bot.utils.tz import tzinfo
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ async def cmd_ask(ack, command, client) -> None:
         return
     retry = user_retry_after(user)
     if retry:
-        await post_ephemeral(client, channel, user, f"slow down a lil — try again in {retry}s :3")
+        await post_ephemeral(client, channel, user, f"slow down a lil, try again in {retry}s :3")
         return
 
     await post_ephemeral(client, channel, user, ":brain: thinking…")
@@ -71,7 +72,7 @@ async def cmd_ask(ack, command, client) -> None:
 
 
 async def _post_answer(client, channel: str, user: str, question: str, answer: str) -> None:
-    chunks = chunk_text(disarm_broadcasts(answer))
+    chunks = chunk_text(disarm_broadcasts(format_mrkdwn(answer)))
     if not chunks:
         chunks = ["i blanked on that one. try rephrasing?"]
     header = f":speech_balloon: <@{user}> asked: {escape_mrkdwn(question)}"
@@ -100,7 +101,7 @@ async def cmd_summarize(ack, command, client) -> None:
         return
     retry = user_retry_after(user)
     if retry:
-        await post_ephemeral(client, channel, user, f"slow down a lil — try again in {retry}s :3")
+        await post_ephemeral(client, channel, user, f"slow down a lil, try again in {retry}s :3")
         return
 
     limit = _summary_limit(command.get("text"))
@@ -131,8 +132,8 @@ async def cmd_summarize(ack, command, client) -> None:
         max_tokens=min(runtime.settings.ai_max_tokens, 900),
         user_id=user,
     )
-    header = f":newspaper: *catch-up for <#{channel}>* — last {len(transcript)} messages"
-    chunks = chunk_text(disarm_broadcasts(summary))
+    header = f":newspaper: *catch-up for <#{channel}>* - last {len(transcript)} messages"
+    chunks = chunk_text(disarm_broadcasts(format_mrkdwn(summary)))
     if not chunks:
         chunks = ["nothing memorable happened."]
     for index, chunk in enumerate(chunks):
@@ -208,8 +209,13 @@ async def cmd_imagine(ack, command, client) -> None:
     channel = command["channel_id"]
     user = command["user_id"]
     settings = runtime.settings
-    if not settings.is_admin(user):
-        await post_ephemeral(client, channel, user, "only admins can make images — they cost tokens.")
+    if not image_access.can_generate(settings, runtime.db, user):
+        await post_ephemeral(
+            client,
+            channel,
+            user,
+            "image generation is limited. ask an admin to add you to the image allowlist.",
+        )
         return
     if not settings.imagine_enabled:
         await post_ephemeral(
@@ -232,7 +238,7 @@ async def cmd_imagine(ack, command, client) -> None:
         return
     retry = user_retry_after(user)
     if retry:
-        await post_ephemeral(client, channel, user, f"slow down a lil — try again in {retry}s :3")
+        await post_ephemeral(client, channel, user, f"slow down a lil, try again in {retry}s :3")
         return
 
     await post_ephemeral(client, channel, user, ":art: painting… this takes a few seconds.")
@@ -241,7 +247,7 @@ async def cmd_imagine(ack, command, client) -> None:
     except ImageError as exc:
         await post_ephemeral(client, channel, user, _image_error(exc))
         return
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("image generation failed")
         await post_ephemeral(client, channel, user, "image generation broke. check my logs?")
         return
@@ -265,7 +271,7 @@ async def cmd_imagine(ack, command, client) -> None:
     except Exception as exc:  # noqa: BLE001
         code = error_code(exc)
         if code == "missing_scope":
-            hint = "i need the `files:write` bot scope — reinstall the app from the manifest."
+            hint = "i need the `files:write` bot scope: reinstall the app from the manifest."
         elif code == "not_in_channel":
             hint = "invite me to this channel first."
         else:

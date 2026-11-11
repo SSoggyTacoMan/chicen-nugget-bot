@@ -6,10 +6,10 @@ import asyncio
 import logging
 from datetime import datetime
 
-from bot.runtime import runtime
 from bot.features import recaps
 from bot.features.stats import build_digest
 from bot.reminders import create_reminder, dm_target
+from bot.runtime import runtime
 from bot.slack_api import post
 from bot.utils.timeparse import next_occurrence, parse_when
 from bot.utils.tz import tzinfo
@@ -46,13 +46,20 @@ async def _loop() -> None:
             await _tick()
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - keep the loop alive
+        except Exception:
             logger.exception("scheduler tick failed")
         await asyncio.sleep(TICK_SECONDS)
 
 
+def _personal_updates_on() -> bool:
+    """Whether the owner wants personal DMs like the digest and recap reminder."""
+    return not runtime.db or runtime.db.kv_get("config:personal_updates") != "false"
+
+
 def _ensure_digest_job() -> None:
     if runtime.db and runtime.db.kv_get("config:daily_digest") == "false":
+        return
+    if not _personal_updates_on():
         return
     settings = runtime.settings
     if not settings.daily_digest_time or not settings.owner_user_id:
@@ -104,7 +111,7 @@ def _ensure_recap_jobs() -> None:
         else:
             logger.warning("could not parse RECAP_TIME=%s", settings.recap_time)
 
-    if not settings.recap_reminder_minutes:
+    if not settings.recap_reminder_minutes or not _personal_updates_on():
         return
     if runtime.db.find_recurring("recap_reminder", settings.owner_user_id):
         return
@@ -120,7 +127,7 @@ def _ensure_recap_jobs() -> None:
         target=dm_target(settings.owner_user_id),
         parsed=parsed,
         text=(
-            f"your daily recap is in {settings.recap_reminder_minutes} minutes — "
+            f"your daily recap is in {settings.recap_reminder_minutes} minutes: "
             "get ready to send it!"
         ),
         tz=tz,
@@ -169,7 +176,13 @@ async def _deliver(reminder: dict) -> None:
         if runtime.db and runtime.db.kv_get("config:recaps") == "false":
             logger.info("skipped recap_reminder: recaps disabled via config")
             return
+        if not _personal_updates_on():
+            logger.info("skipped recap_reminder: personal updates disabled")
+            return
     if reminder.get("kind") == "digest":
+        if not _personal_updates_on():
+            logger.info("skipped digest: personal updates disabled")
+            return
         text = build_digest(runtime.db, runtime.settings, tzinfo())
     else:
         text = reminder["text"]
