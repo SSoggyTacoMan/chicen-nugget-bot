@@ -130,6 +130,30 @@ def _notes_index(settings: Settings) -> list[dict[str, str]]:
     return out
 
 
+def get_user_memory_prompt(db: Database | None, settings: Settings, user_id: str) -> str:
+    if not db:
+        return "none"
+    if user_id != settings.owner_user_id and not settings.is_admin(user_id):
+        return "none"
+
+    sections: list[str] = []
+    idx = _notes_index(settings)
+    if idx:
+        topics_str = ", ".join(f"{item['topic']} ({item['description']})" for item in idx)
+        sections.append(f"stored topic files in data/notes/: {topics_str}")
+
+    notes = db.user_notes(user_id, limit=25)
+    if not notes:
+        notes = db.user_notes(settings.owner_user_id, limit=25) or db.recent_notes(limit=25)
+    if notes:
+        note_lines = [f"- [id:{n['id']}] {n['text']}" for n in reversed(notes)]
+        sections.append("durable memory notes:\n" + "\n".join(note_lines))
+
+    if not sections:
+        return "none stored yet"
+    return "\n\n".join(sections)
+
+
 @dataclass
 class ToolContext:
     db: Database
@@ -522,6 +546,25 @@ class Toolbox:
                 [],
             ),
             tool(
+                "forget",
+                "Delete a stored memory, note, or rule by id, query, or topic. Owner/admin only.",
+                {
+                    "note_id": {
+                        "type": "integer",
+                        "description": "Optional note ID to delete (from active memory or recall).",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional text to search and delete from memory/notes.",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "Optional topic markdown file to delete/clear from notes/ (e.g. 'rules', 'general').",
+                    },
+                },
+                [],
+            ),
+            tool(
                 "post_message",
                 "Post a message to a Slack channel as the bot app or user assistant. Owner/admin only.",
                 {
@@ -817,7 +860,7 @@ class Toolbox:
             ),
             tool(
                 "bot_config",
-                "View or change bot runtime settings (recaps, daily_digest, personal_updates, welcomer, tier2, tier2_channel, admin_channel, ambient_ai, thread_followups, weather_location). Owner/admin only.",
+                "View or change bot runtime settings (recaps, recap_channel_id, recap_private_channel_id, daily_digest, personal_updates, welcomer, tier2, tier2_channel, admin_channel, ambient_ai, thread_followups, weather_location). Owner/admin only.",
                 {
                     "action": {
                         "type": "string",
@@ -826,11 +869,15 @@ class Toolbox:
                     },
                     "key": {
                         "type": "string",
-                        "description": "Setting name: 'recaps', 'daily_digest', 'personal_updates', 'welcomer', 'tier2', 'tier2_channel', 'admin_channel', 'ambient_ai', 'thread_followups', 'weather_location'.",
+                        "description": "Setting name: 'recaps', 'recap_channel_id', 'recap_private_channel_id', 'daily_digest', 'personal_updates', 'welcomer', 'tier2', 'tier2_channel', 'admin_channel', 'ambient_ai', 'thread_followups', 'weather_location'.",
                     },
                     "value": {
                         "type": "string",
                         "description": "New value to set (e.g. 'off', 'on', 'false', 'true', 'dm', or channel ID).",
+                    },
+                    "channel": {
+                        "type": "string",
+                        "description": "Optional channel ID or #name for per-channel settings like 'recaps'.",
                     },
                 },
                 ["action"],
@@ -1409,6 +1456,85 @@ class Toolbox:
             return "nothing found in memory."
         return _json(payload)
 
+    async def _tool_forget(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can delete memory")
+        note_id_raw = args.get("note_id")
+        query = str(args.get("query") or "").strip()
+        topic_arg = str(args.get("topic") or "").strip()
+
+        if note_id_raw is None and not query and not topic_arg:
+            return _error("provide note_id, query, or topic to forget")
+
+        deleted_items: list[str] = []
+
+        if note_id_raw is not None:
+            try:
+                nid = int(note_id_raw)
+            except (ValueError, TypeError):
+                return _error(f"invalid note_id: {note_id_raw}")
+            note = ctx.db.get_note(nid)
+            if note:
+                text_to_prune = note["text"]
+                ctx.db.delete_note(nid)
+                deleted_items.append(f"note #{nid}")
+                clean_target = re.sub(r"^\[.*?\]\s*", "", text_to_prune).strip().lower()
+                for f in _list_note_files(ctx.settings):
+                    try:
+                        content = f.read_text(encoding="utf-8")
+                        lines = content.splitlines()
+                        kept = [
+                            line
+                            for line in lines
+                            if not (line.strip().startswith("- ") and clean_target in line.lower())
+                        ]
+                        if len(kept) != len(lines):
+                            f.write_text("\n".join(kept) + "\n", encoding="utf-8")
+                    except OSError as exc:
+                        logger.debug("could not clean note file %s: %s", f.name, exc)
+            else:
+                return _error(f"no note found with id #{nid}")
+
+        if topic_arg:
+            topic = _sanitize_topic(topic_arg)
+            note_file = _notes_dir(ctx.settings) / f"{topic}.md"
+            if note_file.exists():
+                try:
+                    note_file.unlink()
+                    deleted_items.append(f"file notes/{topic}.md")
+                except OSError as exc:
+                    return _error(f"failed to delete notes/{topic}.md: {exc}")
+            count = ctx.db.delete_notes_matching(f"[{topic}]")
+            if count:
+                deleted_items.append(f"{count} database notes with topic [{topic}]")
+
+        if query:
+            count = ctx.db.delete_notes_matching(query)
+            if count:
+                deleted_items.append(f"{count} database notes matching '{query}'")
+            q_lower = query.lower()
+            md_pruned = 0
+            for f in _list_note_files(ctx.settings):
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    lines = content.splitlines()
+                    kept = [
+                        line
+                        for line in lines
+                        if not (line.strip().startswith("- ") and q_lower in line.lower())
+                    ]
+                    if len(kept) != len(lines):
+                        md_pruned += len(lines) - len(kept)
+                        f.write_text("\n".join(kept) + "\n", encoding="utf-8")
+                except OSError as exc:
+                    logger.debug("could not clean note file %s: %s", f.name, exc)
+            if md_pruned:
+                deleted_items.append(f"{md_pruned} bullet lines from markdown notes")
+
+        if not deleted_items:
+            return "nothing found to forget."
+        return f"forgot: {', '.join(deleted_items)}."
+
     async def _tool_post_message(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can post messages")
@@ -1917,7 +2043,7 @@ class Toolbox:
             if not msgs:
                 resp2 = await client.conversations_replies(channel=cid, ts=ts, limit=1)
                 msgs = (resp2.get("messages") or []) if resp2.get("ok") else []
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
             alt = ctx.user_client if client is not ctx.user_client else (ctx.bot_client or ctx.client)
             if alt and alt is not client:
                 try:
@@ -1926,8 +2052,8 @@ class Toolbox:
                     if not msgs:
                         resp2 = await alt.conversations_replies(channel=cid, ts=ts, limit=1)
                         msgs = (resp2.get("messages") or []) if resp2.get("ok") else []
-                except Exception as exc:  # noqa: BLE001
-                    return _error(f"failed to fetch slack message: {exc}")
+                except Exception as inner_exc:  # noqa: BLE001
+                    return _error(f"failed to fetch slack message: {inner_exc}")
             else:
                 return _error(f"failed to fetch slack message: {exc}")
         if not msgs:
@@ -1955,14 +2081,14 @@ class Toolbox:
         try:
             resp = await client.conversations_replies(channel=cid, ts=ts, limit=100)
             msgs = (resp.get("messages") or []) if resp.get("ok") else []
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
             alt = ctx.user_client if client is not ctx.user_client else (ctx.bot_client or ctx.client)
             if alt and alt is not client:
                 try:
                     resp = await alt.conversations_replies(channel=cid, ts=ts, limit=100)
                     msgs = (resp.get("messages") or []) if resp.get("ok") else []
-                except Exception as exc:  # noqa: BLE001
-                    return _error(f"failed to read thread: {exc}")
+                except Exception as inner_exc:  # noqa: BLE001
+                    return _error(f"failed to read thread: {inner_exc}")
             else:
                 return _error(f"failed to read thread: {exc}")
         if not msgs:
@@ -2687,11 +2813,17 @@ class Toolbox:
         action = str(args.get("action") or "list").lower().strip()
         raw_key = str(args.get("key") or "").strip().lower()
         value = str(args.get("value") or "").strip()
+        raw_chan = str(args.get("channel") or "").strip()
+        channel_id = (await self._resolve_channel(ctx, raw_chan)) if raw_chan else None
 
         key_aliases = {
             "recap": "recaps",
             "daily_recap": "recaps",
             "daily_recaps": "recaps",
+            "recap_channel": "recap_channel_id",
+            "recap_chan": "recap_channel_id",
+            "recap_private_channel": "recap_private_channel_id",
+            "private_recap_channel": "recap_private_channel_id",
             "digest": "daily_digest",
             "access": "tier2",
             "tier2_channel": "access_channel_id",
@@ -2708,6 +2840,8 @@ class Toolbox:
         key = key_aliases.get(raw_key, raw_key)
         known_keys = [
             "recaps",
+            "recap_channel_id",
+            "recap_private_channel_id",
             "daily_digest",
             "welcomer",
             "tier2",
@@ -2732,6 +2866,34 @@ class Toolbox:
         if key not in known_keys:
             return _error(f"unknown setting '{raw_key}'. valid settings: {', '.join(known_keys)}")
 
+        if key == "recaps" and raw_chan:
+            if not channel_id:
+                return _error(f"could not resolve channel {raw_chan!r}")
+            chan_key = f"config:recaps:{channel_id}"
+            if action == "get":
+                db_val = ctx.db.kv_get(chan_key)
+                return f"recaps for <#{channel_id}>: `{db_val or '(default)'}`."
+            if action == "reset":
+                ctx.db.kv_del(chan_key)
+                try:
+                    from bot.features import scheduler
+                    scheduler._ensure_recap_jobs()
+                except Exception:
+                    pass
+                return f"recaps for <#{channel_id}> reset to default."
+            if action == "set":
+                if not value:
+                    return _error("value is required when setting a config")
+                val_norm = "false" if value.lower() in {"off", "false", "no", "disable", "disabled", "0"} else "true"
+                ctx.db.kv_set(chan_key, val_norm)
+                try:
+                    from bot.features import scheduler
+                    scheduler._ensure_recap_jobs()
+                except Exception:
+                    pass
+                word = "disabled" if val_norm == "false" else "enabled"
+                return f"daily recaps {word} for <#{channel_id}>."
+
         if action == "get":
             db_val = ctx.db.kv_get(f"config:{key}")
             if db_val is None:
@@ -2740,7 +2902,7 @@ class Toolbox:
 
         if action == "reset":
             ctx.db.kv_del(f"config:{key}")
-            if key == "recaps":
+            if key in {"recaps", "recap_channel_id", "recap_private_channel_id"}:
                 try:
                     from bot.features import scheduler
                     scheduler._ensure_recap_jobs()
@@ -2765,6 +2927,13 @@ class Toolbox:
                 else:
                     match = re.search(r"[CG][A-Z0-9]{8,}", value, re.IGNORECASE)
                     normalized_val = match.group(0).upper() if match else value.strip("#")
+            elif key in {"recap_channel_id", "recap_private_channel_id"}:
+                if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0"}:
+                    normalized_val = "none"
+                else:
+                    resolved = await self._resolve_channel(ctx, value)
+                    match = re.search(r"[CG][A-Z0-9]{8,}", value, re.IGNORECASE)
+                    normalized_val = resolved or (match.group(0).upper() if match else value.strip("<#>").strip())
             elif val_lower in {"off", "false", "no", "disable", "disabled", "0"}:
                 normalized_val = "false"
             elif val_lower in {"on", "true", "yes", "enable", "enabled", "1"}:
@@ -2783,8 +2952,8 @@ class Toolbox:
                     return "tier 2 access requests will route to admin DMs."
                 return f"tier 2 access requests will route to <#{normalized_val}>."
 
-            if key == "recaps":
-                if normalized_val == "false":
+            if key in {"recaps", "recap_channel_id"}:
+                if normalized_val in {"false", "none"}:
                     ctx.db.cancel_reminders_by_kind("recap_public")
                     ctx.db.cancel_reminders_by_kind("recap_reminder")
                     return "daily recaps disabled. cancelled any pending recap reminders."
@@ -2793,7 +2962,14 @@ class Toolbox:
                     scheduler._ensure_recap_jobs()
                 except Exception:
                     pass
+                if key == "recap_channel_id":
+                    return f"daily recap channel set to <#{normalized_val}>."
                 return "daily recaps enabled."
+
+            if key == "recap_private_channel_id":
+                if normalized_val == "none":
+                    return "private recap channel disabled."
+                return f"private recap channel set to <#{normalized_val}>."
 
             if key == "daily_digest":
                 if normalized_val == "false":
@@ -2896,10 +3072,13 @@ class Toolbox:
         value = value.strip()
         if value.lower() in {"here", "this", "current"}:
             return ctx.channel_id
+        m = re.match(r"^<#?([CGD][A-Za-z0-9_\-]+)(?:\|[^>]+)?>$", value)
+        if m:
+            return m.group(1).upper()
         channel_id = extract_id(value, "#")
         if channel_id:
             return channel_id
-        if value and value[0] in {"C", "G", "D"} and value.isalnum():
+        if value and value[0] in {"C", "G", "D"} and re.match(r"^[CGD][A-Za-z0-9_\-]+$", value):
             return value
         needle = value.lstrip("#").lower()
         for channel in await all_channels(ctx.client):
@@ -2915,4 +3094,4 @@ def format_now(settings: Settings) -> str:
     return datetime.now(tzinfo()).strftime("%A %d %B %Y, %H:%M %Z")
 
 
-__all__ = ["ToolContext", "Toolbox", "format_now", "format_when"]
+__all__ = ["ToolContext", "Toolbox", "format_now", "format_when", "get_user_memory_prompt"]

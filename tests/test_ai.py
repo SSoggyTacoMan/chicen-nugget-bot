@@ -517,6 +517,11 @@ def test_cmd_config(tmp_path):
             assert "reset *recaps* to default" in captured[-1]
             assert db.kv_get("config:recaps") is None
 
+            # Per-channel recap toggle via cmd_config
+            await cmd_config(AsyncMock(), {"user_id": runtime.settings.owner_user_id or "U_ADMIN", "text": "recaps <#C12345678> off", "channel_id": "C1"}, AsyncMock())
+            assert "daily recaps disabled for <#C12345678>" in captured[-1]
+            assert db.kv_get("config:recaps:C12345678") == "false"
+
     asyncio.run(run())
 
 
@@ -1226,4 +1231,194 @@ def test_all_users_cache_and_ratelimit_fallback():
         assert third == first
 
     asyncio.run(run())
+
+
+def test_forget_tool_and_memory_injection(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.agent import Agent
+    from bot.ai.tools import Toolbox, ToolContext, get_user_memory_prompt
+    from bot.db import Database
+
+    db = Database(str(tmp_path / "memory_test.db"))
+    db.init()
+    settings = MagicMock()
+    settings.data_dir = tmp_path
+    settings.owner_user_id = "U_OWNER"
+    settings.is_admin = lambda u: u == "U_ADMIN"
+    settings.bot_name = "nugget"
+    settings.ai_enabled = True
+    settings.ai_api_key = "key"
+    settings.ai_base_url = "https://ai.example.com"
+    settings.ai_model = "test-model"
+    settings.ai_fallback_model = ""
+    settings.imagine_model = "test-img"
+    settings.ai_gate_model = "test-gate"
+    settings.ai_max_context_chars = 1000
+    settings.ai_history_limit = 5
+    settings.repo_url = "https://github.com/repo"
+
+    box = Toolbox(settings)
+
+    ctx_owner = ToolContext(
+        db=db,
+        settings=settings,
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="D1",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+    )
+    ctx_guest = ToolContext(
+        db=db,
+        settings=settings,
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_GUEST",
+        channel_id="C1",
+        thread_ts=None,
+        is_dm=False,
+        is_owner=False,
+        is_admin=False,
+    )
+
+    async def run():
+        # Guest gets "none" memory
+        assert get_user_memory_prompt(db, settings, "U_GUEST") == "none"
+
+        # Owner starts with "none stored yet"
+        assert get_user_memory_prompt(db, settings, "U_OWNER") == "none stored yet"
+
+        # 1. Store notes via remember
+        await box.execute("remember", {"text": "likes iced coffee", "topic": "prefs"}, ctx_owner)
+        await box.execute("remember", {"text": "working on slackbot", "topic": "projects"}, ctx_owner)
+
+        mem = get_user_memory_prompt(db, settings, "U_OWNER")
+        assert "prefs" in mem
+        assert "projects" in mem
+        assert "likes iced coffee" in mem
+        assert "working on slackbot" in mem
+
+        # 2. Forget by query
+        forget_query = await box.execute("forget", {"query": "iced coffee"}, ctx_owner)
+        assert "database notes matching 'iced coffee'" in forget_query
+        assert "likes iced coffee" not in get_user_memory_prompt(db, settings, "U_OWNER")
+
+        # 3. Forget by topic
+        forget_topic = await box.execute("forget", {"topic": "projects"}, ctx_owner)
+        assert "projects.md" in forget_topic
+        assert "projects" not in get_user_memory_prompt(db, settings, "U_OWNER")
+
+        # 4. Forget by note_id
+        await box.execute("remember", {"text": "temporary rule", "topic": "rules"}, ctx_owner)
+        latest_notes = db.user_notes("U_OWNER")
+        target_id = latest_notes[0]["id"]
+        forget_id = await box.execute("forget", {"note_id": target_id}, ctx_owner)
+        assert f"note #{target_id}" in forget_id
+        assert db.get_note(target_id) is None
+
+        # 5. Guest denied forget
+        guest_forget = await box.execute("forget", {"query": "anything"}, ctx_guest)
+        assert "only the owner/admin" in guest_forget
+
+        # 6. Verify Agent.reply memory injection
+        client = AsyncMock()
+        client.conversations_info = AsyncMock(return_value={"channel": {"name": "general", "is_private": False}})
+        agent = Agent(settings, db, client=client, user_client=None, bot_user_id="U_BOT")
+        captured_prompts = []
+
+        async def fake_chat(messages, *args, **kwargs):
+            for m in messages:
+                if m.get("role") == "system":
+                    captured_prompts.append(m["content"])
+            res = MagicMock()
+            choice = MagicMock()
+            choice.message.content = "ok"
+            choice.message.tool_calls = []
+            res.choices = [choice]
+            return res
+
+        agent._chat = fake_chat
+
+        # Owner turn gets memory prompt
+        db.add_note("U_OWNER", "durable test memory")
+        await agent.reply(
+            conversation="dm:U_OWNER",
+            user_id="U_OWNER",
+            text="hello",
+            channel_id="D1",
+            thread_ts=None,
+            is_dm=True,
+        )
+        assert "durable test memory" in captured_prompts[-1]
+
+        # Guest turn in public channel gets "none" (no leak)
+        await agent.reply(
+            conversation="ch:C1:1.0",
+            user_id="U_GUEST",
+            text="hello",
+            channel_id="C1",
+            thread_ts="1.0",
+            is_dm=False,
+        )
+        assert "durable test memory" not in captured_prompts[-1]
+        assert "none\n- long-term memory" in captured_prompts[-1]
+
+    asyncio.run(run())
+
+
+def test_bot_config_channel_recaps_tool(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.tools import Toolbox, ToolContext
+    from bot.db import Database
+
+    db = Database(str(tmp_path / "cfg_tool_test.db"))
+    db.init()
+    settings = MagicMock()
+    box = Toolbox(settings)
+
+    ctx = ToolContext(
+        db=db,
+        settings=settings,
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="C_MAIN",
+        thread_ts=None,
+        is_dm=False,
+        is_owner=True,
+        is_admin=True,
+    )
+
+    async def run():
+        # Disable recaps for specific channel
+        res = await box.execute("bot_config", {"action": "set", "key": "recaps", "channel": "C_PERSONAL", "value": "off"}, ctx)
+        assert "daily recaps disabled for <#C_PERSONAL>" in res
+        assert db.kv_get("config:recaps:C_PERSONAL") == "false"
+
+        # Query channel recap
+        res_get = await box.execute("bot_config", {"action": "get", "key": "recaps", "channel": "C_PERSONAL"}, ctx)
+        assert "`false`" in res_get
+
+        # Reset channel recap
+        res_rst = await box.execute("bot_config", {"action": "reset", "key": "recaps", "channel": "C_PERSONAL"}, ctx)
+        assert "reset to default" in res_rst
+        assert db.kv_get("config:recaps:C_PERSONAL") is None
+
+        # Set recap_channel_id
+        res_cid = await box.execute("bot_config", {"action": "set", "key": "recap_channel", "value": "<#C_RECAP_NEW>"}, ctx)
+        assert "C_RECAP_NEW" in res_cid
+        assert db.kv_get("config:recap_channel_id") == "C_RECAP_NEW"
+
+    asyncio.run(run())
+
 

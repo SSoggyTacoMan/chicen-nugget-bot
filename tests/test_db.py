@@ -113,3 +113,27 @@ def test_clear_ai_history(tmp_path):
     assert db.history("ch:C1:111", 10) == []
     assert db.history("ch:C2:333", 10)
 
+
+def test_notes_crud_and_matching(tmp_path):
+    db = make_db(tmp_path)
+    id1 = db.add_note("U1", "likes chocolate")
+    id2 = db.add_note("U1", "[rules] don't ping on weekends")
+    id3 = db.add_note("U2", "prefers email")
+
+    assert db.get_note(id1)["text"] == "likes chocolate"
+    assert db.get_note(999) is None
+
+    u1_notes = db.user_notes("U1")
+    assert len(u1_notes) == 2
+    assert u1_notes[0]["id"] == id2
+
+    assert db.delete_note(id1, user_id="U2") is False
+    assert db.delete_note(id1, user_id="U1") is True
+    assert db.get_note(id1) is None
+
+    deleted = db.delete_notes_matching("rules")
+    assert deleted == 1
+    assert db.get_note(id2) is None
+    assert db.get_note(id3) is not None
+
+

@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 from slack_sdk.web.async_client import AsyncWebClient
 
 from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens
-from bot.ai.tools import ToolContext, Toolbox, format_now
+from bot.ai.tools import ToolContext, Toolbox, format_now, get_user_memory_prompt
 from bot.config import Settings
 from bot.db import Database
 from bot.runtime import runtime
@@ -116,6 +116,11 @@ class Agent:
         history = self.db.history(conversation, self.settings.ai_history_limit)
         role = "owner" if user_id == self.settings.owner_user_id else "guest"
         location = await self._location(channel_id, is_dm, client=active_client)
+        memory = (
+            get_user_memory_prompt(self.db, self.settings, user_id)
+            if (role == "owner" or self.settings.is_admin(user_id))
+            else "none"
+        )
         system = (
             self.system_template.replace("{bot_name}", self.settings.bot_name)
             .replace("{bot_user_id}", self.bot_user_id or "unknown")
@@ -129,6 +134,7 @@ class Agent:
             .replace("{location}", location)
             .replace("{trigger}", TRIGGER_TEXT.get(trigger, TRIGGER_TEXT["mention"]))
             .replace("{jev}", jev or "no extra classification")
+            .replace("{memory}", memory)
             .replace("{ai_model}", self.settings.ai_model)
             .replace("{ai_fallback_model}", self.settings.ai_fallback_model or "none")
             .replace("{imagine_model}", self.settings.imagine_model or "none")

@@ -478,6 +478,31 @@ class Database:
             (user_id, text, iso()),
         )
 
+    def get_note(self, note_id: int) -> dict[str, Any] | None:
+        return self._one(
+            "SELECT id, user_id, text, created_at FROM notes WHERE id = ?",
+            (note_id,),
+        )
+
+    def user_notes(self, user_id: str, limit: int = 30) -> list[dict[str, Any]]:
+        return self._all(
+            "SELECT id, text, created_at FROM notes WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, max(1, limit)),
+        )
+
+    def delete_note(self, note_id: int, user_id: str | None = None) -> bool:
+        if user_id:
+            count = self._execute("DELETE FROM notes WHERE id = ? AND user_id = ?", (note_id, user_id))
+        else:
+            count = self._execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        return count > 0
+
+    def delete_notes_matching(self, query: str, user_id: str | None = None) -> int:
+        like = f"%{query}%"
+        if user_id:
+            return self._execute("DELETE FROM notes WHERE user_id = ? AND text LIKE ?", (user_id, like))
+        return self._execute("DELETE FROM notes WHERE text LIKE ?", (like,))
+
     def search_notes(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         like = f"%{query}%"
         return self._all(

@@ -59,3 +59,51 @@ def test_admin_channel_id_resolution(tmp_path):
     finally:
         runtime.db = old_db
         runtime.settings = old_settings
+
+
+def test_recap_channel_id_and_channel_override(tmp_path):
+    from unittest.mock import MagicMock
+
+    from bot.db import Database
+    from bot.features.recaps import recap_channel_id
+
+    db = Database(str(tmp_path / "test_recap.db"))
+    db.init()
+    mock_settings = MagicMock()
+    mock_settings.recap_channel_id = "C_PUBLIC_DEFAULT"
+
+    old_db = runtime.db
+    old_settings = runtime.settings
+    try:
+        runtime.db = db
+        runtime.settings = mock_settings
+
+        # Default fallback
+        assert recap_channel_id() == "C_PUBLIC_DEFAULT"
+
+        # Global recaps disabled
+        db.kv_set("config:recaps", "false")
+        assert recap_channel_id() is None
+        db.kv_del("config:recaps")
+
+        # Custom channel in db
+        db.kv_set("config:recap_channel_id", "C_CUSTOM_RECAP")
+        assert recap_channel_id() == "C_CUSTOM_RECAP"
+
+        # Disabled via config:recap_channel_id = none
+        db.kv_set("config:recap_channel_id", "none")
+        assert recap_channel_id() is None
+
+        # Reset back to custom channel
+        db.kv_set("config:recap_channel_id", "C_CUSTOM_RECAP")
+        # Per-channel disable
+        db.kv_set("config:recaps:C_CUSTOM_RECAP", "false")
+        assert recap_channel_id() is None
+
+        # Re-enable per-channel
+        db.kv_set("config:recaps:C_CUSTOM_RECAP", "true")
+        assert recap_channel_id() == "C_CUSTOM_RECAP"
+    finally:
+        runtime.db = old_db
+        runtime.settings = old_settings
+
