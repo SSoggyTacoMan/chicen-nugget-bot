@@ -914,6 +914,86 @@ def test_markdown_notes_memory(tmp_path):
     asyncio.run(run())
 
 
+def test_send_dm_resolves_bare_id_and_me():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.tools import Toolbox, ToolContext
+
+    settings = MagicMock()
+    settings.owner_user_id = "U091GMQ14KV"
+    box = Toolbox(settings)
+
+    client = AsyncMock()
+    client.users_info = AsyncMock(return_value={"user": {"id": "U091GMQ14KV", "name": "maaren"}})
+    open_resp = MagicMock()
+    open_resp.get = lambda k, d=None: {"channel": {"id": "D0CGFPAS0SD"}}.get(k, d)
+    client.conversations_open = AsyncMock(return_value=open_resp)
+    client.chat_postMessage = AsyncMock(return_value=MagicMock(data={"ok": True, "ts": "123.456"}))
+
+    ctx = ToolContext(
+        db=MagicMock(),
+        settings=settings,
+        client=client,
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U091GMQ14KV",
+        channel_id="C1",
+        thread_ts=None,
+        is_dm=False,
+        is_owner=True,
+        is_admin=True,
+    )
+
+    async def run():
+        # Bare user id without needing users_list
+        res1 = await box.execute("send_dm", {"user": "U091GMQ14KV", "text": "yo **test**"}, ctx)
+        assert "sent a DM to <@U091GMQ14KV>" in res1
+        client.users_list.assert_not_called()
+        assert client.chat_postMessage.call_args[1]["channel"] == "D0CGFPAS0SD"
+        assert client.chat_postMessage.call_args[1]["text"] == "yo *test*"
+
+        # 'me' alias
+        res2 = await box.execute("send_dm", {"user": "me", "text": "ping"}, ctx)
+        assert "sent a DM to <@U091GMQ14KV>" in res2
+
+    asyncio.run(run())
+
+
+def test_all_users_cache_and_ratelimit_fallback():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from bot.slack_api import _users_cache, all_users
+
+    client = AsyncMock()
+    client.token = "xoxb-cache-test"
+    _users_cache.pop("xoxb-cache-test", None)
+
+    client.users_list = AsyncMock(
+        return_value={"members": [{"id": "U1", "name": "alice"}], "response_metadata": {}}
+    )
+
+    async def run():
+        first = await all_users(client)
+        assert first == [{"id": "U1", "name": "alice"}]
+        assert client.users_list.call_count == 1
+
+        # Second call within TTL uses cache
+        second = await all_users(client)
+        assert second == first
+        assert client.users_list.call_count == 1
+
+        # Simulate expired cache + ratelimited API -> falls back to stale cache
+        _users_cache["xoxb-cache-test"] = (0.0, first)
+        client.users_list = AsyncMock(side_effect=RuntimeError("ratelimited"))
+        third = await all_users(client)
+        assert third == first
+
+    asyncio.run(run())
+
+
+
 
 
 

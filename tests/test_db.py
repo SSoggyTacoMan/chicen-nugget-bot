@@ -81,8 +81,20 @@ def test_polls(tmp_path):
 def test_threads_and_kv(tmp_path):
     db = make_db(tmp_path)
     assert db.is_thread("C1", "123.456") is False
-    db.mark_thread("C1", "123.456")
+    assert db.thread_owner("C1", "123.456") is None
+
+    db.mark_thread("C1", "123.456", owner="bot")
     assert db.is_thread("C1", "123.456") is True
+    assert db.is_thread("C1", "123.456", owner="bot") is True
+    assert db.is_thread("C1", "123.456", owner="user") is False
+    assert db.thread_owner("C1", "123.456") == "bot"
+
+    # Switching owner
+    db.mark_thread("C1", "123.456", owner="user")
+    assert db.is_thread("C1", "123.456", owner="user") is True
+    assert db.is_thread("C1", "123.456", owner="bot") is False
+    assert db.thread_owner("C1", "123.456") == "user"
+
     db.kv_set("k", "v")
     assert db.kv_get("k") == "v"
 

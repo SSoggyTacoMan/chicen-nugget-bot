@@ -52,7 +52,7 @@ from bot.slack_api import (
     user_info,
 )
 from bot.utils import dice
-from bot.utils.text import extract_id
+from bot.utils.text import disarm_broadcasts, extract_id, format_mrkdwn
 from bot.utils.timeparse import format_when, parse_when
 from bot.utils.tz import tzinfo
 
@@ -1060,6 +1060,13 @@ class Toolbox:
         query = str(args.get("query") or "").strip()
         if not query:
             return _error("query is required")
+        q_lower = query.lower()
+        if q_lower in {"me", "myself", "self"} and ctx.user_id:
+            user = await user_info(ctx.client, ctx.user_id)
+            return _json(self._user_summary(user)) if user else _error("no user with that id")
+        if q_lower == "owner" and ctx.settings.owner_user_id:
+            user = await user_info(ctx.client, ctx.settings.owner_user_id)
+            return _json(self._user_summary(user)) if user else _error("no user with that id")
         user_id = extract_id(query, "@")
         if user_id:
             user = await user_info(ctx.client, user_id)
@@ -1196,7 +1203,16 @@ class Toolbox:
         if not user:
             return _error(f"could not find a user matching {query!r}")
         user_id = user.get("id")
-        if not await post(ctx.client, user_id, text):
+        target = user_id
+        try:
+            opened = await ctx.client.conversations_open(users=user_id)
+            ch = opened.get("channel") if hasattr(opened, "get") else None
+            dm_id = ch.get("id") if hasattr(ch, "get") else None
+            if isinstance(dm_id, str) and dm_id.startswith("D"):
+                target = dm_id
+        except Exception as exc:  # noqa: BLE001 - fall back to posting with user_id directly
+            logger.debug("conversations_open failed for %s: %s", user_id, error_code(exc))
+        if not await post(ctx.client, target, disarm_broadcasts(format_mrkdwn(text))):
             return _error("slack rejected the DM")
         return f"sent a DM to <@{user_id}>."
 
@@ -1204,6 +1220,11 @@ class Toolbox:
         return random_fact()
 
     async def _find_user(self, ctx: ToolContext, query: str) -> dict[str, Any] | None:
+        q_lower = query.strip().lower()
+        if q_lower in {"me", "myself", "self"} and ctx.user_id:
+            return await user_info(ctx.client, ctx.user_id)
+        if q_lower == "owner" and ctx.settings.owner_user_id:
+            return await user_info(ctx.client, ctx.settings.owner_user_id)
         user_id = extract_id(query, "@")
         if user_id:
             return await user_info(ctx.client, user_id)
@@ -1330,7 +1351,7 @@ class Toolbox:
         channel_id = await self._resolve_channel(ctx, channel_value)
         if not channel_id:
             return _error(f"could not resolve channel {channel_value!r}")
-        result = await post(ctx.client, channel_id, text)
+        result = await post(ctx.client, channel_id, disarm_broadcasts(format_mrkdwn(text)))
         if not result:
             return _error("slack rejected the message")
         return f"posted to <#{channel_id}> (ts {result.get('ts')})."

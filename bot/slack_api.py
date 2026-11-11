@@ -8,6 +8,7 @@ import ipaddress
 import logging
 import re
 import socket
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -194,7 +195,18 @@ async def all_channels(client: AsyncWebClient) -> list[dict[str, Any]]:
     return channels
 
 
+_users_cache: dict[str | int, tuple[float, list[dict[str, Any]]]] = {}
+_USERS_CACHE_TTL = 600.0
+
+
 async def all_users(client: AsyncWebClient) -> list[dict[str, Any]]:
+    tok = getattr(client, "token", None)
+    cache_key: str | int = tok if isinstance(tok, str) and tok else id(client)
+    now = time.monotonic()
+    cached = _users_cache.get(cache_key)
+    if cached and (now - cached[0]) < _USERS_CACHE_TTL:
+        return cached[1]
+
     users: list[dict[str, Any]] = []
     cursor = None
     try:
@@ -204,9 +216,13 @@ async def all_users(client: AsyncWebClient) -> list[dict[str, Any]]:
             cursor = (response.get("response_metadata") or {}).get("next_cursor")
             if not cursor:
                 break
+        _users_cache[cache_key] = (now, users)
+        return users
     except Exception as exc:  # noqa: BLE001
         logger.info("users_list failed: %s", error_code(exc))
-    return users
+        if cached:
+            return cached[1]
+        return users
 
 
 async def usergroup_members(client: AsyncWebClient, group_id: str) -> list[str] | None:

@@ -139,7 +139,7 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         return
     if not runtime.settings.ai_allowed(channel):
         return
-    if not runtime.db.is_thread(channel, thread_ts):
+    if not runtime.db.is_thread(channel, thread_ts, owner="bot"):
         return
     if runtime.db.kv_get("config:thread_followups") == "false":
         return
@@ -148,6 +148,8 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         return
     if f"<@{runtime.bot_user_id}>" in text:
         return  # app_mention owns this one
+    if runtime.user_id and f"<@{runtime.user_id}>" in text:
+        return  # user gateway owns this one
     if user_retry_after(user_id):
         return
     if len(text) < 4:
@@ -248,6 +250,8 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
         return
     if f"<@{runtime.bot_user_id}>" in text:
         return
+    if runtime.user_id and f"<@{runtime.user_id}>" in text:
+        return
     if len(text) < 4:
         return
     if user_retry_after(user_id):
@@ -344,7 +348,7 @@ async def _handle_channel(
             return False
         for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
             await post(client, channel, chunk, thread_ts=root_ts)
-        runtime.db.mark_thread(channel, root_ts)
+        runtime.db.mark_thread(channel, root_ts, owner="bot")
         posted = True
     except Exception:
         logger.exception("channel agent turn failed")
