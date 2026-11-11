@@ -1422,3 +1422,187 @@ def test_bot_config_channel_recaps_tool(tmp_path):
     asyncio.run(run())
 
 
+def test_personal_operator_tools(tmp_path):
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import httpx
+
+    from bot.ai.tools import Toolbox, ToolContext
+    from bot.db import Database
+
+    db = Database(str(tmp_path / "operator_test.db"))
+    db.init()
+    settings = MagicMock()
+    settings.owner_user_id = "U_OWNER"
+    settings.google_access_token = None
+    settings.google_refresh_token = None
+    settings.mac_bridge_url = None
+    settings.mac_bridge_token = None
+    box = Toolbox(settings)
+
+    bot_client = AsyncMock()
+    user_client = AsyncMock()
+    bot_client.chat_postMessage = AsyncMock(return_value=MagicMock(data={"ok": True, "ts": "123.456"}))
+    user_client.reactions_add = AsyncMock(return_value={"ok": True})
+    user_client.reactions_remove = AsyncMock(return_value={"ok": True})
+    user_client.search_messages = AsyncMock(
+        return_value={"messages": {"matches": [{"text": "hey <@U_OWNER>", "user": "U2", "ts": "123.000"}]}}
+    )
+
+    ctx_owner = ToolContext(
+        db=db,
+        settings=settings,
+        client=bot_client,
+        user_client=user_client,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="C_MAIN",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+        bot_client=bot_client,
+    )
+    ctx_guest = ToolContext(
+        db=db,
+        settings=settings,
+        client=bot_client,
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_GUEST",
+        channel_id="C_MAIN",
+        thread_ts=None,
+        is_dm=False,
+        is_owner=False,
+        is_admin=False,
+        bot_client=bot_client,
+    )
+
+    async def run():
+        # 1. post_message with thread_ts
+        post_res = await box.execute(
+            "post_message",
+            {"channel": "C_MAIN", "text": "thread reply", "thread_ts": "100.200"},
+            ctx_owner,
+        )
+        assert "thread 100.200" in post_res
+        bot_client.chat_postMessage.assert_called_with(
+            channel="C_MAIN",
+            text="thread reply",
+            blocks=None,
+            thread_ts="100.200",
+            unfurl_links=False,
+            unfurl_media=False,
+        )
+
+        # 2. slack_react
+        guest_react = await box.execute(
+            "slack_react",
+            {"channel": "C_MAIN", "timestamp": "123.456", "emoji": "eyes"},
+            ctx_guest,
+        )
+        assert "only the owner/admin" in guest_react
+
+        react_add = await box.execute(
+            "slack_react",
+            {"action": "add", "channel": "C_MAIN", "timestamp": "123.456", "emoji": ":eyes:", "as_user": True},
+            ctx_owner,
+        )
+        assert "added :eyes: to 123.456 in <#C_MAIN> as Boi" in react_add
+        user_client.reactions_add.assert_called_with(channel="C_MAIN", timestamp="123.456", name="eyes")
+
+        react_rm = await box.execute(
+            "slack_react",
+            {"action": "remove", "channel": "C_MAIN", "timestamp": "123.456", "emoji": "eyes", "as_user": True},
+            ctx_owner,
+        )
+        assert "removed :eyes: from 123.456 in <#C_MAIN> as Boi" in react_rm
+        user_client.reactions_remove.assert_called_with(channel="C_MAIN", timestamp="123.456", name="eyes")
+
+        # 3. slack_activity
+        act_res = await box.execute("slack_activity", {}, ctx_owner)
+        assert "hey <@U_OWNER>" in act_res
+
+        # 4. google unconfigured
+        cal_err = await box.execute("google_calendar", {"action": "list"}, ctx_owner)
+        assert "Google credentials not configured" in cal_err
+        gmail_err = await box.execute("gmail", {"action": "list"}, ctx_owner)
+        assert "Google credentials not configured" in gmail_err
+        drive_err = await box.execute("google_drive", {"action": "list"}, ctx_owner)
+        assert "Google credentials not configured" in drive_err
+
+        # 5. google mock calls with token
+        db.kv_set("config:google_access_token", "ya29.test_token_secret_123456")
+
+        async def fake_google_get(self, url, *args, **kwargs):
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            url_str = str(url)
+            if "calendar/v3/calendars/primary/events" in url_str:
+                resp.json.return_value = {
+                    "items": [{"id": "ev1", "summary": "Sync", "start": {"dateTime": "2026-11-12T10:00:00Z"}}]
+                }
+            elif "gmail/v1/users/me/messages/m1" in url_str:
+                resp.json.return_value = {
+                    "id": "m1",
+                    "payload": {"headers": [{"name": "Subject", "value": "Test Subject"}, {"name": "From", "value": "alice@example.com"}]},
+                    "snippet": "Test body snippet",
+                }
+            elif "gmail/v1/users/me/messages" in url_str:
+                resp.json.return_value = {"messages": [{"id": "m1"}]}
+            elif "drive/v3/files" in url_str and "export" not in url_str:
+                resp.json.return_value = {"files": [{"id": "f1", "name": "Notes.txt", "mimeType": "text/plain"}]}
+            return resp
+
+        with patch.object(httpx.AsyncClient, "get", new=fake_google_get):
+            cal_res = await box.execute("google_calendar", {"action": "list"}, ctx_owner)
+            assert "Sync" in cal_res
+
+            gmail_res = await box.execute("gmail", {"action": "list"}, ctx_owner)
+            assert "Test Subject" in gmail_res
+
+            drive_res = await box.execute("google_drive", {"action": "list"}, ctx_owner)
+            assert "Notes.txt" in drive_res
+
+        # 6. config masking for google tokens
+        cfg_get = await box.execute("bot_config", {"action": "get", "key": "google_access_token"}, ctx_owner)
+        assert "ya29...3456" in cfg_get
+        assert "secret" not in cfg_get
+
+        # 7. mac_control guest rejected
+        guest_mac = await box.execute("mac_control", {"action": "status"}, ctx_guest)
+        assert "only the owner/admin" in guest_mac
+
+        # 8. mac_control mock local / bridge
+        async def fake_subproc(*cmd, stdin=None, stdout=None, stderr=None):
+            proc = MagicMock()
+            proc.returncode = 0
+            if cmd[0] == "pbpaste":
+                proc.communicate = AsyncMock(return_value=(b"clipboard content", b""))
+            elif cmd[0] == "osascript" and "frontmost" in cmd[2]:
+                proc.communicate = AsyncMock(return_value=(b"Slack", b""))
+            elif cmd[0] == "pmset":
+                proc.communicate = AsyncMock(return_value=(b"Now drawing from 'Battery Power' - 85%", b""))
+            elif cmd[0] == "uptime":
+                proc.communicate = AsyncMock(return_value=(b"up 5 days", b""))
+            else:
+                proc.communicate = AsyncMock(return_value=(b"ok", b""))
+            return proc
+
+        with patch("bot.ai.tools.asyncio.create_subprocess_exec", side_effect=fake_subproc):
+            mac_front = await box.execute("mac_control", {"action": "frontmost"}, ctx_owner)
+            assert mac_front == "Slack"
+
+            mac_clip = await box.execute("mac_control", {"action": "clipboard"}, ctx_owner)
+            assert mac_clip == "clipboard content"
+
+            mac_status = await box.execute("mac_control", {"action": "status"}, ctx_owner)
+            status_data = json.loads(mac_status)
+            assert "Battery Power" in status_data["battery"]
+
+    asyncio.run(run())
+
+
+

@@ -153,6 +153,16 @@ class Settings:
     imap_user: str | None = None
     imap_password: str | None = None
 
+    # google workspace (calendar, gmail, drive)
+    google_access_token: str | None = None
+    google_refresh_token: str | None = None
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+
+    # mac companion link
+    mac_bridge_url: str | None = None
+    mac_bridge_token: str | None = None
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "bot.db"
@@ -325,6 +335,12 @@ def load_settings() -> Settings:
         imap_port=_int("IMAP_PORT", 993),
         imap_user=_str("IMAP_USER") or None,
         imap_password=_str("IMAP_PASSWORD") or None,
+        google_access_token=_str("GOOGLE_ACCESS_TOKEN") or None,
+        google_refresh_token=_str("GOOGLE_REFRESH_TOKEN") or None,
+        google_client_id=_str("GOOGLE_CLIENT_ID") or None,
+        google_client_secret=_str("GOOGLE_CLIENT_SECRET") or None,
+        mac_bridge_url=_str("MAC_BRIDGE_URL") or None,
+        mac_bridge_token=_str("MAC_BRIDGE_TOKEN") or None,
     )
 
 
