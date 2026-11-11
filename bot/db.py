@@ -245,6 +245,10 @@ class Database:
     def kv_del(self, key: str) -> None:
         self._write("DELETE FROM kv WHERE key = ?", (key,))
 
+    def kv_prefix(self, prefix: str) -> list[tuple[str, str]]:
+        rows = self._all("SELECT key, value FROM kv WHERE key LIKE ? ORDER BY key", (f"{prefix}%",))
+        return [(r["key"], r["value"]) for r in rows]
+
     # -------------------------------------------------------------- members
     def record_join(
         self, user_id: str, username: str | None = None, channel_id: str | None = None

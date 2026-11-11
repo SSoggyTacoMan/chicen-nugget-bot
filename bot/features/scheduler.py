@@ -57,9 +57,9 @@ def _personal_updates_on() -> bool:
 
 
 def _ensure_digest_job() -> None:
-    if runtime.db and runtime.db.kv_get("config:daily_digest") == "false":
-        return
-    if not _personal_updates_on():
+    if (runtime.db and runtime.db.kv_get("config:daily_digest") == "false") or not _personal_updates_on():
+        if runtime.db:
+            runtime.db.cancel_reminders_by_kind("digest")
         return
     settings = runtime.settings
     if not settings.daily_digest_time or not settings.owner_user_id:
@@ -88,7 +88,7 @@ def _ensure_digest_job() -> None:
 def _ensure_recap_jobs() -> None:
     settings = runtime.settings
     channel = recaps.recap_channel_id()
-    if not channel or not settings.owner_user_id or not settings.recap_time:
+    if not channel or not settings.owner_user_id or not settings.recap_time or (runtime.db and runtime.db.kv_get("config:recaps") == "false"):
         if runtime.db:
             runtime.db.cancel_reminders_by_kind("recap_public")
             runtime.db.cancel_reminders_by_kind("recap_reminder")
@@ -175,8 +175,8 @@ async def _deliver(reminder: dict) -> None:
         return
     if reminder.get("kind") == "recap_public":
         target = reminder.get("target") or recaps.recap_channel_id()
-        if not target or (runtime.db and runtime.db.kv_get(f"config:recaps:{target}") == "false"):
-            logger.info("skipped recap_public: recaps disabled for channel %s", target)
+        if not target or (runtime.db and (runtime.db.kv_get("config:recaps") == "false" or runtime.db.kv_get(f"config:recaps:{target}") == "false")):
+            logger.info("skipped recap_public: recaps disabled")
             return
         await recaps.post_public_prompt(client, target_channel=target)
         logger.info("delivered daily recap prompt to %s", target)
@@ -189,6 +189,9 @@ async def _deliver(reminder: dict) -> None:
             logger.info("skipped recap_reminder: personal updates disabled")
             return
     if reminder.get("kind") == "digest":
+        if runtime.db and runtime.db.kv_get("config:daily_digest") == "false":
+            logger.info("skipped digest: daily digest disabled via config")
+            return
         if not _personal_updates_on():
             logger.info("skipped digest: personal updates disabled")
             return

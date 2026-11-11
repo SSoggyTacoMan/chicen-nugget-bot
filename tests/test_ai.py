@@ -1602,6 +1602,22 @@ def test_personal_operator_tools(tmp_path):
             status_data = json.loads(mac_status)
             assert "Battery Power" in status_data["battery"]
 
+        # 9. remind tool with standalone time and 12am
+        settings.max_reminders = 50
+        rem1 = await box.execute("remind", {"when": "tomorrow at 12am", "text": "respond to the g2g email"}, ctx_owner)
+        assert "reminder *#" in rem1
+
+        rem2 = await box.execute("remind", {"when": "tomorrow 00:00", "text": "check email"}, ctx_owner)
+        assert "reminder *#" in rem2
+
+        rem3 = await box.execute("remind", {"when": "in 85m", "text": "ping"}, ctx_owner)
+        assert "reminder *#" in rem3
+
+        # 10. bot_config list shows per-channel recaps
+        await box.execute("bot_config", {"action": "set", "key": "recaps", "channel": "C999", "value": "off"}, ctx_owner)
+        cfg_list = await box.execute("bot_config", {"action": "list"}, ctx_owner)
+        assert "recaps (<#C999>)*: `false`" in cfg_list
+
     asyncio.run(run())
 
 

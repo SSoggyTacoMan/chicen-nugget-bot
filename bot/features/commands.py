@@ -475,6 +475,10 @@ async def cmd_config(ack, command, client) -> None:
             else:
                 status = "_(default)_"
             lines.append(f"• *{k}*: {status}")
+        if runtime.db and hasattr(runtime.db, "kv_prefix"):
+            for ok, ov in runtime.db.kv_prefix("config:recaps:"):
+                cid = ok.removeprefix("config:recaps:")
+                lines.append(f"• *recaps (<#{cid}>)*: `{ov}`")
         lines.append("\n_use `/nugget config <key> <value>` or `/nugget config reset <key>`_")
         await _say(client, command, "\n".join(lines), ephemeral=True)
         return
