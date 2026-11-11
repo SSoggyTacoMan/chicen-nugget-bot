@@ -123,6 +123,16 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks (user_id, done);
 """
 
 
@@ -472,6 +482,69 @@ class Database:
             (max(1, limit),),
         )
 
+    # ------------------------------------------------------------------ tasks
+    def add_task(self, user_id: str, title: str) -> int:
+        return self._write(
+            "INSERT INTO tasks (user_id, title, done, created_at) VALUES (?, ?, 0, ?)",
+            (user_id, title.strip(), iso()),
+        )
+
+    def list_tasks(self, user_id: str, show_all: bool = False, limit: int = 30) -> list[dict[str, Any]]:
+        if show_all:
+            return self._all(
+                "SELECT * FROM tasks WHERE user_id = ? ORDER BY done ASC, id DESC LIMIT ?",
+                (user_id, max(1, limit)),
+            )
+        return self._all(
+            "SELECT * FROM tasks WHERE user_id = ? AND done = 0 ORDER BY id ASC LIMIT ?",
+            (user_id, max(1, limit)),
+        )
+
+    def complete_task(self, task_id: int, user_id: str | None = None) -> bool:
+        if user_id:
+            count = self._execute(
+                "UPDATE tasks SET done = 1, completed_at = ? WHERE id = ? AND user_id = ?",
+                (iso(), task_id, user_id),
+            )
+        else:
+            count = self._execute(
+                "UPDATE tasks SET done = 1, completed_at = ? WHERE id = ?",
+                (iso(), task_id),
+            )
+        return count > 0
+
+    def uncomplete_task(self, task_id: int, user_id: str | None = None) -> bool:
+        if user_id:
+            count = self._execute(
+                "UPDATE tasks SET done = 0, completed_at = NULL WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            )
+        else:
+            count = self._execute(
+                "UPDATE tasks SET done = 0, completed_at = NULL WHERE id = ?",
+                (task_id,),
+            )
+        return count > 0
+
+    def delete_task(self, task_id: int, user_id: str | None = None) -> bool:
+        if user_id:
+            count = self._execute(
+                "DELETE FROM tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            )
+        else:
+            count = self._execute(
+                "DELETE FROM tasks WHERE id = ?",
+                (task_id,),
+            )
+        return count > 0
+
+    def clear_completed_tasks(self, user_id: str) -> int:
+        return self._execute(
+            "DELETE FROM tasks WHERE user_id = ? AND done = 1",
+            (user_id,),
+        )
+
     # ------------------------------------------------------------------ polls
     def create_poll(
         self, poll_id: str, channel_id: str, question: str, options: list[str], creator: str
@@ -640,4 +713,5 @@ class Database:
             "reminders": one("SELECT COUNT(*) AS n FROM reminders WHERE done = 0"),
             "messages": one("SELECT COUNT(*) AS n FROM messages"),
             "notes": one("SELECT COUNT(*) AS n FROM notes"),
+            "tasks": one("SELECT COUNT(*) AS n FROM tasks WHERE done = 0"),
         }
