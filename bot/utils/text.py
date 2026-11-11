@@ -74,3 +74,9 @@ def escape_mrkdwn(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+def disarm_broadcasts(text: str) -> str:
+    """Disarm Slack broadcast mentions (<!channel>, <!everyone>, <!here>, <!subteam^...>) to prevent unwanted pings."""
+    return re.sub(r"<!(channel|everyone|here|subteam\^[A-Z0-9]+)(?:\|[^>]*)?>", r"@\1", text or "")
+

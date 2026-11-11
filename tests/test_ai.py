@@ -554,6 +554,91 @@ def test_thread_continuation_image_handling(tmp_path):
         runtime.gate = old_gate
 
 
+def test_security_hardening(tmp_path):
+    import asyncio
+    import os
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import httpx
+    from bot.ai.tools import Toolbox, ToolContext
+    from bot.slack_api import ssrf_filter
+    from bot.utils.text import disarm_broadcasts, escape_mrkdwn
+
+    # 1. Broadcast ping disarming & mrkdwn escaping
+    raw = "hi <!channel> <!everyone> <!here> <!subteam^S1234|@team> <https://evil.com|click>"
+    disarmed = disarm_broadcasts(raw)
+    assert "<!channel>" not in disarmed
+    assert "<!everyone>" not in disarmed
+    assert "<!here>" not in disarmed
+    assert "<!subteam^S1234" not in disarmed
+    assert "@channel" in disarmed
+
+    escaped = escape_mrkdwn("<!channel> <https://evil.com|safe>")
+    assert "&lt;!channel&gt;" in escaped
+    assert "&lt;https://evil.com|safe&gt;" in escaped
+
+    # 2. SSRF redirect filter & private host check
+    async def run_ssrf_and_run_code():
+        req_private = httpx.Request("GET", "http://169.254.169.254/latest/meta-data/")
+        try:
+            await ssrf_filter(req_private)
+            assert False, "should block metadata IP"
+        except ValueError as e:
+            assert "blocked" in str(e)
+
+        req_loopback = httpx.Request("GET", "http://127.0.0.1:8080/admin")
+        try:
+            await ssrf_filter(req_loopback)
+            assert False, "should block loopback IP"
+        except ValueError as e:
+            assert "blocked" in str(e)
+
+        # 3. run_code rejects non-DM contexts and scrubs env secrets
+        box = Toolbox(MagicMock())
+        channel_ctx = ToolContext(
+            db=MagicMock(),
+            settings=MagicMock(),
+            client=AsyncMock(),
+            user_client=None,
+            bot_user_id="U_BOT",
+            user_id="U_OWNER",
+            channel_id="C1",
+            thread_ts=None,
+            is_dm=False,
+            is_owner=True,
+            is_admin=True,
+        )
+        res_channel = await box.execute("run_code", {"code": "print(1)"}, channel_ctx)
+        assert "direct messages" in res_channel
+
+        dm_ctx = ToolContext(
+            db=MagicMock(),
+            settings=MagicMock(),
+            client=AsyncMock(),
+            user_client=None,
+            bot_user_id="U_BOT",
+            user_id="U_OWNER",
+            channel_id="D1",
+            thread_ts=None,
+            is_dm=True,
+            is_owner=True,
+            is_admin=True,
+        )
+        with patch.dict(os.environ, {"SLACK_BOT_TOKEN": "xoxb-secret", "AI_API_KEY": "sk-secret"}):
+            res_env = await box.execute(
+                "run_code",
+                {"code": "import os; print('TOKEN' in str(os.environ.keys()), os.getenv('SLACK_BOT_TOKEN'))"},
+                dm_ctx,
+            )
+            assert "None" in res_env
+
+        # 4. bot_config rejects unknown keys
+        res_cfg = await box.execute("bot_config", {"action": "set", "key": "bad_key", "value": "1"}, dm_ctx)
+        assert "unknown setting" in res_cfg
+
+    asyncio.run(run_ssrf_and_run_code())
+
+
+
 
 
 

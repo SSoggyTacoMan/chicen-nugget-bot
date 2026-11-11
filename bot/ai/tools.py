@@ -19,6 +19,7 @@ import random
 import re
 import socket
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,7 +40,16 @@ from bot.features.stats import (
 )
 from bot.reminders import confirmation_text, dm_target, create_reminder, reminder_line
 from bot.runtime import runtime
-from bot.slack_api import all_channels, all_users, channel_info, error_code, post, user_info
+from bot.slack_api import (
+    all_channels,
+    all_users,
+    channel_info,
+    error_code,
+    is_private_host,
+    post,
+    ssrf_filter,
+    user_info,
+)
 from bot.utils import dice
 from bot.utils.text import extract_id
 from bot.utils.timeparse import format_when, parse_when
@@ -1097,6 +1107,7 @@ class Toolbox:
             async with httpx.AsyncClient(
                 timeout=15,
                 follow_redirects=True,
+                event_hooks={"request": [ssrf_filter]},
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
             ) as http:
                 response = await http.get(url)
@@ -1599,16 +1610,27 @@ class Toolbox:
     async def _tool_run_code(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can run code")
+        if not ctx.is_dm:
+            return _error("run_code is only permitted in direct messages")
         code = str(args.get("code") or "").strip()
         if not code:
             return _error("code is required")
+        # ponytail: for multi-tenant code execution, upgrade to Sandbox SDK or gVisor container.
+        safe_env = {
+            k: v for k, v in os.environ.items()
+            if not any(s in k.upper() for s in ("TOKEN", "KEY", "SECRET", "PASS", "AUTH", "SSH_"))
+        }
+        safe_env["PYTHONPATH"] = ""
         try:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable,
+                "-I",
                 "-c",
                 code,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=safe_env,
+                cwd=tempfile.gettempdir(),
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=5.0)
             stdout = stdout_bytes.decode(errors="replace").strip()
@@ -1673,7 +1695,12 @@ class Toolbox:
             return _error("private IP addresses are blocked")
         try:
             start = time.perf_counter()
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": "chicen-nugget-bot/1.0"}) as http:
+            async with httpx.AsyncClient(
+                timeout=15,
+                follow_redirects=True,
+                event_hooks={"request": [ssrf_filter]},
+                headers={"User-Agent": "chicen-nugget-bot/1.0"},
+            ) as http:
                 resp = await http.get(raw)
             duration_ms = round((time.perf_counter() - start) * 1000)
             return _json({
@@ -1812,6 +1839,8 @@ class Toolbox:
 
         if not key:
             return _error("key is required for get/set/reset")
+        if key not in known_keys:
+            return _error(f"unknown setting '{raw_key}'. valid settings: {', '.join(known_keys)}")
 
         if action == "get":
             db_val = ctx.db.kv_get(f"config:{key}")
@@ -1962,24 +1991,7 @@ class Toolbox:
         return None
 
     async def _is_private_host(self, hostname: str) -> bool:
-        try:
-            if ipaddress.ip_address(hostname).is_private:
-                return True
-        except ValueError:
-            pass
-        try:
-            infos = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
-        except OSError:
-            return True
-        for info in infos:
-            address = info[4][0]
-            try:
-                ip = ipaddress.ip_address(address)
-            except ValueError:
-                continue
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-                return True
-        return False
+        return await is_private_host(hostname)
 
 
 def format_now(settings: Settings) -> str:

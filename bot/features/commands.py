@@ -25,7 +25,7 @@ from bot.slack_api import (
     user_info,
 )
 from bot.utils import dice
-from bot.utils.text import display_name, extract_id
+from bot.utils.text import display_name, escape_mrkdwn, extract_id
 from bot.utils.timeparse import parse_when
 from bot.utils.tz import tzinfo
 
@@ -331,7 +331,7 @@ async def cmd_choose(ack, command, client) -> None:
         await _say(client, command, "usage: `/choose pizza | tacos | sushi`", ephemeral=True)
         return
     choice = random.choice(options)
-    await post(client, command["channel_id"], f"<@{command['user_id']}> I pick: *{choice}*")
+    await post(client, command["channel_id"], f"<@{command['user_id']}> I pick: *{escape_mrkdwn(choice)}*")
 
 
 # -------------------------------------------------------------------- admin
@@ -450,6 +450,9 @@ async def cmd_config(ack, command, client) -> None:
             return
         raw_key = parts[1].lower()
         key = key_aliases.get(raw_key, raw_key)
+        if key not in known_keys:
+            await _say(client, command, f"unknown setting `{raw_key}`. valid settings: {', '.join(known_keys)}", ephemeral=True)
+            return
         if runtime.db:
             runtime.db.kv_del(f"config:{key}")
         if key == "recaps":
@@ -473,6 +476,9 @@ async def cmd_config(ack, command, client) -> None:
             return
         raw_key = parts[1].lower()
         key = key_aliases.get(raw_key, raw_key)
+        if key not in known_keys:
+            await _say(client, command, f"unknown setting `{raw_key}`. valid settings: {', '.join(known_keys)}", ephemeral=True)
+            return
         val = runtime.db.kv_get(f"config:{key}") if runtime.db else None
         status = f"`{val}`" if val is not None else "_(default)_"
         await _say(client, command, f"• *{key}*: {status}", ephemeral=True)
@@ -490,6 +496,9 @@ async def cmd_config(ack, command, client) -> None:
         raw_key, raw_val = parts[0].lower(), parts[1]
 
     key = key_aliases.get(raw_key, raw_key)
+    if key not in known_keys:
+        await _say(client, command, f"unknown setting `{raw_key}`. valid settings: {', '.join(known_keys)}", ephemeral=True)
+        return
     val_lower = raw_val.lower()
     if val_lower in {"off", "false", "no", "disable", "disabled", "0"}:
         norm = "false"

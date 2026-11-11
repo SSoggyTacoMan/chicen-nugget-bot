@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import ipaddress
 import logging
 import re
+import socket
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,6 +16,36 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 logger = logging.getLogger(__name__)
+
+
+async def is_private_host(hostname: str) -> bool:
+    if not hostname:
+        return True
+    try:
+        ip = ipaddress.ip_address(hostname)
+        return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
+    except ValueError:
+        pass
+    try:
+        infos = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
+    except OSError:
+        return True
+    for info in infos:
+        address = info[4][0]
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return True
+    return False
+
+
+async def ssrf_filter(request: httpx.Request) -> None:
+    host = request.url.host
+    if not host or await is_private_host(host):
+        raise ValueError(f"blocked request to private or loopback host: {host}")
+
 
 
 def error_code(exc: Exception) -> str:
@@ -291,11 +324,11 @@ async def fetch_slack_images(event: dict[str, Any], token: str, max_images: int 
         img_pattern = r'https?://[^\s<>\"\'\)\|]+\.(?:png|jpg|jpeg|webp|gif)(?:\?[^\s<>\"\'\)\|]*)?'
         found_urls = re.findall(img_pattern, text, re.IGNORECASE)[:max_images]
         if found_urls:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as http:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True, event_hooks={"request": [ssrf_filter]}) as http:
                 for img_url in found_urls:
                     parsed = urlparse(img_url)
                     host = (parsed.hostname or "").lower()
-                    if not host or host in {"localhost", "127.0.0.1", "::1"}:
+                    if not host or await is_private_host(host):
                         continue
                     try:
                         resp = await http.get(img_url)

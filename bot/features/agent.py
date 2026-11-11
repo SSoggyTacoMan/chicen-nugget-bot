@@ -17,7 +17,7 @@ from bot.slack_api import (
     unreact,
     user_info,
 )
-from bot.utils.text import chunk_text, display_name, strip_mentions
+from bot.utils.text import chunk_text, disarm_broadcasts, display_name, strip_mentions
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("dm agent turn failed")
                 answer = "something broke on my side. check my logs?"
-        for chunk in chunk_text(answer):
+        for chunk in chunk_text(disarm_broadcasts(answer)):
             await post(client, event["channel"], chunk)
     finally:
         if message_ts:
@@ -277,7 +277,7 @@ async def _handle_channel(
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return
-        for chunk in chunk_text(answer):
+        for chunk in chunk_text(disarm_broadcasts(answer)):
             await post(client, channel, chunk, thread_ts=root_ts)
         runtime.db.mark_thread(channel, root_ts)
     except Exception:  # noqa: BLE001

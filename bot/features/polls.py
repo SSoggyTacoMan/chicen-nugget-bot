@@ -9,6 +9,7 @@ from typing import Any
 
 from bot.runtime import runtime
 from bot.slack_api import post, post_ephemeral, update
+from bot.utils.text import escape_mrkdwn
 
 logger = logging.getLogger(__name__)
 
@@ -129,13 +130,15 @@ async def cmd_poll(ack, command, client) -> None:
         )
         return
     question, options = parsed
+    safe_question = escape_mrkdwn(question)
+    safe_options = [escape_mrkdwn(opt) for opt in options]
     poll_id = _new_id()
-    runtime.db.create_poll(poll_id, channel_id, question, options, user_id)
+    runtime.db.create_poll(poll_id, channel_id, safe_question, safe_options, user_id)
     poll = runtime.db.poll(poll_id)
     result = await post(
         client,
         channel_id,
-        f"poll: {question}",
+        f"poll: {safe_question}",
         blocks=_blocks(poll, [0] * len(options), 0),
     )
     if result:

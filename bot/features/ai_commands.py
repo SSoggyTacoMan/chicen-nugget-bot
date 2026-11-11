@@ -14,7 +14,7 @@ import httpx
 from bot.runtime import runtime
 from bot.ai.limits import user_retry_after
 from bot.slack_api import error_code, post, post_ephemeral
-from bot.utils.text import chunk_text
+from bot.utils.text import chunk_text, disarm_broadcasts, escape_mrkdwn
 from bot.utils.tz import tzinfo
 
 logger = logging.getLogger(__name__)
@@ -71,10 +71,10 @@ async def cmd_ask(ack, command, client) -> None:
 
 
 async def _post_answer(client, channel: str, user: str, question: str, answer: str) -> None:
-    chunks = chunk_text(answer)
+    chunks = chunk_text(disarm_broadcasts(answer))
     if not chunks:
         chunks = ["i blanked on that one. try rephrasing?"]
-    header = f":speech_balloon: <@{user}> asked: {question}"
+    header = f":speech_balloon: <@{user}> asked: {escape_mrkdwn(question)}"
     for index, chunk in enumerate(chunks):
         text = f"{header}\n\n{chunk}" if index == 0 else chunk
         await post(client, channel, text)
@@ -132,7 +132,7 @@ async def cmd_summarize(ack, command, client) -> None:
         user_id=user,
     )
     header = f":newspaper: *catch-up for <#{channel}>* — last {len(transcript)} messages"
-    chunks = chunk_text(summary)
+    chunks = chunk_text(disarm_broadcasts(summary))
     if not chunks:
         chunks = ["nothing memorable happened."]
     for index, chunk in enumerate(chunks):
