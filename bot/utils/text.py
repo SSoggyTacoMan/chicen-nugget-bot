@@ -66,16 +66,18 @@ def extract_id(value: str, prefix: str) -> str | None:
         m = re.match(r"^<@?([UW][A-Z0-9]+)(?:\|[^>]+)?>$", value, re.IGNORECASE)
         if m:
             return m.group(1).upper()
-        m = re.match(r"^@?([UW][A-Z0-9]+)$", value, re.IGNORECASE)
-        if m:
+        m = re.match(r"^@?([UW][A-Z0-9]{8,14})$", value, re.IGNORECASE)
+        if m and re.search(r"\d", m.group(1)):
             return m.group(1).upper()
-    elif p in {"#", "C", "G"}:
+        return None
+    if p in {"#", "C", "G"}:
         m = re.match(r"^<#?([CG][A-Z0-9]+)(?:\|[^>]+)?>$", value, re.IGNORECASE)
         if m:
             return m.group(1).upper()
-        m = re.match(r"^#?([CG][A-Z0-9]+)$", value, re.IGNORECASE)
-        if m:
+        m = re.match(r"^#?([CG][A-Z0-9]{8,14})$", value, re.IGNORECASE)
+        if m and re.search(r"\d", m.group(1)):
             return m.group(1).upper()
+        return None
     match = re.match(rf"^<[{prefix}]([A-Z0-9]+)(?:\|[^>]+)?>$", value, re.IGNORECASE)
     if match:
         return match.group(1).upper()
