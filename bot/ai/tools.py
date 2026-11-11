@@ -15,7 +15,6 @@ import io
 import json
 import logging
 import os
-from pathlib import Path
 import random
 import re
 import sys
@@ -24,6 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
 
@@ -89,6 +89,45 @@ WEATHER_CODES = {
     96: "thunderstorm with hail",
     99: "heavy thunderstorm with hail",
 }
+
+
+def _notes_dir(settings: Settings) -> Path:
+    p = settings.data_dir / "notes"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _sanitize_topic(topic: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_\-]", "", topic.strip().lower())
+    return cleaned or "general"
+
+
+def _list_note_files(settings: Settings) -> list[Path]:
+    d = _notes_dir(settings)
+    return sorted(d.glob("*.md"))
+
+
+def _notes_index(settings: Settings) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for f in _list_note_files(settings):
+        desc = ""
+        try:
+            head = f.read_text(encoding="utf-8")[:1000]
+            m = re.search(r"^description:\s*(.+)$", head, re.MULTILINE)
+            if m:
+                desc = m.group(1).strip()
+            elif head:
+                first = [
+                    line.strip("# -")
+                    for line in head.splitlines()
+                    if line.strip() and not line.startswith("---")
+                ]
+                if first:
+                    desc = first[0][:80]
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.debug("failed reading note %s: %s", f.name, exc)
+        out.append({"file": f.name, "topic": f.stem, "description": desc or "(no description)"})
+    return out
 
 
 @dataclass
@@ -448,15 +487,34 @@ class Toolbox:
             ),
             tool(
                 "remember",
-                "Save a durable note the owner wants you to remember. Owner/admin only.",
-                {"text": {"type": "string", "description": "The fact or note to store."}},
+                "Save a durable note or rule in markdown memory and database. Owner/admin only.",
+                {
+                    "text": {"type": "string", "description": "The fact, rule, or note to store."},
+                    "topic": {
+                        "type": "string",
+                        "description": "Optional category or file name (e.g. 'rules', 'projects', 'people'). Defaults to 'general'.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional 1-line summary of what this topic note covers (used for the memory index).",
+                    },
+                },
                 ["text"],
             ),
             tool(
                 "recall",
-                "Search your saved notes and past AI conversation turns. Owner/admin only.",
-                {"query": {"type": "string", "description": "What to search for. Omit for recent notes."}},
-                ["query"],
+                "Search your markdown memory notes and conversation history. Owner/admin only.",
+                {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for across notes and history. Omit to list the notes index and recent notes.",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "Optional specific topic/note file to read in full (e.g. 'rules', 'general').",
+                    },
+                },
+                [],
             ),
             tool(
                 "post_message",
@@ -1179,20 +1237,69 @@ class Toolbox:
         text = str(args.get("text") or "").strip()
         if not text:
             return _error("nothing to remember")
-        note_id = ctx.db.add_note(ctx.user_id, text)
-        return f"saved note #{note_id}."
+        topic = _sanitize_topic(str(args.get("topic") or "general"))
+        desc = str(args.get("description") or "").strip()
+
+        note_id = ctx.db.add_note(ctx.user_id, f"[{topic}] {text}" if topic != "general" else text)
+
+        notes_dir = _notes_dir(ctx.settings)
+        note_file = notes_dir / f"{topic}.md"
+        bullet = f"- {text}\n"
+
+        if not note_file.exists():
+            file_desc = desc or f"notes about {topic}"
+            content = f"---\ndescription: {file_desc}\n---\n\n## {topic.title()}\n{bullet}"
+            note_file.write_text(content, encoding="utf-8")
+        else:
+            existing = note_file.read_text(encoding="utf-8")
+            if desc and existing.startswith("---"):
+                existing = re.sub(
+                    r"^description:\s*.*$",
+                    f"description: {desc}",
+                    existing,
+                    count=1,
+                    flags=re.MULTILINE,
+                )
+            note_file.write_text(existing.rstrip() + f"\n{bullet}", encoding="utf-8")
+
+        return f"saved note #{note_id} to notes/{topic}.md."
 
     async def _tool_recall(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can search memory")
+        topic_arg = str(args.get("topic") or "").strip()
         query = str(args.get("query") or "").strip()
+
+        if topic_arg:
+            topic = _sanitize_topic(topic_arg)
+            note_file = _notes_dir(ctx.settings) / f"{topic}.md"
+            if note_file.exists():
+                content = note_file.read_text(encoding="utf-8")[:MAX_TOOL_RESULT]
+                return f"content of notes/{topic}.md:\n{content}"
+            return f"no note file found for topic '{topic}'."
+
+        markdown_hits: list[str] = []
         if query:
+            q_lower = query.lower()
+            for f in _list_note_files(ctx.settings):
+                try:
+                    for line in f.read_text(encoding="utf-8").splitlines():
+                        if q_lower in line.lower():
+                            clean_line = line.strip()
+                            if clean_line:
+                                markdown_hits.append(f"notes/{f.name}: {clean_line}")
+                except (OSError, UnicodeDecodeError) as exc:
+                    logger.debug("failed searching note %s: %s", f.name, exc)
             notes = ctx.db.search_notes(query, 10)
             turns = ctx.db.search_messages(query, 10)
         else:
             notes = ctx.db.recent_notes(10)
             turns = []
+
+        index = _notes_index(ctx.settings)
         payload = {
+            "notes_files": [f"- notes/{item['file']}: {item['description']}" for item in index],
+            "markdown_matches": markdown_hits[:15],
             "notes": [{"id": row["id"], "text": row["text"], "at": row["created_at"]} for row in notes],
             "conversations": [
                 {
@@ -1204,7 +1311,12 @@ class Toolbox:
                 for row in turns
             ],
         }
-        if not payload["notes"] and not payload["conversations"]:
+        if (
+            not payload["notes_files"]
+            and not payload["markdown_matches"]
+            and not payload["notes"]
+            and not payload["conversations"]
+        ):
             return "nothing found in memory."
         return _json(payload)
 
