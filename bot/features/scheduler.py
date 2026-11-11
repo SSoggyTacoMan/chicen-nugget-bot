@@ -86,34 +86,42 @@ def _ensure_digest_job() -> None:
 
 
 def _ensure_recap_jobs() -> None:
-    if runtime.db and runtime.db.kv_get("config:recaps") == "false":
-        return
     settings = runtime.settings
-    if not settings.recaps_enabled or not settings.owner_user_id:
+    channel = recaps.recap_channel_id()
+    if not channel or not settings.owner_user_id or not settings.recap_time:
+        if runtime.db:
+            runtime.db.cancel_reminders_by_kind("recap_public")
+            runtime.db.cancel_reminders_by_kind("recap_reminder")
         return
     tz = tzinfo()
 
-    if not runtime.db.find_recurring("recap_public", settings.owner_user_id):
+    existing = runtime.db.find_recurring("recap_public", settings.owner_user_id) if runtime.db else None
+    if existing and existing.get("target") != channel:
+        if runtime.db:
+            runtime.db.cancel_reminders_by_kind("recap_public")
+        existing = None
+
+    if not existing:
         parsed = parse_when(f"daily {settings.recap_time} daily recap", tz=tz)
         if parsed:
             reminder = create_reminder(
                 runtime.db,
                 settings,
                 user_id=settings.owner_user_id,
-                target=settings.recap_channel_id or "",
+                target=channel,
                 parsed=parsed,
                 text="daily recap",
                 tz=tz,
                 kind="recap_public",
             )
             if reminder:
-                logger.info("daily recap scheduled for %s", settings.recap_time)
+                logger.info("daily recap scheduled for %s in %s", settings.recap_time, channel)
         else:
             logger.warning("could not parse RECAP_TIME=%s", settings.recap_time)
 
     if not settings.recap_reminder_minutes or not _personal_updates_on():
         return
-    if runtime.db.find_recurring("recap_reminder", settings.owner_user_id):
+    if runtime.db and runtime.db.find_recurring("recap_reminder", settings.owner_user_id):
         return
     reminder_time = _shift_hhmm(settings.recap_time or "00:00", -settings.recap_reminder_minutes)
     parsed = parse_when(f"daily {reminder_time} recap reminder", tz=tz)
@@ -166,11 +174,12 @@ async def _deliver(reminder: dict) -> None:
     if client is None:
         return
     if reminder.get("kind") == "recap_public":
-        if runtime.db and runtime.db.kv_get("config:recaps") == "false":
-            logger.info("skipped recap_public: recaps disabled via config")
+        target = reminder.get("target") or recaps.recap_channel_id()
+        if not target or (runtime.db and runtime.db.kv_get(f"config:recaps:{target}") == "false"):
+            logger.info("skipped recap_public: recaps disabled for channel %s", target)
             return
-        await recaps.post_public_prompt(client)
-        logger.info("delivered daily recap prompt")
+        await recaps.post_public_prompt(client, target_channel=target)
+        logger.info("delivered daily recap prompt to %s", target)
         return
     if reminder.get("kind") == "recap_reminder":
         if runtime.db and runtime.db.kv_get("config:recaps") == "false":

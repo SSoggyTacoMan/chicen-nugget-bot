@@ -419,6 +419,10 @@ async def cmd_config(ack, command, client) -> None:
         "recap": "recaps",
         "daily_recap": "recaps",
         "daily_recaps": "recaps",
+        "recap_channel": "recap_channel_id",
+        "recap_chan": "recap_channel_id",
+        "recap_private_channel": "recap_private_channel_id",
+        "private_recap_channel": "recap_private_channel_id",
         "digest": "daily_digest",
         "access": "tier2",
         "tier2_channel": "access_channel_id",
@@ -434,6 +438,8 @@ async def cmd_config(ack, command, client) -> None:
     }
     known_keys = [
         "recaps",
+        "recap_channel_id",
+        "recap_private_channel_id",
         "daily_digest",
         "personal_updates",
         "welcomer",
@@ -510,10 +516,35 @@ async def cmd_config(ack, command, client) -> None:
     if key not in known_keys:
         await _say(client, command, f"unknown setting `{raw_key}`. valid settings: {', '.join(known_keys)}", ephemeral=True)
         return
+
+    # Per-channel recap toggle: /nugget config recaps <channel> off/on
+    if key == "recaps" and len(parts) >= 3:
+        target_part = parts[1] if action != "set" else parts[2]
+        toggle_part = parts[2] if action != "set" else (parts[3] if len(parts) > 3 else "false")
+        m_chan = re.search(r"[CG][A-Z0-9]{8,}", target_part, re.IGNORECASE)
+        chan_id = m_chan.group(0).upper() if m_chan else target_part.strip("#")
+        chan_toggle = "false" if toggle_part.lower() in {"off", "false", "no", "disable", "disabled", "0"} else "true"
+        if runtime.db:
+            runtime.db.kv_set(f"config:recaps:{chan_id}", chan_toggle)
+            try:
+                from bot.features import scheduler
+                scheduler._ensure_recap_jobs()
+            except Exception:
+                pass
+        action_word = "disabled" if chan_toggle == "false" else "enabled"
+        await _say(client, command, f":white_check_mark: daily recaps {action_word} for <#{chan_id}>.", ephemeral=True)
+        return
+
     val_lower = raw_val.lower()
     if key == "admin_channel_id":
         if val_lower in {"dm", "dms", "none", "off", "false", "no", "disable", "disabled", "0"}:
             norm = "dm"
+        else:
+            m = re.search(r"[CG][A-Z0-9]{8,}", raw_val, re.IGNORECASE)
+            norm = m.group(0).upper() if m else raw_val.strip("#")
+    elif key in {"recap_channel_id", "recap_private_channel_id"}:
+        if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0"}:
+            norm = "none"
         else:
             m = re.search(r"[CG][A-Z0-9]{8,}", raw_val, re.IGNORECASE)
             norm = m.group(0).upper() if m else raw_val.strip("#")
@@ -531,18 +562,22 @@ async def cmd_config(ack, command, client) -> None:
     if runtime.db:
         runtime.db.kv_set(f"config:{key}", norm)
 
-    if key == "recaps":
-        if norm == "false":
+    if key in {"recaps", "recap_channel_id"}:
+        if norm in {"false", "none"}:
             if runtime.db:
                 runtime.db.cancel_reminders_by_kind("recap_public")
                 runtime.db.cancel_reminders_by_kind("recap_reminder")
-            await _say(client, command, ":white_check_mark: daily recaps disabled and pending reminders cancelled.", ephemeral=True)
+            msg = ":white_check_mark: daily recaps disabled and pending reminders cancelled."
+            await _say(client, command, msg, ephemeral=True)
             return
         try:
             from bot.features import scheduler
             scheduler._ensure_recap_jobs()
         except Exception:
             pass
+        if key == "recap_channel_id":
+            await _say(client, command, f":white_check_mark: daily recap channel set to <#{norm}>.", ephemeral=True)
+            return
         await _say(client, command, ":white_check_mark: daily recaps enabled.", ephemeral=True)
         return
 

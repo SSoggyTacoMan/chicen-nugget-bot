@@ -21,6 +21,7 @@ REQUIRED = {
     "bot_user_id",
     "assistant_user_id",
     "active_identity",
+    "memory",
 }
 
 

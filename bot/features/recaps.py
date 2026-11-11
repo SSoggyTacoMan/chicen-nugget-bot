@@ -19,18 +19,34 @@ PUBLIC_ACTION = "public_daily_recap"
 PRIVATE_ACTION = "private_daily_recap"
 
 
+def recap_channel_id() -> str | None:
+    if runtime.db and runtime.db.kv_get("config:recaps") == "false":
+        return None
+    val = runtime.db.kv_get("config:recap_channel_id") if runtime.db else None
+    if val and val.lower() in {"none", "off", "false", "disabled", "0"}:
+        return None
+    channel = val or runtime.settings.recap_channel_id
+    if not channel or channel.lower() in {"none", "off", "false", "disabled", "0"}:
+        return None
+    if runtime.db and runtime.db.kv_get(f"config:recaps:{channel}") == "false":
+        return None
+    return channel
+
+
 def register(app) -> None:
     app.action(PUBLIC_ACTION)(on_public_done)
     app.action(PRIVATE_ACTION)(on_private_done)
 
 
-async def post_public_prompt(client) -> dict[str, Any] | None:
-    if runtime.db and runtime.db.kv_get("config:recaps") == "false":
+async def post_public_prompt(client, target_channel: str | None = None) -> dict[str, Any] | None:
+    channel = target_channel or recap_channel_id()
+    if not channel:
+        return None
+    if runtime.db and runtime.db.kv_get(f"config:recaps:{channel}") == "false":
         return None
     settings = runtime.settings
-    channel = settings.recap_channel_id
     owner = settings.owner_user_id
-    if not channel or not owner:
+    if not owner:
         return None
     text = f"hi <@{owner}>, daily recap time! how was your day? :3"
     blocks = [
@@ -56,9 +72,13 @@ async def post_private_prompt(
     client, public_permalink: str | None = None
 ) -> dict[str, Any] | None:
     settings = runtime.settings
-    channel = settings.recap_private_channel_id
+    channel = (
+        runtime.db.kv_get("config:recap_private_channel_id") if runtime.db else None
+    ) or settings.recap_private_channel_id
     owner = settings.owner_user_id
-    if not channel or not owner:
+    if not channel or not owner or channel.lower() in {"none", "off", "false", "disabled", "0"}:
+        return None
+    if runtime.db and runtime.db.kv_get(f"config:recaps:{channel}") == "false":
         return None
     text = f"<@{owner}>, private recap time! :3"
     if public_permalink:
@@ -138,15 +158,21 @@ async def cmd_recap(ack, command, client) -> None:
     if not settings.is_admin(user):
         await post_ephemeral(client, channel, user, "only admins can trigger the recap.")
         return
-    if not settings.recap_channel_id:
-        await post_ephemeral(client, channel, user, "recaps are off. set `RECAP_CHANNEL_ID` first.")
+    target = recap_channel_id()
+    if not target:
+        await post_ephemeral(
+            client,
+            channel,
+            user,
+            "recaps are off or no channel is configured. set `RECAP_CHANNEL_ID` or `/nugget config recap_channel <channel>`.",
+        )
         return
-    result = await post_public_prompt(client)
+    result = await post_public_prompt(client, target_channel=target)
     if result:
-        await post_ephemeral(client, channel, user, "recap prompt sent.")
+        await post_ephemeral(client, channel, user, f"recap prompt sent to <#{target}>.")
     else:
         await post_ephemeral(
-            client, channel, user, "couldn't post the recap prompt; check that i'm in the channel."
+            client, channel, user, f"couldn't post the recap prompt to <#{target}>; check that i'm in the channel."
         )
 
 
@@ -217,4 +243,4 @@ async def _tell(body: dict[str, Any], client, text: str) -> None:
         await post_ephemeral(client, channel, user, text)
 
 
-__all__ = ["register", "post_public_prompt", "post_private_prompt"]
+__all__ = ["register", "post_public_prompt", "post_private_prompt", "recap_channel_id"]
