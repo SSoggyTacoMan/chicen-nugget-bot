@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,27 @@ class Agent:
             if (role == "owner" or self.settings.is_admin(user_id))
             else "none"
         )
+        has_google = bool(
+            self.settings.google_access_token
+            or self.settings.google_refresh_token
+            or (self.db and self.db.kv_get("config:google_access_token"))
+            or (self.db and self.db.kv_get("config:google_refresh_token"))
+        )
+        has_mac = bool(
+            self.settings.mac_bridge_url
+            or (self.db and self.db.kv_get("config:mac_bridge_url"))
+            or (sys.platform == "darwin" and not self.settings.mac_bridge_url)
+        )
+        gh_user = (
+            (self.db.kv_get("config:github_username") if self.db else None)
+            or self.settings.github_username
+            or "SSoggyTacoMan"
+        )
+        integrations = (
+            f"- GitHub & Hackatime: connected (default user: {gh_user})\n"
+            f"- Google Workspace (Calendar, Gmail, Drive): {'connected' if has_google else 'not configured'}\n"
+            f"- Mac companion link (Volume, Apps, Clipboard, Shell): {'connected' if has_mac else 'not configured'}"
+        )
         system = (
             self.system_template.replace("{bot_name}", self.settings.bot_name)
             .replace("{bot_user_id}", self.bot_user_id or "unknown")
@@ -135,6 +157,7 @@ class Agent:
             .replace("{trigger}", TRIGGER_TEXT.get(trigger, TRIGGER_TEXT["mention"]))
             .replace("{jev}", jev or "no extra classification")
             .replace("{memory}", memory)
+            .replace("{integrations}", integrations)
             .replace("{ai_model}", self.settings.ai_model)
             .replace("{ai_fallback_model}", self.settings.ai_fallback_model or "none")
             .replace("{imagine_model}", self.settings.imagine_model or "none")

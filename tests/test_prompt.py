@@ -22,6 +22,7 @@ REQUIRED = {
     "assistant_user_id",
     "active_identity",
     "memory",
+    "integrations",
 }
 
 
