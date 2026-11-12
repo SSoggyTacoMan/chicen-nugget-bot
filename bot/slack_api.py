@@ -301,7 +301,9 @@ async def invite_to_channel(
         return False, code
 
 
-async def fetch_slack_images(event: dict[str, Any], token: str, max_images: int = 3) -> list[str]:
+async def fetch_slack_images(
+    event: dict[str, Any], token: str, max_images: int = 3, cookie: str | None = None
+) -> list[str]:
     files = event.get("files") or []
     if not files and isinstance(event.get("message"), dict):
         files = event["message"].get("files") or []
@@ -316,6 +318,9 @@ async def fetch_slack_images(event: dict[str, Any], token: str, max_images: int 
 
     data_urls: list[str] = []
     if images and token:
+        slack_headers = {"Authorization": f"Bearer {token}"}
+        if cookie:
+            slack_headers["Cookie"] = f"d={cookie}"
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as http:
             for f in images:
                 url = f.get("url_private_download") or f.get("url_private")
@@ -324,7 +329,7 @@ async def fetch_slack_images(event: dict[str, Any], token: str, max_images: int 
                 if not url or (size and size > 15 * 1024 * 1024):
                     continue
                 try:
-                    resp = await http.get(url, headers={"Authorization": f"Bearer {token}"})
+                    resp = await http.get(url, headers=slack_headers)
                     if resp.status_code == 200 and resp.content:
                         b64 = base64.b64encode(resp.content).decode("ascii")
                         data_urls.append(f"data:{mimetype};base64,{b64}")
@@ -361,3 +366,153 @@ async def fetch_slack_images(event: dict[str, Any], token: str, max_images: int 
                         logger.warning("exception fetching image url %s: %s", img_url, exc)
 
     return data_urls
+
+
+_AUDIO_EXTS = {"mp3", "m4a", "wav", "ogg", "oga", "opus", "webm", "flac", "aac"}
+
+
+def _is_audio_file(f: dict[str, Any]) -> bool:
+    mime = str(f.get("mimetype") or "").lower()
+    ftype = str(f.get("filetype") or "").lower()
+    subtype = str(f.get("subtype") or "").lower()
+    if mime.startswith("audio/") or subtype in {"slack_audio", "voice_message", "audio"}:
+        return True
+    if f.get("audio_wave_samples") is not None:
+        return True
+    if ftype in _AUDIO_EXTS and not mime.startswith("video/"):
+        return True
+    return ftype == "webm" and mime in {"video/webm", "audio/webm", ""} and bool(f.get("duration_ms"))
+
+
+def _slack_file_transcript(f: dict[str, Any]) -> str:
+    tr = f.get("transcription")
+    if not isinstance(tr, dict):
+        return ""
+    if tr.get("text"):
+        return str(tr["text"]).strip()
+    preview = tr.get("preview")
+    if isinstance(preview, dict) and preview.get("content"):
+        return str(preview["content"]).strip()
+    return ""
+
+
+async def transcribe_slack_audio(
+    event: dict[str, Any],
+    token: str,
+    settings: Any,
+    cookie: str | None = None,
+    max_clips: int = 2,
+) -> list[str]:
+    """Extract or transcribe Slack voice messages and audio clips."""
+    files = event.get("files") or []
+    if not files and isinstance(event.get("message"), dict):
+        files = event["message"].get("files") or []
+
+    clips = [f for f in files if isinstance(f, dict) and _is_audio_file(f)][:max_clips]
+    if not clips:
+        return []
+
+    slack_headers = {"Authorization": f"Bearer {token}"} if token else {}
+    if cookie and slack_headers:
+        slack_headers["Cookie"] = f"d={cookie}"
+
+    api_key = getattr(settings, "ai_api_key", None)
+    base_url = str(getattr(settings, "ai_base_url", "") or "").rstrip("/")
+    transcripts: list[str] = []
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http:
+        for f in clips:
+            name = str(f.get("name") or f.get("title") or "voice-message.webm")
+            existing = _slack_file_transcript(f)
+            if existing:
+                transcripts.append(existing)
+                continue
+
+            url = f.get("url_private_download") or f.get("url_private")
+            size = f.get("size", 0)
+            if not url or not token or (size and size > 25 * 1024 * 1024):
+                transcripts.append(f"[Voice message attached: {name}, could not download]")
+                continue
+
+            try:
+                dl = await http.get(url, headers=slack_headers)
+                if dl.status_code != 200 or not dl.content:
+                    logger.warning("failed to fetch slack audio %s: HTTP %s", url, dl.status_code)
+                    transcripts.append(f"[Voice message attached: {name}, download HTTP {dl.status_code}]")
+                    continue
+                audio_bytes = dl.content
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("exception fetching slack audio %s: %s", url, exc)
+                transcripts.append(f"[Voice message attached: {name}, download failed]")
+                continue
+
+            if not api_key or not base_url:
+                transcripts.append(f"[Voice message attached: {name}, AI transcription not configured]")
+                continue
+
+            mimetype = str(f.get("mimetype") or "audio/webm")
+            ftype = str(f.get("filetype") or name.rsplit(".", 1)[-1] if "." in name else "webm").lower()
+            if ftype == "oga":
+                ftype = "ogg"
+            ai_headers = {"Authorization": f"Bearer {api_key}"}
+
+            text = ""
+            # 1. Standard OpenAI /audio/transcriptions endpoint
+            try:
+                tr_resp = await http.post(
+                    f"{base_url}/audio/transcriptions",
+                    headers=ai_headers,
+                    files={"file": (name, audio_bytes, mimetype)},
+                    data={"model": "whisper-1"},
+                )
+                if tr_resp.status_code == 200:
+                    text = str(tr_resp.json().get("text") or "").strip()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("whisper transcription attempt failed: %s", exc)
+
+            # 2. Fallback to multimodal chat/completions input_audio
+            if not text:
+                b64 = base64.b64encode(audio_bytes).decode("ascii")
+                fmt = ftype if ftype in {"wav", "mp3", "ogg", "m4a", "webm", "flac", "aac"} else "mp3"
+                for model_id in ("google/gemini-2.5-flash", getattr(settings, "ai_model", "")):
+                    if not model_id:
+                        continue
+                    try:
+                        chat_resp = await http.post(
+                            f"{base_url}/chat/completions",
+                            headers=ai_headers,
+                            json={
+                                "model": model_id,
+                                "messages": [
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": "Transcribe this voice message verbatim. Output only the transcript text.",
+                                            },
+                                            {
+                                                "type": "input_audio",
+                                                "input_audio": {"data": b64, "format": fmt},
+                                            },
+                                        ],
+                                    }
+                                ],
+                                "max_tokens": 800,
+                            },
+                        )
+                        if chat_resp.status_code == 200:
+                            choices = chat_resp.json().get("choices") or []
+                            if choices:
+                                text = str((choices[0].get("message") or {}).get("content") or "").strip()
+                                if text:
+                                    break
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("chat audio transcription fallback failed (%s): %s", model_id, exc)
+
+            if text:
+                transcripts.append(text)
+            else:
+                transcripts.append(f"[Voice message attached: {name}, transcription failed]")
+
+    return transcripts
