@@ -1,7 +1,7 @@
 import random
 
 from bot.utils.dice import roll
-from bot.utils.text import chunk_text, extract_id, format_mrkdwn
+from bot.utils.text import chunk_text, extract_id, format_mrkdwn, has_owner_signature
 
 
 def test_dice_basic():
@@ -83,19 +83,26 @@ def test_format_mrkdwn_closes_dangling_fences():
 
 
 def test_extract_id():
-    assert extract_id("<@U091GMQ14KV|maaren>", "@") == "U091GMQ14KV"
-    assert extract_id("<@U091GMQ14KV>", "@") == "U091GMQ14KV"
-    assert extract_id("@U091GMQ14KV", "@") == "U091GMQ14KV"
-    assert extract_id("U091GMQ14KV", "@") == "U091GMQ14KV"
-    assert extract_id("<@U091GMQ14KV|maaren>", "U") == "U091GMQ14KV"
+    assert extract_id("<@U0OWNER01|owner>", "@") == "U0OWNER01"
+    assert extract_id("<@U0OWNER01>", "@") == "U0OWNER01"
+    assert extract_id("@U0OWNER01", "@") == "U0OWNER01"
+    assert extract_id("U0OWNER01", "@") == "U0OWNER01"
+    assert extract_id("<@U0OWNER01|owner>", "U") == "U0OWNER01"
     assert extract_id("W0123456789", "@") == "W0123456789"
     assert extract_id("<#C0C83BAUZCK|general>", "#") == "C0C83BAUZCK"
     assert extract_id("C0C83BAUZCK", "#") == "C0C83BAUZCK"
     assert extract_id("G0C83BAUZCK", "#") == "G0C83BAUZCK"
-    assert extract_id("maaren", "@") is None
+    assert extract_id("owner", "@") is None
     assert extract_id("general", "#") is None
     assert extract_id("#general", "#") is None
     assert extract_id("wendy", "@") is None
     assert extract_id("@wendy", "@") is None
     assert extract_id("ubuntu", "@") is None
     assert extract_id("charles", "#") is None
+
+
+def test_owner_signature_detection():
+    assert has_owner_signature("test test\n\n_Sent by <@U0BOT0001>_")
+    assert has_owner_signature("Sent by <@U0BOI0001>")
+    assert not has_owner_signature("regular message")
+    assert not has_owner_signature("")

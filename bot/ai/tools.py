@@ -170,6 +170,8 @@ class ToolContext:
     is_owner: bool
     is_admin: bool
     bot_client: AsyncWebClient | None = None
+    owner_client: AsyncWebClient | None = None
+    assistant_user_id: str = ""
 
 
 class _TextExtractor(HTMLParser):
@@ -349,11 +351,24 @@ def _need_owner(ctx: ToolContext) -> bool:
 
 
 def _default_repo(settings: Settings) -> str:
-    """`https://github.com/owner/repo` -> `owner/repo`, else default."""
+    """`https://github.com/owner/repo` -> `owner/repo`, else empty."""
     match = re.search(r"github\.com/([^/\s]+/[^/\s#?]+)", settings.repo_url or "")
-    if match:
-        return match.group(1).removesuffix(".git")
-    return "SSoggyTacoMan/chicen-nugget-bot"
+    return match.group(1).removesuffix(".git") if match else ""
+
+
+def _posted_by_signature(ctx: ToolContext) -> str:
+    mention_id = ctx.assistant_user_id or ctx.bot_user_id
+    return f"_Sent by <@{mention_id}>_" if mention_id else "_Sent by chicen nugget boi_"
+
+
+def _owner_message_blocks(text: str, signature: str) -> list[dict[str, Any]] | None:
+    """Small muted signature under an owner-posted message, via Block Kit."""
+    if len(text) > 2900:
+        return None  # section blocks cap at 3000 chars; fall back to plain text
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": signature}]},
+    ]
 
 
 def _numbers(values: Any) -> list[float]:
@@ -501,13 +516,13 @@ class Toolbox:
             ),
             tool(
                 "send_dm",
-                "Send a direct message to a Slack user as the bot app or user assistant. Owner/admin only.",
+                "Send a direct message as the bot app, or through the owner's own Slack profile when as_user is true. Owner/admin only.",
                 {
                     "user": {"type": "string", "description": "User id, @name, display name, or email."},
                     "text": {"type": "string", "description": "Message text (Slack mrkdwn)."},
                     "as_user": {
                         "type": "boolean",
-                        "description": "Send as personal user assistant (Boi) instead of bot app. CRITICAL: only use when explicitly instructed or permitted by the user to send in their name. Default false.",
+                        "description": "Post through the owner's own Slack profile (SLACK_OWNER_TOKEN), with a small 'Sent by @assistant' signature. Only use when the owner explicitly asked or gave permission to post in their name. Default false (bot app).",
                     },
                 },
                 ["user", "text"],
@@ -570,13 +585,13 @@ class Toolbox:
             ),
             tool(
                 "post_message",
-                "Post a message to a Slack channel as the bot app or user assistant. Owner/admin only.",
+                "Post a message to a Slack channel as the bot app, or through the owner's own Slack profile when as_user is true. Owner/admin only.",
                 {
                     "channel": {"type": "string", "description": "Channel id, #name, or 'here'."},
                     "text": {"type": "string", "description": "Message text (Slack mrkdwn)."},
                     "as_user": {
                         "type": "boolean",
-                        "description": "Send as personal user assistant (Boi) instead of bot app. CRITICAL: only use when explicitly instructed or permitted by the user to send in their name. Default false.",
+                        "description": "Post through the owner's own Slack profile (SLACK_OWNER_TOKEN), with a small 'Sent by @assistant' signature. Only use when the owner explicitly asked or gave permission to post in their name. Default false (bot app).",
                     },
                     "thread_ts": {
                         "type": "string",
@@ -1346,9 +1361,13 @@ class Toolbox:
 
     def _get_target_client(self, ctx: ToolContext, as_user: bool) -> tuple[AsyncWebClient | None, str | None]:
         if as_user:
-            if not ctx.user_client:
-                return None, "user client is not configured (needs SLACK_USER_TOKEN)"
-            return ctx.user_client, None
+            if not ctx.owner_client:
+                return None, (
+                    "posting as you is not configured. add SLACK_OWNER_TOKEN with your own "
+                    "Slack user token (xoxp-..., or xoxc-... plus SLACK_OWNER_COOKIE) and restart me. "
+                    "slack does not allow one account to post as another, so Boi's token cannot post as you."
+                )
+            return ctx.owner_client, None
         return ctx.bot_client or ctx.client, None
 
     async def _tool_get_channel_history(self, args: dict[str, Any], ctx: ToolContext) -> str:
@@ -1432,11 +1451,16 @@ class Toolbox:
                 target = dm_id
         except Exception as exc:  # noqa: BLE001 - fall back to posting with user_id directly
             logger.debug("conversations_open failed for %s: %s", user_id, error_code(exc))
-        if as_user and "_sent by chicen nugget boi_" not in text.lower():
-            text = f"{text}\n\n_sent by chicen nugget boi_"
-        if not await post(target_client, target, disarm_broadcasts(format_mrkdwn(text))):
+        formatted = disarm_broadcasts(format_mrkdwn(text))
+        blocks = None
+        if as_user:
+            signature = _posted_by_signature(ctx)
+            if "sent by <@" not in formatted.lower():
+                blocks = _owner_message_blocks(formatted, signature)
+                formatted = f"{formatted}\n\n{signature}"
+        if not await post(target_client, target, formatted, blocks=blocks):
             return _error("slack rejected the DM")
-        sender = "Boi (user account)" if as_user else "Bot app"
+        sender = "your profile (owner)" if as_user else "Bot app"
         return f"sent a DM to <@{user_id}> as {sender}."
 
     async def _tool_nugget_fact(self, args: dict[str, Any], ctx: ToolContext) -> str:
@@ -1658,12 +1682,23 @@ class Toolbox:
         if err or not target_client:
             return _error(err or "slack client not available")
         thread_ts = str(args.get("thread_ts") or "").strip() or None
-        if as_user and "_sent by chicen nugget boi_" not in text.lower():
-            text = f"{text}\n\n_sent by chicen nugget boi_"
-        result = await post(target_client, channel_id, disarm_broadcasts(format_mrkdwn(text)), thread_ts=thread_ts)
+        formatted = disarm_broadcasts(format_mrkdwn(text))
+        blocks = None
+        if as_user:
+            signature = _posted_by_signature(ctx)
+            if "sent by <@" not in formatted.lower():
+                blocks = _owner_message_blocks(formatted, signature)
+                formatted = f"{formatted}\n\n{signature}"
+        result = await post(
+            target_client,
+            channel_id,
+            formatted,
+            blocks=blocks,
+            thread_ts=thread_ts,
+        )
         if not result:
             return _error("slack rejected the message")
-        sender = "Boi (user account)" if as_user else "Bot app"
+        sender = "your profile (owner)" if as_user else "Bot app"
         loc = f"<#{channel_id}> (thread {thread_ts})" if thread_ts else f"<#{channel_id}>"
         return f"posted to {loc} (ts {result.get('ts')}) as {sender}."
 
@@ -1778,9 +1813,12 @@ class Toolbox:
         channel_id = await self._resolve_channel(ctx, channel_val)
         if not channel_id:
             return _error(f"could not resolve channel {channel_val!r}")
-        target_client, err = self._get_target_client(ctx, as_user)
-        if err or not target_client:
-            return _error(err or "slack client not available")
+        if as_user:
+            if ctx.user_client is None:
+                return _error("SLACK_USER_TOKEN is not configured, so Boi cannot react")
+            target_client = ctx.user_client
+        else:
+            target_client = ctx.bot_client or ctx.client
         sender = "Boi" if as_user else "Bot app"
         try:
             if action == "add":
@@ -2835,10 +2873,13 @@ class Toolbox:
             args.get("username")
             or (ctx.db.kv_get("config:github_username") if ctx.db else "")
             or ctx.settings.github_username
-            or "SSoggyTacoMan"
+            or ""
         ).strip()
         if not username:
-            return _error("username is required; set GITHUB_USERNAME for a default")
+            return _error(
+                "username is required. set a default with "
+                "`/nugget config github_username <your-hackatime-username>` first"
+            )
         url = f"https://hackatime.hackclub.com/api/v1/users/{quote(username)}/stats"
         try:
             async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "chicen-nugget-bot"}) as http:
@@ -3483,6 +3524,10 @@ class Toolbox:
             "recap_private_channel": "recap_private_channel_id",
             "private_recap_channel": "recap_private_channel_id",
             "digest": "daily_digest",
+            "watch": "watched_channel_ids",
+            "watched": "watched_channel_ids",
+            "watched_channels": "watched_channel_ids",
+            "welcomer_channels": "watched_channel_ids",
             "access": "tier2",
             "tier2_channel": "access_channel_id",
             "access_channel": "access_channel_id",
@@ -3496,6 +3541,12 @@ class Toolbox:
             "threads": "thread_followups",
             "github": "github_username",
             "gh_user": "github_username",
+            "model": "ai_model",
+            "bot_model": "ai_model",
+            "fallback_model": "ai_fallback_model",
+            "assistant_model": "ai_assistant_model",
+            "boi_model": "ai_assistant_model",
+            "boi_fallback_model": "ai_assistant_fallback_model",
             "google_token": "google_access_token",
             "google_auth": "google_access_token",
             "mac_url": "mac_bridge_url",
@@ -3507,6 +3558,7 @@ class Toolbox:
             "recap_private_channel_id",
             "daily_digest",
             "welcomer",
+            "watched_channel_ids",
             "tier2",
             "access_channel_id",
             "admin_channel_id",
@@ -3515,6 +3567,10 @@ class Toolbox:
             "personal_updates",
             "weather_location",
             "github_username",
+            "ai_model",
+            "ai_fallback_model",
+            "ai_assistant_model",
+            "ai_assistant_fallback_model",
             "google_access_token",
             "google_refresh_token",
             "google_client_id",
@@ -3605,7 +3661,25 @@ class Toolbox:
                 return _error("value is required when setting a config")
 
             val_lower = value.lower()
-            if key == "admin_channel_id":
+            if key == "watched_channel_ids":
+                if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0", "clear"}:
+                    normalized_val = ""
+                elif val_lower in {"all", "*", "everywhere"}:
+                    normalized_val = "*"
+                else:
+                    parts = [part.strip() for part in value.split(",") if part.strip()]
+                    ids: list[str] = []
+                    for part in parts:
+                        match = re.search(r"[CG][A-Z0-9]{8,}", part, re.IGNORECASE)
+                        token = (
+                            match.group(0).upper()
+                            if match
+                            else await self._resolve_channel(ctx, part)
+                        )
+                        if token and token not in ids:
+                            ids.append(token)
+                    normalized_val = ",".join(ids)
+            elif key == "admin_channel_id":
                 if val_lower in {"dm", "dms", "none", "off", "false", "no", "disable", "disabled", "0"}:
                     normalized_val = "dm"
                 else:
@@ -3630,6 +3704,22 @@ class Toolbox:
                     normalized_val = value
 
             ctx.db.kv_set(f"config:{key}", normalized_val)
+
+            if key == "watched_channel_ids":
+                if not normalized_val:
+                    return "welcomer disabled: the watched channel list is empty."
+                if normalized_val == "*":
+                    return "welcomer will now greet joins/leaves in every channel the bot is in."
+                mentions = ", ".join(f"<#{cid}>" for cid in normalized_val.split(",") if cid)
+                return f"welcomer now watches: {mentions}."
+
+            if key in {
+                "ai_model",
+                "ai_fallback_model",
+                "ai_assistant_model",
+                "ai_assistant_fallback_model",
+            }:
+                return f"*{key}* set to `{normalized_val}`. it applies to new turns."
 
             if key == "admin_channel_id":
                 if normalized_val == "dm":

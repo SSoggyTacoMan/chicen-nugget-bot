@@ -407,6 +407,8 @@ def test_agent_reply_with_images(tmp_path):
     settings.ai_base_url = "https://ai.hackclub.com/proxy/v1"
     settings.ai_model = "test-model"
     settings.ai_fallback_model = ""
+    settings.ai_assistant_model = "assistant-model"
+    settings.ai_assistant_fallback_model = ""
     settings.imagine_model = "test-imagine"
     settings.ai_gate_model = "test-gate"
     settings.ai_max_context_chars = 1000
@@ -926,11 +928,11 @@ def test_send_dm_resolves_bare_id_and_me():
     from bot.ai.tools import Toolbox, ToolContext
 
     settings = MagicMock()
-    settings.owner_user_id = "U091GMQ14KV"
+    settings.owner_user_id = "U0OWNER01"
     box = Toolbox(settings)
 
     client = AsyncMock()
-    client.users_info = AsyncMock(return_value={"user": {"id": "U091GMQ14KV", "name": "maaren"}})
+    client.users_info = AsyncMock(return_value={"user": {"id": "U0OWNER01", "name": "owner"}})
     open_resp = MagicMock()
     open_resp.get = lambda k, d=None: {"channel": {"id": "D0CGFPAS0SD"}}.get(k, d)
     client.conversations_open = AsyncMock(return_value=open_resp)
@@ -942,7 +944,7 @@ def test_send_dm_resolves_bare_id_and_me():
         client=client,
         user_client=None,
         bot_user_id="U_BOT",
-        user_id="U091GMQ14KV",
+        user_id="U0OWNER01",
         channel_id="C1",
         thread_ts=None,
         is_dm=False,
@@ -952,15 +954,15 @@ def test_send_dm_resolves_bare_id_and_me():
 
     async def run():
         # Bare user id without needing users_list
-        res1 = await box.execute("send_dm", {"user": "U091GMQ14KV", "text": "yo **test**"}, ctx)
-        assert "sent a DM to <@U091GMQ14KV>" in res1
+        res1 = await box.execute("send_dm", {"user": "U0OWNER01", "text": "yo **test**"}, ctx)
+        assert "sent a DM to <@U0OWNER01>" in res1
         client.users_list.assert_not_called()
         assert client.chat_postMessage.call_args[1]["channel"] == "D0CGFPAS0SD"
         assert client.chat_postMessage.call_args[1]["text"] == "yo *test*"
 
         # 'me' alias
         res2 = await box.execute("send_dm", {"user": "me", "text": "ping"}, ctx)
-        assert "sent a DM to <@U091GMQ14KV>" in res2
+        assert "sent a DM to <@U0OWNER01>" in res2
 
     asyncio.run(run())
 
@@ -972,11 +974,12 @@ def test_send_dm_and_post_message_as_user():
     from bot.ai.tools import Toolbox, ToolContext
 
     settings = MagicMock()
-    settings.owner_user_id = "U091GMQ14KV"
+    settings.owner_user_id = "U0OWNER01"
     box = Toolbox(settings)
 
     bot_client = AsyncMock()
     user_client = AsyncMock()
+    owner_client = AsyncMock()
 
     bot_client.users_info = AsyncMock(return_value={"user": {"id": "U123456789", "name": "target"}})
     bot_client.conversations_open = AsyncMock(return_value={"channel": {"id": "D111111111"}})
@@ -985,19 +988,24 @@ def test_send_dm_and_post_message_as_user():
     user_client.conversations_open = AsyncMock(return_value={"channel": {"id": "D222222222"}})
     user_client.chat_postMessage = AsyncMock(return_value=MagicMock(data={"ok": True, "ts": "222.000"}))
 
+    owner_client.conversations_open = AsyncMock(return_value={"channel": {"id": "D333333333"}})
+    owner_client.chat_postMessage = AsyncMock(return_value=MagicMock(data={"ok": True, "ts": "333.000"}))
+
     ctx = ToolContext(
         db=MagicMock(),
         settings=settings,
         client=bot_client,
         user_client=user_client,
         bot_user_id="U_BOT",
-        user_id="U091GMQ14KV",
+        assistant_user_id="U_BOT",
+        user_id="U0OWNER01",
         channel_id="C123456789",
         thread_ts=None,
         is_dm=True,
         is_owner=True,
         is_admin=True,
         bot_client=bot_client,
+        owner_client=owner_client,
     )
 
     async def run():
@@ -1006,15 +1014,19 @@ def test_send_dm_and_post_message_as_user():
         assert "sent a DM to <@U123456789> as Bot app." in res_dm_bot
         bot_client.chat_postMessage.assert_called_once()
         user_client.chat_postMessage.assert_not_called()
+        owner_client.chat_postMessage.assert_not_called()
 
-        # 2. send_dm as_user=True (as user assistant)
+        # 2. send_dm as_user=True posts through the OWNER's own profile
         res_dm_user = await box.execute(
-            "send_dm", {"user": "U123456789", "text": "hello from boi", "as_user": True}, ctx
+            "send_dm", {"user": "U123456789", "text": "hello from owner", "as_user": True}, ctx
         )
-        assert "sent a DM to <@U123456789> as Boi (user account)." in res_dm_user
-        user_client.chat_postMessage.assert_called_once()
-        _, kwargs_dm = user_client.chat_postMessage.call_args
-        assert "_sent by chicen nugget boi_" in kwargs_dm["text"]
+        assert "sent a DM to <@U123456789> as your profile (owner)." in res_dm_user
+        owner_client.chat_postMessage.assert_called_once()
+        user_client.chat_postMessage.assert_not_called()
+        _, kwargs_dm = owner_client.chat_postMessage.call_args
+        assert kwargs_dm["text"].endswith("_Sent by <@U_BOT>_")
+        assert kwargs_dm["blocks"][-1]["type"] == "context"
+        assert "Sent by <@U_BOT>" in kwargs_dm["blocks"][-1]["elements"][0]["text"]
 
         # 3. post_message default (as bot)
         res_post_bot = await box.execute(
@@ -1023,23 +1035,25 @@ def test_send_dm_and_post_message_as_user():
         assert "posted to <#C123456789>" in res_post_bot
         assert "as Bot app" in res_post_bot
 
-        # 4. post_message as_user=True (as user assistant)
+        # 4. post_message as_user=True (owner profile + muted signature)
         res_post_user = await box.execute(
-            "post_message", {"channel": "C123456789", "text": "boi announcement", "as_user": True}, ctx
+            "post_message", {"channel": "C123456789", "text": "owner announcement", "as_user": True}, ctx
         )
         assert "posted to <#C123456789>" in res_post_user
-        assert "as Boi (user account)" in res_post_user
-        _, kwargs_post = user_client.chat_postMessage.call_args
-        assert "_sent by chicen nugget boi_" in kwargs_post["text"]
+        assert "as your profile (owner)" in res_post_user
+        _, kwargs_post = owner_client.chat_postMessage.call_args
+        assert "_Sent by <@U_BOT>_" in kwargs_post["text"]
+        assert kwargs_post["thread_ts"] is None
 
-        # 5. Missing user_client error when as_user=True
-        ctx_no_user = ToolContext(
+        # 5. Boi's user token alone cannot post as the owner
+        ctx_no_owner = ToolContext(
             db=MagicMock(),
             settings=settings,
             client=bot_client,
-            user_client=None,
+            user_client=user_client,
             bot_user_id="U_BOT",
-            user_id="U091GMQ14KV",
+            assistant_user_id="U_BOT",
+            user_id="U0OWNER01",
             channel_id="C123456789",
             thread_ts=None,
             is_dm=True,
@@ -1047,8 +1061,9 @@ def test_send_dm_and_post_message_as_user():
             is_admin=True,
             bot_client=bot_client,
         )
-        err = await box.execute("post_message", {"channel": "C123456789", "text": "hi", "as_user": True}, ctx_no_user)
-        assert "user client is not configured" in err
+        err = await box.execute("post_message", {"channel": "C123456789", "text": "hi", "as_user": True}, ctx_no_owner)
+        assert "SLACK_OWNER_TOKEN" in err
+        user_client.chat_postMessage.assert_not_called()
 
     asyncio.run(run())
 
@@ -1137,6 +1152,8 @@ def test_agent_active_identity_injection(tmp_path):
     settings.ai_base_url = "https://ai.example.com"
     settings.ai_model = "test-model"
     settings.ai_fallback_model = ""
+    settings.ai_assistant_model = "assistant-model"
+    settings.ai_assistant_fallback_model = ""
     settings.imagine_model = "test-img"
     settings.ai_gate_model = "test-gate"
     settings.ai_max_context_chars = 1000
@@ -1155,8 +1172,8 @@ def test_agent_active_identity_injection(tmp_path):
         db,
         client=bot_client,
         user_client=user_client,
-        bot_user_id="U0CGC8SJ8R0",
-        user_id="U0CGW7W9FLL",
+        bot_user_id="U0BOT0001",
+        user_id="U0BOI0001",
     )
 
     captured_system_messages = []
@@ -1186,7 +1203,7 @@ def test_agent_active_identity_injection(tmp_path):
             client=bot_client,
         )
         assert "Chicen Nugget Bot (workspace bot app)" in captured_system_messages[-1]
-        assert "U0CGC8SJ8R0" in captured_system_messages[-1]
+        assert "U0BOT0001" in captured_system_messages[-1]
 
         # Call via user_client (Boi)
         await agent.reply(
@@ -1199,9 +1216,43 @@ def test_agent_active_identity_injection(tmp_path):
             client=user_client,
         )
         assert "Chicen Nugget Boi (personal assistant user account)" in captured_system_messages[-1]
-        assert "U0CGW7W9FLL" in captured_system_messages[-1]
+        assert "U0BOI0001" in captured_system_messages[-1]
 
     asyncio.run(run())
+
+
+def test_agent_model_selection_per_identity(tmp_path):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.agent import Agent
+    from bot.db import Database
+
+    db = Database(str(tmp_path / "models_test.db"))
+    db.init()
+
+    settings = MagicMock()
+    settings.ai_api_key = "test-key"
+    settings.ai_base_url = "https://ai.example.com"
+    settings.ai_model = "bot-model"
+    settings.ai_fallback_model = "bot-fallback"
+    settings.ai_assistant_model = "boi-model"
+    settings.ai_assistant_fallback_model = "boi-fallback"
+    settings.is_admin.return_value = False
+
+    agent = Agent(settings, db, client=AsyncMock(), user_client=None, bot_user_id="U_BOT")
+
+    assert agent._models_for(False) == ["bot-model", "bot-fallback"]
+    assert agent._models_for(True) == [
+        "boi-model",
+        "boi-fallback",
+        "bot-model",
+        "bot-fallback",
+    ]
+
+    # Boi can share the bot's model without duplicate attempts.
+    settings.ai_assistant_model = "bot-model"
+    settings.ai_assistant_fallback_model = ""
+    assert agent._models_for(True) == ["bot-model", "bot-fallback"]
 
 
 def test_all_users_cache_and_ratelimit_fallback():
@@ -1257,6 +1308,8 @@ def test_forget_tool_and_memory_injection(tmp_path):
     settings.ai_base_url = "https://ai.example.com"
     settings.ai_model = "test-model"
     settings.ai_fallback_model = ""
+    settings.ai_assistant_model = "assistant-model"
+    settings.ai_assistant_fallback_model = ""
     settings.imagine_model = "test-img"
     settings.ai_gate_model = "test-gate"
     settings.ai_max_context_chars = 1000
@@ -1782,8 +1835,9 @@ def test_cmd_accounts():
         ack.assert_called_once()
         client.chat_postEphemeral.assert_called_once()
         _, kwargs = client.chat_postEphemeral.call_args
-        assert "Chicen Nugget Bot" in kwargs["text"]
-        assert "Chicen Nugget Boi" in kwargs["text"]
+        assert "Bot app" in kwargs["text"]
+        assert "Boi" in kwargs["text"]
+        assert "Jev" in kwargs["text"]
 
     asyncio.run(run())
 

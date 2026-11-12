@@ -74,6 +74,35 @@ async def run() -> None:
             user_client = None
     runtime.user_client = user_client
 
+    owner_client = None
+    if settings.slack_owner_token:
+        owner_headers = {}
+        if settings.slack_owner_cookie:
+            owner_headers["Cookie"] = f"d={settings.slack_owner_cookie}"
+        owner_client = AsyncWebClient(token=settings.slack_owner_token, headers=owner_headers)
+        try:
+            owner_auth = await owner_client.auth_test()
+            runtime.owner_user_id = owner_auth.get("user_id") or ""
+            if runtime.owner_user_id and runtime.owner_user_id != settings.owner_user_id:
+                logger.warning(
+                    "SLACK_OWNER_TOKEN belongs to %s (%s), not the configured owner (%s); "
+                    "owner posting disabled",
+                    owner_auth.get("user"),
+                    runtime.owner_user_id,
+                    settings.owner_user_id,
+                )
+                owner_client = None
+            else:
+                logger.info(
+                    "owner posting token active as %s (%s)",
+                    owner_auth.get("user"),
+                    runtime.owner_user_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SLACK_OWNER_TOKEN is set but invalid: %s", exc)
+            owner_client = None
+    runtime.owner_client = owner_client
+
     if settings.ai_enabled:
         runtime.budget = Budget(settings, db)
         runtime.ai_limiter = RateLimiter(settings.ai_rate_limit_per_minute)
@@ -89,9 +118,13 @@ async def run() -> None:
                 budget=runtime.budget,
             )
             logger.info(
-                "ai agent enabled with model %s%s",
+                "ai agent enabled with bot model %s%s; Boi model %s%s",
                 settings.ai_model,
                 f" (fallback {settings.ai_fallback_model})" if settings.ai_fallback_model else "",
+                settings.ai_assistant_model,
+                f" (fallback {settings.ai_assistant_fallback_model})"
+                if settings.ai_assistant_fallback_model
+                else "",
             )
             status = runtime.budget.status()
             global_stop = (
@@ -168,7 +201,7 @@ async def run() -> None:
     scheduler.start()
 
     logger.info(
-        "%s online as bot user %s (%s) | ai=%s welcomer=%s access=%s user_token=%s",
+        "%s online as bot user %s (%s) | ai=%s welcomer=%s access=%s user_token=%s owner_posting=%s",
         settings.bot_name,
         runtime.bot_user_id,
         auth.get("team"),
@@ -176,6 +209,7 @@ async def run() -> None:
         settings.welcomer_enabled,
         settings.access_enabled,
         bool(user_client),
+        bool(owner_client),
     )
     logger.info("starting socket mode...")
 

@@ -38,7 +38,7 @@ HELP = """*{bot}: everything lives under `/nugget`*
 *basics*
 • `/nugget` - a random nugget fact
 • `/nugget help` - this message
-• `/nugget accounts` - explain the 2 bot & assistant identities
+• `/nugget accounts` - explain the bot, Boi, your profile, and Jev
 • `/nugget ping` - check I'm alive
 • `/nugget id` - show channel/user ids
 • `/nugget whois @someone`
@@ -113,23 +113,48 @@ async def cmd_ping(ack, command, client) -> None:
 
 async def cmd_accounts(ack, command, client) -> None:
     await ack()
+    settings = runtime.settings
     bot_id = runtime.bot_user_id or "unknown"
-    user_id = runtime.user_id or getattr(runtime.settings, "assistant_user_id", "") or "not configured"
+    user_id = runtime.user_id or "not configured"
+    owner_id = settings.owner_user_id
+    owner_posting = runtime.owner_client is not None
+    watch_val = runtime.db.kv_get("config:watched_channel_ids") if runtime.db else None
+    bot_model = (
+        (runtime.db.kv_get("config:ai_model") if runtime.db else None)
+        or settings.ai_model
+    )
+    assistant_model = (
+        (runtime.db.kv_get("config:ai_assistant_model") if runtime.db else None)
+        or settings.ai_assistant_model
+    )
+    if watch_val is not None:
+        watched = "off" if not watch_val else ("every channel" if watch_val == "*" else watch_val)
+    else:
+        watched = (
+            "off"
+            if not settings.watched_channel_ids
+            else ("every channel" if settings.watch_everywhere else ", ".join(sorted(settings.watched_channel_ids)))
+        )
     lines = [
-        "*parallel account architecture*",
+        "*account architecture*",
         "",
-        f"• *Chicen Nugget Bot* (<@{bot_id}>) — `[APP]`",
-        "  - Role: workspace bot app & community assistant.",
-        "  - Where it lives: Slack sidebar under *Apps*, and in channels it's invited to.",
-        "  - Handles: slash commands (`/nugget`), welcoming new members, access requests, daily recaps, public channel mentions, and ambient listening.",
+        f"• *Bot app* (<@{bot_id}>) — `[APP]` · model `{bot_model}`",
+        "  - the public/community face: slash commands, channel mentions, ambient replies, access panels, recaps.",
+        "  - Jev decides whether unaddressed channel chatter is worth a reply. Jev is a gate model, not an account.",
         "",
-        f"• *Chicen Nugget Boi* (<@{user_id}>) — `[USER]`",
-        "  - Role: your 1-on-1 personal operator & executive assistant.",
-        "  - Where it lives: Slack sidebar under *Direct Messages* (normal user account with typing indicators).",
-        "  - Handles: private DMs, Mac companion control, Google Calendar, Gmail, Google Drive, Hackatime, GitHub CI runs, Slack status/snooze, reminders, to-dos, and transcribing voice notes.",
-        "  - Can post as user (`as_user=true`) only with explicit owner permission.",
+        f"• *Boi* (<@{user_id}>) — `[USER]` · model `{assistant_model}`",
+        "  - your personal DM operator: normal user account, typing indicators, reminders, notes, research, CI, code.",
+        "  - Boi DMs and direct mentions do not go through Jev.",
         "",
-        "_Tip: Message the *Bot App* for workspace questions or /nugget commands; message *Boi* in DMs for personal operator tasks._",
+        f"• *You* (<@{owner_id}>) — your own Slack profile",
+        f"  - posting through your profile: {'connected' if owner_posting else 'not configured'} (`SLACK_OWNER_TOKEN`).",
+        "  - when `as_user=true` is used, the bot posts with *your* token and adds a small \"Sent by <@assistant>\" line.",
+        "  - Slack does not let one account post as another, so Boi's token can never post as you.",
+        "",
+        "• *shared brain*: the bot app and Boi use the same code, SQLite memory, notes, tasks, and runtime config.",
+        f"• *welcomer*: {watched} (change with `/nugget config watched_channels #channel`).",
+        "",
+        "_Bot app for channels and community; Boi in DMs for personal operator work._",
     ]
     await _say(client, command, "\n".join(lines), ephemeral=True)
 
@@ -146,14 +171,30 @@ async def cmd_id(ack, command, client) -> None:
     else:
         recap_status = str(settings.recaps_enabled).lower()
 
+    watch_val = runtime.db.kv_get("config:watched_channel_ids") if runtime.db else None
+    if watch_val is not None:
+        watched_here = "*" in {p.strip() for p in watch_val.split(",") if p.strip()} or channel in {
+            p.strip() for p in watch_val.split(",") if p.strip()
+        }
+    else:
+        watched_here = settings.watches(channel)
+
+    bot_model = (
+        (runtime.db.kv_get("config:ai_model") if runtime.db else None)
+        or settings.ai_model
+    )
+    boi_model = (
+        (runtime.db.kv_get("config:ai_assistant_model") if runtime.db else None)
+        or settings.ai_assistant_model
+    )
     lines = [
         "*ids*",
         f"• channel: `{channel}` ({name})",
         f"• user: `{command.get('user_id')}`",
         f"• team: `{command.get('team_id')}`",
         f"• ai allowed here: `{str(settings.ai_allowed(channel)).lower()}`",
-        f"• ai model: `{settings.ai_model}`" if settings.ai_enabled else "• ai: `off`",
-        f"• welcomer watches here: `{str(settings.watches(channel)).lower()}`",
+        f"• bot model: `{bot_model}` · Boi model: `{boi_model}`" if settings.ai_enabled else "• ai: `off`",
+        f"• welcomer watches here: `{str(watched_here).lower()}`",
         f"• thread helper: `{str(settings.thread_helper).lower()}` · "
         f"ping guard: `{str(settings.usergroup_guard).lower()}`",
         f"• recaps: `{recap_status}`",
@@ -448,6 +489,10 @@ async def cmd_config(ack, command, client) -> None:
         "recap_private_channel": "recap_private_channel_id",
         "private_recap_channel": "recap_private_channel_id",
         "digest": "daily_digest",
+        "watch": "watched_channel_ids",
+        "watched": "watched_channel_ids",
+        "watched_channels": "watched_channel_ids",
+        "welcomer_channels": "watched_channel_ids",
         "access": "tier2",
         "tier2_channel": "access_channel_id",
         "access_channel": "access_channel_id",
@@ -461,6 +506,12 @@ async def cmd_config(ack, command, client) -> None:
         "threads": "thread_followups",
         "github": "github_username",
         "gh_user": "github_username",
+        "model": "ai_model",
+        "bot_model": "ai_model",
+        "fallback_model": "ai_fallback_model",
+        "assistant_model": "ai_assistant_model",
+        "boi_model": "ai_assistant_model",
+        "boi_fallback_model": "ai_assistant_fallback_model",
         "google_token": "google_access_token",
         "google_auth": "google_access_token",
         "mac_url": "mac_bridge_url",
@@ -472,6 +523,7 @@ async def cmd_config(ack, command, client) -> None:
         "daily_digest",
         "personal_updates",
         "welcomer",
+        "watched_channel_ids",
         "tier2",
         "access_channel_id",
         "admin_channel_id",
@@ -479,6 +531,10 @@ async def cmd_config(ack, command, client) -> None:
         "thread_followups",
         "weather_location",
         "github_username",
+        "ai_model",
+        "ai_fallback_model",
+        "ai_assistant_model",
+        "ai_assistant_fallback_model",
         "google_access_token",
         "google_refresh_token",
         "google_client_id",
@@ -582,7 +638,41 @@ async def cmd_config(ack, command, client) -> None:
         return
 
     val_lower = raw_val.lower()
-    if key == "admin_channel_id":
+    if key == "watched_channel_ids":
+        if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0", "clear"}:
+            norm = ""
+        elif val_lower in {"all", "*", "everywhere"}:
+            norm = "*"
+        else:
+            tokens = [part for part in re.split(r"[\s,]+", raw_val) if part]
+            by_name: dict[str, str] = {}
+            if any(not re.search(r"[CG][A-Z0-9]{8,}", part, re.IGNORECASE) for part in tokens):
+                by_name = {
+                    (channel.get("name") or "").lower(): channel["id"]
+                    for channel in await all_channels(client)
+                    if channel.get("id") and channel.get("name")
+                }
+            resolved: list[str] = []
+            for part in tokens:
+                match = re.search(r"[CG][A-Z0-9]{8,}", part, re.IGNORECASE)
+                channel_id = (
+                    match.group(0).upper()
+                    if match
+                    else by_name.get(part.lstrip("#").lower())
+                )
+                if channel_id and channel_id not in resolved:
+                    resolved.append(channel_id)
+            if not resolved:
+                await _say(
+                    client,
+                    command,
+                    f"could not resolve any channels in `{raw_val}`. "
+                    "use channel ids or names like `#welcome`.",
+                    ephemeral=True,
+                )
+                return
+            norm = ",".join(resolved)
+    elif key == "admin_channel_id":
         if val_lower in {"dm", "dms", "none", "off", "false", "no", "disable", "disabled", "0"}:
             norm = "dm"
         else:
@@ -607,6 +697,31 @@ async def cmd_config(ack, command, client) -> None:
 
     if runtime.db:
         runtime.db.kv_set(f"config:{key}", norm)
+
+    if key == "watched_channel_ids":
+        if not norm:
+            msg = ":white_check_mark: welcomer disabled: watched channel list is empty."
+        elif norm == "*":
+            msg = ":white_check_mark: welcomer now watches every channel the bot is in."
+        else:
+            mentions = ", ".join(f"<#{cid}>" for cid in norm.split(",") if cid)
+            msg = f":white_check_mark: welcomer now watches: {mentions}."
+        await _say(client, command, msg, ephemeral=True)
+        return
+
+    if key in {
+        "ai_model",
+        "ai_fallback_model",
+        "ai_assistant_model",
+        "ai_assistant_fallback_model",
+    }:
+        await _say(
+            client,
+            command,
+            f":white_check_mark: *{key}* set to `{norm}`. it applies to new turns.",
+            ephemeral=True,
+        )
+        return
 
     if key in {"recaps", "recap_channel_id"}:
         if norm in {"false", "none"}:
