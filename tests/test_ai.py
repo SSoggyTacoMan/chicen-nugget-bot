@@ -1013,6 +1013,8 @@ def test_send_dm_and_post_message_as_user():
         )
         assert "sent a DM to <@U123456789> as Boi (user account)." in res_dm_user
         user_client.chat_postMessage.assert_called_once()
+        _, kwargs_dm = user_client.chat_postMessage.call_args
+        assert "_sent by chicen nugget boi_" in kwargs_dm["text"]
 
         # 3. post_message default (as bot)
         res_post_bot = await box.execute(
@@ -1027,6 +1029,8 @@ def test_send_dm_and_post_message_as_user():
         )
         assert "posted to <#C123456789>" in res_post_user
         assert "as Boi (user account)" in res_post_user
+        _, kwargs_post = user_client.chat_postMessage.call_args
+        assert "_sent by chicen nugget boi_" in kwargs_post["text"]
 
         # 5. Missing user_client error when as_user=True
         ctx_no_user = ToolContext(
@@ -1619,6 +1623,92 @@ def test_personal_operator_tools(tmp_path):
         assert "recaps (<#C999>)*: `false`" in cfg_list
 
     asyncio.run(run())
+
+
+def test_slack_app_manifest_scopes():
+    import json
+    from pathlib import Path
+
+    manifest_path = Path(__file__).resolve().parents[1] / "slack-app-manifest.json"
+    data = json.loads(manifest_path.read_text())
+    user_scopes = data["oauth_config"]["scopes"]["user"]
+    bot_scopes = data["oauth_config"]["scopes"]["bot"]
+
+    for required in ["chat:write", "files:read", "reactions:write"]:
+        assert required in user_scopes
+    for required in ["chat:write", "files:read", "reactions:write"]:
+        assert required in bot_scopes
+
+
+def test_transcribe_slack_audio():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import httpx
+
+    from bot.slack_api import _is_audio_file, transcribe_slack_audio
+
+    # Test _is_audio_file classification
+    assert _is_audio_file({"mimetype": "audio/webm", "filetype": "webm"})
+    assert _is_audio_file({"subtype": "slack_audio", "filetype": "webm"})
+    assert _is_audio_file({"audio_wave_samples": [1, 2, 3]})
+    assert _is_audio_file({"filetype": "m4a", "mimetype": "audio/mp4"})
+    assert not _is_audio_file({"filetype": "png", "mimetype": "image/png"})
+    assert not _is_audio_file({"filetype": "webm", "mimetype": "video/webm"})
+
+    settings = MagicMock()
+    settings.ai_api_key = "test-api-key"
+    settings.ai_base_url = "https://ai.example.com/v1"
+    settings.ai_model = "test-model"
+
+    async def run():
+        # Case 1: File already has Slack transcription text
+        event_with_tr = {
+            "files": [
+                {
+                    "mimetype": "audio/webm",
+                    "filetype": "webm",
+                    "transcription": {"text": "hello from slack native transcription"},
+                }
+            ]
+        }
+        res_native = await transcribe_slack_audio(event_with_tr, "xoxb-token", settings)
+        assert res_native == ["hello from slack native transcription"]
+
+        # Case 2: File needs whisper transcription
+        event_raw_audio = {
+            "files": [
+                {
+                    "name": "voice.webm",
+                    "mimetype": "audio/webm",
+                    "filetype": "webm",
+                    "url_private_download": "https://slack.com/files/voice.webm",
+                    "size": 1024,
+                }
+            ]
+        }
+
+        async def fake_audio_http_get(self, url, *args, **kwargs):
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            resp.content = b"RIFFfakeaudiobytes"
+            return resp
+
+        async def fake_audio_http_post(self, url, *args, **kwargs):
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            resp.json.return_value = {"text": "transcribed voice note message"}
+            return resp
+
+        with (
+            patch.object(httpx.AsyncClient, "get", new=fake_audio_http_get),
+            patch.object(httpx.AsyncClient, "post", new=fake_audio_http_post),
+        ):
+            res_whisper = await transcribe_slack_audio(event_raw_audio, "xoxb-token", settings)
+            assert res_whisper == ["transcribed voice note message"]
+
+    asyncio.run(run())
+
 
 
 

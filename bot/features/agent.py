@@ -15,6 +15,7 @@ from bot.slack_api import (
     post,
     post_ephemeral,
     react,
+    transcribe_slack_audio,
     unreact,
     user_info,
 )
@@ -68,7 +69,17 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
     if not runtime.settings.ai_allowed(channel):
         return
     images = await fetch_slack_images(event, runtime.settings.slack_bot_token)
+    voice_transcripts = await transcribe_slack_audio(
+        event, runtime.settings.slack_bot_token, runtime.settings
+    )
     text = strip_mentions(event.get("text") or "").strip()
+    if voice_transcripts:
+        voice_block = "\n".join(voice_transcripts)
+        text = (
+            f"{text}\n\n[Voice message]: {voice_block}".strip()
+            if text
+            else f"[Voice message]: {voice_block}"
+        )
     if not text and images:
         text = "What is in this image?"
     await _handle_channel(
@@ -95,7 +106,17 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
         return
 
     images = await fetch_slack_images(event, settings.slack_bot_token)
+    voice_transcripts = await transcribe_slack_audio(
+        event, settings.slack_bot_token, settings
+    )
     text = (event.get("text") or "").strip()
+    if voice_transcripts:
+        voice_block = "\n".join(voice_transcripts)
+        text = (
+            f"{text}\n\n[Voice message]: {voice_block}".strip()
+            if text
+            else f"[Voice message]: {voice_block}"
+        )
     if not text and not images:
         return
     if not text and images:
@@ -156,6 +177,12 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         return
 
     images = await fetch_slack_images(event, runtime.settings.slack_bot_token)
+    voice_transcripts = await transcribe_slack_audio(
+        event, runtime.settings.slack_bot_token, runtime.settings
+    )
+    if voice_transcripts:
+        voice_block = "\n".join(voice_transcripts)
+        text = f"{text}\n\n[Voice message]: {voice_block}".strip()
 
     rows = runtime.db.history(f"ch:{channel}:{thread_ts}", 8)
     bot_last = bool(rows and rows[-1].get("role") == "assistant")

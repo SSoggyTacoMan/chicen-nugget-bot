@@ -505,7 +505,7 @@ class Toolbox:
                     "text": {"type": "string", "description": "Message text (Slack mrkdwn)."},
                     "as_user": {
                         "type": "boolean",
-                        "description": "Send as personal user assistant (Boi) instead of bot app. Default false.",
+                        "description": "Send as personal user assistant (Boi) instead of bot app. CRITICAL: only use when explicitly instructed or permitted by the user to send in their name. Default false.",
                     },
                 },
                 ["user", "text"],
@@ -574,7 +574,7 @@ class Toolbox:
                     "text": {"type": "string", "description": "Message text (Slack mrkdwn)."},
                     "as_user": {
                         "type": "boolean",
-                        "description": "Send as personal user assistant (Boi) instead of bot app. Default false.",
+                        "description": "Send as personal user assistant (Boi) instead of bot app. CRITICAL: only use when explicitly instructed or permitted by the user to send in their name. Default false.",
                     },
                     "thread_ts": {
                         "type": "string",
@@ -1429,6 +1429,8 @@ class Toolbox:
                 target = dm_id
         except Exception as exc:  # noqa: BLE001 - fall back to posting with user_id directly
             logger.debug("conversations_open failed for %s: %s", user_id, error_code(exc))
+        if as_user and "_sent by chicen nugget boi_" not in text.lower():
+            text = f"{text}\n\n_sent by chicen nugget boi_"
         if not await post(target_client, target, disarm_broadcasts(format_mrkdwn(text))):
             return _error("slack rejected the DM")
         sender = "Boi (user account)" if as_user else "Bot app"
@@ -1653,6 +1655,8 @@ class Toolbox:
         if err or not target_client:
             return _error(err or "slack client not available")
         thread_ts = str(args.get("thread_ts") or "").strip() or None
+        if as_user and "_sent by chicen nugget boi_" not in text.lower():
+            text = f"{text}\n\n_sent by chicen nugget boi_"
         result = await post(target_client, channel_id, disarm_broadcasts(format_mrkdwn(text)), thread_ts=thread_ts)
         if not result:
             return _error("slack rejected the message")

@@ -26,6 +26,9 @@
   "oauth_config": {
     "scopes": {
       "user": [
+        "chat:write",
+        "files:read",
+        "reactions:write",
         "search:read",
         "usergroups:read",
         "usergroups:write"
@@ -38,6 +41,7 @@
         "channels:read",
         "chat:write",
         "commands",
+        "files:read",
         "files:write",
         "groups:history",
         "groups:read",

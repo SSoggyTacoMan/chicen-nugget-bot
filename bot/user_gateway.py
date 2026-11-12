@@ -19,7 +19,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from bot.ai.limits import user_retry_after
 from bot.runtime import runtime
-from bot.slack_api import fetch_slack_images
+from bot.slack_api import fetch_slack_images, transcribe_slack_audio
 from bot.utils.text import (
     chunk_text,
     disarm_broadcasts,
@@ -292,8 +292,18 @@ class UserGateway:
                     )
             return
 
-        images = await fetch_slack_images(event, self.token)
+        images = await fetch_slack_images(event, self.token, cookie=self.cookie)
+        voice_transcripts = await transcribe_slack_audio(
+            event, self.token, settings, cookie=self.cookie
+        )
         clean_text = strip_mentions(text).strip()
+        if voice_transcripts:
+            voice_block = "\n".join(voice_transcripts)
+            clean_text = (
+                f"{clean_text}\n\n[Voice message]: {voice_block}".strip()
+                if clean_text
+                else f"[Voice message]: {voice_block}"
+            )
         if not clean_text and images:
             clean_text = "What is in this image?"
         if not clean_text and not images:
