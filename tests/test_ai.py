@@ -1606,6 +1606,9 @@ def test_personal_operator_tools(tmp_path):
             status_data = json.loads(mac_status)
             assert "Battery Power" in status_data["battery"]
 
+            mac_vol = await box.execute("mac_control", {"action": "volume", "level": 65}, ctx_owner)
+            assert "65%" in mac_vol
+
         # 9. remind tool with standalone time and 12am
         settings.max_reminders = 50
         rem1 = await box.execute("remind", {"when": "tomorrow at 12am", "text": "respond to the g2g email"}, ctx_owner)

@@ -349,9 +349,11 @@ def _need_owner(ctx: ToolContext) -> bool:
 
 
 def _default_repo(settings: Settings) -> str:
-    """`https://github.com/owner/repo` -> `owner/repo`, else empty."""
+    """`https://github.com/owner/repo` -> `owner/repo`, else default."""
     match = re.search(r"github\.com/([^/\s]+/[^/\s#?]+)", settings.repo_url or "")
-    return match.group(1).removesuffix(".git") if match else ""
+    if match:
+        return match.group(1).removesuffix(".git")
+    return "SSoggyTacoMan/chicen-nugget-bot"
 
 
 def _numbers(values: Any) -> list[float]:
@@ -687,9 +689,10 @@ class Toolbox:
                 {
                     "action": {
                         "type": "string",
-                        "enum": ["status", "frontmost", "open", "notify", "clipboard", "applescript", "apps", "run"],
-                        "description": "Action: 'status' (Mac info, battery, volume), 'frontmost' (active app), 'open' (open URL/file/app), 'notify' (system notification), 'clipboard' (read/set), 'applescript' (run AppleScript), 'apps' (list visible apps), or 'run' (shell command).",
+                        "enum": ["status", "volume", "frontmost", "open", "notify", "clipboard", "applescript", "apps", "run"],
+                        "description": "Action: 'status' (Mac info, battery, volume), 'volume' (get/set output volume 0-100), 'frontmost' (active app), 'open' (open URL/file/app), 'notify' (system notification), 'clipboard' (read/set), 'applescript' (run AppleScript), 'apps' (list visible apps), or 'run' (shell command).",
                     },
+                    "level": {"type": "integer", "description": "Volume level 0-100 for action='volume'."},
                     "target": {"type": "string", "description": "URL, file path, or app name for action='open'."},
                     "text": {"type": "string", "description": "Text for notification or setting clipboard."},
                     "title": {"type": "string", "description": "Notification title (default 'Chicen Nugget')."},
@@ -2194,6 +2197,18 @@ class Toolbox:
             _, up, _ = await _run("uptime")
             return _json({"battery": batt, "volume": vol, "uptime": up})
 
+        if action == "volume":
+            level = args.get("level")
+            if level is not None:
+                try:
+                    vol_int = max(0, min(100, int(level)))
+                    code, _, err = await _run("osascript", "-e", f"set volume output volume {vol_int}")
+                    return f"set Mac volume to {vol_int}%." if code == 0 else _error(err or "failed to set volume")
+                except ValueError:
+                    pass
+            code, vol, err = await _run("osascript", "-e", "get volume settings")
+            return vol if code == 0 else _error(err or "failed to get volume")
+
         if action == "frontmost":
             code, out, err = await _run(
                 "osascript",
@@ -2817,7 +2832,10 @@ class Toolbox:
 
     async def _tool_hackatime_stats(self, args: dict[str, Any], ctx: ToolContext) -> str:
         username = str(
-            args.get("username") or ctx.settings.github_username or ""
+            args.get("username")
+            or (ctx.db.kv_get("config:github_username") if ctx.db else "")
+            or ctx.settings.github_username
+            or "SSoggyTacoMan"
         ).strip()
         if not username:
             return _error("username is required; set GITHUB_USERNAME for a default")
