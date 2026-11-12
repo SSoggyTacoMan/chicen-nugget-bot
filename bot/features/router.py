@@ -15,6 +15,7 @@ from typing import Awaitable, Callable
 from bot.features.access import cmd_access, cmd_accesspanel, cmd_pending
 from bot.features.ai_commands import cmd_ask, cmd_forget, cmd_imagine, cmd_summarize
 from bot.features.commands import (
+    cmd_accounts,
     cmd_budget,
     cmd_cancel,
     cmd_choose,
@@ -46,6 +47,9 @@ SUBCOMMANDS: dict[str, Handler] = {
     "help": cmd_help,
     "commands": cmd_help,
     "?": cmd_help,
+    "accounts": cmd_accounts,
+    "identities": cmd_accounts,
+    "whoami": cmd_accounts,
     "ping": cmd_ping,
     "id": cmd_id,
     "whois": cmd_whois,

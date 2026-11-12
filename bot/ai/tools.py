@@ -880,8 +880,8 @@ class Toolbox:
                 {
                     "action": {
                         "type": "string",
-                        "enum": ["user", "repo", "commits", "release", "issues", "prs", "issue"],
-                        "description": "Action: 'repo' (default), 'issues', 'prs', 'issue', 'commits', 'release', or 'user'.",
+                        "enum": ["user", "repo", "commits", "release", "issues", "prs", "issue", "runs"],
+                        "description": "Action: 'repo' (default), 'issues', 'prs', 'issue', 'commits', 'release', 'runs' (GitHub Actions), or 'user'.",
                     },
                     "target": {
                         "type": "string",
@@ -2937,6 +2937,27 @@ class Toolbox:
                         if isinstance(p, dict)
                     ][:5]
                     return _json(prs) if prs else f"no {state} pull requests found for '{target}'"
+                if action in {"runs", "workflows"}:
+                    resp = await http.get(f"https://api.github.com/repos/{target}/actions/runs?per_page=5")
+                    if resp.status_code == 404:
+                        return f"github repo '{target}' not found"
+                    resp.raise_for_status()
+                    runs_data = resp.json().get("workflow_runs") or []
+                    runs = [
+                        {
+                            "id": r.get("id"),
+                            "name": r.get("name"),
+                            "status": r.get("status"),
+                            "conclusion": r.get("conclusion"),
+                            "branch": r.get("head_branch"),
+                            "event": r.get("event"),
+                            "created_at": r.get("created_at"),
+                            "url": r.get("html_url"),
+                        }
+                        for r in runs_data
+                        if isinstance(r, dict)
+                    ][:5]
+                    return _json(runs) if runs else f"no workflow runs found for '{target}'"
                 if action == "issue":
                     repo = target
                     number = args.get("number")
