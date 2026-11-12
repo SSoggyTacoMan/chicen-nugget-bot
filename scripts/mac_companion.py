@@ -2,8 +2,8 @@
 """Chicen Nugget Boi - Mac Companion Bridge.
 
 Lightweight local bridge daemon running on macOS.
-Exposes volume, battery, clipboard, notifications, frontmost app, and shell execution
-so the Slack assistant (Boi) can interact with your Mac.
+Exposes volume, battery, clipboard, notifications, frontmost app, lock, sleep,
+speech, and shell execution so the Slack assistant (Boi) can interact with your Mac.
 
 Zero dependencies (Python 3 standard library only).
 
@@ -15,8 +15,7 @@ Then expose it via Cloudflare Tunnel or ngrok:
     # or: ngrok http 8765
 
 And configure your bot in Slack:
-    /nugget config mac_bridge_url https://your-tunnel-url.trycloudflare.com
-    /nugget config mac_bridge_token YOUR_SECRET_TOKEN
+    /nugget setup mac
 """
 
 from __future__ import annotations
@@ -191,6 +190,25 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 return
             code, out, err = run_cmd("/bin/zsh", "-c", cmd)
             self._send_json(200, {"stdout": out, "stderr": err, "exit_code": code})
+            return
+
+        if action == "lock":
+            code, _, err = run_cmd("pmset", "displaysleepnow")
+            self._send_json(200, {"result": "locked the screen"} if code == 0 else {"error": err})
+            return
+
+        if action == "sleep":
+            code, _, err = run_cmd("pmset", "sleepnow")
+            self._send_json(200, {"result": "going to sleep"} if code == 0 else {"error": err})
+            return
+
+        if action == "say":
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                self._send_json(400, {"error": "text required"})
+                return
+            code, _, err = run_cmd("say", text, timeout=30)
+            self._send_json(200, {"result": "spoke the text"} if code == 0 else {"error": err})
             return
 
         self._send_json(400, {"error": f"unknown action '{action}'"})

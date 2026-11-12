@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
 from slack_sdk.web.async_client import AsyncWebClient
 
+from bot import integrations
 from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens
 from bot.ai.tools import Toolbox, ToolContext, format_now, get_user_memory_prompt
 from bot.config import Settings
@@ -129,29 +129,13 @@ class Agent:
             if (role == "owner" or self.settings.is_admin(user_id))
             else "none"
         )
-        has_google = bool(
-            self.settings.google_access_token
-            or self.settings.google_refresh_token
-            or (self.db and self.db.kv_get("config:google_access_token"))
-            or (self.db and self.db.kv_get("config:google_refresh_token"))
-        )
-        has_mac = bool(
-            self.settings.mac_bridge_url
-            or (self.db and self.db.kv_get("config:mac_bridge_url"))
-            or (sys.platform == "darwin" and not self.settings.mac_bridge_url)
-        )
-        gh_user = (
-            (self.db.kv_get("config:github_username") if self.db else None)
-            or self.settings.github_username
-            or "not set (ask the owner or use bot_config github_username)"
-        )
-        integrations = (
-            f"- GitHub & Hackatime: connected (default user: {gh_user})\n"
-            f"- Google Workspace (Calendar, Gmail, Drive): {'connected' if has_google else 'not configured'}\n"
-            f"- Mac companion link (Volume, Apps, Clipboard, Shell): {'connected' if has_mac else 'not configured'}\n"
-            f"- Boi personal user account (SLACK_USER_TOKEN): {'connected' if assistant_identity else 'not configured'}\n"
-            f"- Posting through the owner's own Slack profile (SLACK_OWNER_TOKEN): {'connected' if owner_posting else 'not configured'}\n"
-            f"- models: bot app `{bot_model}`, Boi `{assistant_model}`"
+        integrations_text = integrations.prompt_integration_lines(
+            self.db,
+            self.settings,
+            owner_posting=owner_posting,
+            assistant_identity=assistant_identity,
+            bot_model=bot_model,
+            assistant_model=assistant_model,
         )
         system = (
             self.system_template.replace("{bot_name}", self.settings.bot_name)
@@ -168,7 +152,7 @@ class Agent:
             .replace("{trigger}", TRIGGER_TEXT.get(trigger, TRIGGER_TEXT["mention"]))
             .replace("{jev}", jev or "no extra classification")
             .replace("{memory}", memory)
-            .replace("{integrations}", integrations)
+            .replace("{integrations}", integrations_text)
             .replace("{ai_model}", bot_model)
             .replace("{ai_fallback_model}", bot_fallback or "none")
             .replace("{ai_assistant_model}", assistant_model)

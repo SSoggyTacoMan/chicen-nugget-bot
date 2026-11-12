@@ -37,6 +37,7 @@ from bot.features.commands import (
 from bot.features.nuggets import cmd_nugget
 from bot.features.polls import cmd_poll, cmd_pollclose
 from bot.features.recaps import cmd_recap
+from bot.features.setup import cmd_setup
 from bot.features.welcomer import cmd_pinggroup
 from bot.slack_api import post_ephemeral
 
@@ -72,6 +73,9 @@ SUBCOMMANDS: dict[str, Handler] = {
     "recap": cmd_recap,
     "config": cmd_config,
     "settings": cmd_config,
+    "setup": cmd_setup,
+    "connect": cmd_setup,
+    "integrations": cmd_setup,
     "todo": cmd_todo,
     "todos": cmd_todo,
     "task": cmd_todo,

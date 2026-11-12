@@ -32,7 +32,7 @@ from urllib.parse import quote, urlencode, urlparse
 import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
-from bot import image_access
+from bot import image_access, integrations
 from bot.config import Settings
 from bot.db import Database
 from bot.features.nuggets import random_fact
@@ -41,6 +41,8 @@ from bot.features.stats import (
     format_stats,
     format_system_diagnostics,
 )
+from bot.google_oauth import GoogleOAuthError, refresh_access_token
+from bot.owner_posting import deactivate_owner_posting
 from bot.reminders import confirmation_text, create_reminder, dm_target, reminder_line
 from bot.runtime import runtime
 from bot.slack_api import (
@@ -350,10 +352,39 @@ def _need_owner(ctx: ToolContext) -> bool:
     return ctx.is_owner or ctx.is_admin
 
 
-def _default_repo(settings: Settings) -> str:
+def _default_repo(settings: Settings, db: Database | None = None) -> str:
     """`https://github.com/owner/repo` -> `owner/repo`, else empty."""
-    match = re.search(r"github\.com/([^/\s]+/[^/\s#?]+)", settings.repo_url or "")
-    return match.group(1).removesuffix(".git") if match else ""
+    repo = ""
+    if db is not None:
+        repo = integrations.github_config(db, settings).get("repo", "")
+    if not repo:
+        repo = getattr(settings, "repo_url", "") if isinstance(getattr(settings, "repo_url", ""), str) else ""
+    match = re.search(r"github\.com/([^/\s]+/[^/\s#?]+)", repo or "")
+    if match:
+        return match.group(1).removesuffix(".git")
+    if repo and re.fullmatch(r"[^/\s]+/[^/\s#?]+", repo.strip()):
+        return repo.strip().removesuffix(".git")
+    return ""
+
+
+def _calendar_datetime(value: str, tz) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=tz)
+    except ValueError:
+        parsed = parse_when(value, tz=tz, require_rest=False)
+        return parsed.when if parsed else None
+
+
+def _tool_json(value: str) -> Any:
+    """Return parsed JSON only when the tool result is a JSON object/array."""
+    text = (value or "").strip()
+    if not text.startswith(("{", "[")):
+        return None
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return None
 
 
 def _posted_by_signature(ctx: ToolContext) -> str:
@@ -660,26 +691,28 @@ class Toolbox:
             ),
             tool(
                 "google_calendar",
-                "Check upcoming schedule, search events, or create events in Google Calendar. Owner/admin only.",
+                "Check upcoming schedule, search, create, update or delete events, or check free/busy times in Google Calendar. Owner/admin only.",
                 {
-                    "action": {"type": "string", "enum": ["list", "search", "create"], "description": "Action: 'list' (agenda), 'search', or 'create'."},
+                    "action": {"type": "string", "enum": ["list", "search", "create", "update", "delete", "freebusy"], "description": "Action: 'list' (agenda), 'search', 'create', 'update', 'delete', or 'freebusy'."},
                     "query": {"type": "string", "description": "Search term for events."},
-                    "days": {"type": "integer", "description": "Number of days ahead to list (default 7)."},
-                    "summary": {"type": "string", "description": "Title/summary for a new event (for action='create')."},
+                    "days": {"type": "integer", "description": "Number of days ahead to list or check free/busy (default 7)."},
+                    "summary": {"type": "string", "description": "Title/summary for a new or updated event."},
                     "start_time": {"type": "string", "description": "Start time in ISO format or relative (e.g. '2026-11-12T14:00:00' or 'tomorrow 3pm')."},
                     "end_time": {"type": "string", "description": "End time in ISO format or relative (e.g. '2026-11-12T15:00:00' or '1 hour')."},
                     "description": {"type": "string", "description": "Optional event description."},
+                    "location": {"type": "string", "description": "Optional event location."},
+                    "event_id": {"type": "string", "description": "Event id for action='update' or 'delete'."},
                     "attendees": {"type": "array", "items": {"type": "string"}, "description": "Optional email addresses to invite."},
                 },
                 ["action"],
             ),
             tool(
                 "gmail",
-                "Search, read, or send emails through Gmail. Owner/admin only.",
+                "Search, read, send, archive, or mark emails read/unread through Gmail. Owner/admin only.",
                 {
-                    "action": {"type": "string", "enum": ["list", "read", "search", "send"], "description": "Action: 'list' (recent/unread), 'search', 'read', or 'send'."},
+                    "action": {"type": "string", "enum": ["list", "read", "search", "send", "archive", "mark_read", "mark_unread"], "description": "Action: 'list' (recent/unread), 'search', 'read', 'send', 'archive', 'mark_read', or 'mark_unread'."},
                     "query": {"type": "string", "description": "Search query (e.g. 'is:unread', 'from:alice', or keywords)."},
-                    "message_id": {"type": "string", "description": "Message ID to read."},
+                    "message_id": {"type": "string", "description": "Message ID for read/archive/mark actions."},
                     "to": {"type": "string", "description": "Recipient email address for action='send'."},
                     "subject": {"type": "string", "description": "Email subject for action='send'."},
                     "body": {"type": "string", "description": "Email body text for action='send'."},
@@ -700,16 +733,16 @@ class Toolbox:
             ),
             tool(
                 "mac_control",
-                "Control or inspect your Mac: system status, frontmost app, battery, volume, open URLs/files, notifications, clipboard, running apps, or AppleScript. Owner/admin only.",
+                "Control or inspect your Mac: system status, frontmost app, battery, volume, open URLs/files, notifications, clipboard, running apps, lock, sleep, speak, or AppleScript. Owner/admin only.",
                 {
                     "action": {
                         "type": "string",
-                        "enum": ["status", "volume", "frontmost", "open", "notify", "clipboard", "applescript", "apps", "run"],
-                        "description": "Action: 'status' (Mac info, battery, volume), 'volume' (get/set output volume 0-100), 'frontmost' (active app), 'open' (open URL/file/app), 'notify' (system notification), 'clipboard' (read/set), 'applescript' (run AppleScript), 'apps' (list visible apps), or 'run' (shell command).",
+                        "enum": ["status", "volume", "frontmost", "open", "notify", "clipboard", "applescript", "apps", "run", "lock", "sleep", "say"],
+                        "description": "Action: 'status' (Mac info, battery, volume), 'volume' (get/set output volume 0-100), 'frontmost' (active app), 'open' (open URL/file/app), 'notify' (system notification), 'clipboard' (read/set), 'applescript' (run AppleScript), 'apps' (list visible apps), 'run' (shell command), 'lock' (lock screen), 'sleep' (sleep the Mac), or 'say' (speak text).",
                     },
                     "level": {"type": "integer", "description": "Volume level 0-100 for action='volume'."},
                     "target": {"type": "string", "description": "URL, file path, or app name for action='open'."},
-                    "text": {"type": "string", "description": "Text for notification or setting clipboard."},
+                    "text": {"type": "string", "description": "Text for notification, clipboard, or speech."},
                     "title": {"type": "string", "description": "Notification title (default 'Chicen Nugget')."},
                     "script": {"type": "string", "description": "AppleScript source code for action='applescript'."},
                     "command": {"type": "string", "description": "Terminal command for action='run'."},
@@ -894,12 +927,12 @@ class Toolbox:
             ),
             tool(
                 "github_info",
-                "Look up GitHub repositories, issues, pull requests, commits, releases, or user profiles.",
+                "Look up GitHub repositories, issues, pull requests, commits, releases, workflow runs, notifications, or user profiles.",
                 {
                     "action": {
                         "type": "string",
-                        "enum": ["user", "repo", "commits", "release", "issues", "prs", "issue", "runs"],
-                        "description": "Action: 'repo' (default), 'issues', 'prs', 'issue', 'commits', 'release', 'runs' (GitHub Actions), or 'user'.",
+                        "enum": ["user", "repo", "commits", "release", "issues", "prs", "issue", "runs", "notifications"],
+                        "description": "Action: 'repo' (default), 'issues', 'prs', 'issue', 'commits', 'release', 'runs' (GitHub Actions), 'notifications', or 'user'.",
                     },
                     "target": {
                         "type": "string",
@@ -1080,6 +1113,39 @@ class Toolbox:
                     },
                 },
                 ["repo_url"],
+            ),
+            tool(
+                "daily_briefing",
+                "Build a compact personal briefing for the owner: today's calendar, unread email, open tasks, reminders, weather, and GitHub notifications, using whatever is connected. Owner/admin only.",
+                {
+                    "days": {
+                        "type": "integer",
+                        "description": "Calendar window in days, 1-7. Default 1 (today and upcoming).",
+                    },
+                    "include": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional sections: calendar, email, tasks, reminders, weather, github. Default all connected sections.",
+                    },
+                },
+                [],
+            ),
+            tool(
+                "integration_setup",
+                "Open the interactive integration setup panel in the owner's DM, show connection status, or disconnect one integration. Use this instead of asking the owner to edit .env. Owner/admin only.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["panel", "status", "disconnect"],
+                        "description": "Action: 'panel' (DM setup buttons), 'status', or 'disconnect'.",
+                    },
+                    "integration": {
+                        "type": "string",
+                        "enum": ["google", "mac", "github", "email", "slack"],
+                        "description": "Which integration for action='panel' or 'disconnect'. Omit for all.",
+                    },
+                },
+                ["action"],
             ),
         ]
         return tools
@@ -1363,9 +1429,10 @@ class Toolbox:
         if as_user:
             if not ctx.owner_client:
                 return None, (
-                    "posting as you is not configured. add SLACK_OWNER_TOKEN with your own "
-                    "Slack user token (xoxp-..., or xoxc-... plus SLACK_OWNER_COOKIE) and restart me. "
-                    "slack does not allow one account to post as another, so Boi's token cannot post as you."
+                    "posting as you is not configured. connect your own Slack user token "
+                    "with `/nugget setup slack` (or set SLACK_OWNER_TOKEN): xoxp-..., or "
+                    "xoxc-... plus the `d` cookie. slack does not allow one account to post "
+                    "as another, so Boi's token cannot post as you."
                 )
             return ctx.owner_client, None
         return ctx.bot_client or ctx.client, None
@@ -1867,51 +1934,44 @@ class Toolbox:
             return _error(f"slack activity check failed: {error_code(exc)}")
 
     async def _get_google_token(self, ctx: ToolContext) -> str | None:
-        kv = ctx.db.kv_get if ctx.db else (lambda _k: None)
-        token = kv("config:google_access_token") or ctx.settings.google_access_token
-        refresh_token = kv("config:google_refresh_token") or ctx.settings.google_refresh_token
-        client_id = kv("config:google_client_id") or ctx.settings.google_client_id
-        client_secret = kv("config:google_client_secret") or ctx.settings.google_client_secret
+        creds = integrations.google_credentials(ctx.db, ctx.settings)
+        token = creds["access_token"]
+        refresh_token = creds["refresh_token"]
+        client_id = creds["client_id"]
+        client_secret = creds["client_secret"]
 
         if refresh_token and client_id and client_secret:
+            kv = ctx.db.kv_get if ctx.db else (lambda _k: None)
             cached = kv("cache:google_access_token")
             cached_exp = kv("cache:google_token_exp")
-            if cached and cached_exp:
+            if isinstance(cached, str) and cached and isinstance(cached_exp, str) and cached_exp:
                 try:
                     if float(cached_exp) > time.time() + 60:
                         return cached
                 except ValueError:
                     pass
             try:
-                async with httpx.AsyncClient(timeout=10) as http:
-                    resp = await http.post(
-                        "https://oauth2.googleapis.com/token",
-                        data={
-                            "client_id": client_id,
-                            "client_secret": client_secret,
-                            "refresh_token": refresh_token,
-                            "grant_type": "refresh_token",
-                        },
-                    )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    new_token = data.get("access_token")
-                    if new_token:
-                        if ctx.db:
-                            exp = time.time() + int(data.get("expires_in") or 3600)
-                            ctx.db.kv_set("cache:google_access_token", new_token)
-                            ctx.db.kv_set("cache:google_token_exp", str(exp))
-                        return new_token
-            except Exception as exc:  # noqa: BLE001
+                refreshed = await refresh_access_token(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    refresh_token=refresh_token,
+                )
+                new_token = refreshed["access_token"]
+                if ctx.db:
+                    exp = time.time() + int(refreshed["expires_in"])
+                    ctx.db.kv_set("cache:google_access_token", new_token)
+                    ctx.db.kv_set("cache:google_token_exp", str(exp))
+                return new_token
+            except GoogleOAuthError as exc:
                 logger.warning("google token refresh failed: %s", exc)
-        return token
+        return token or None
 
     async def _tool_google_calendar(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can access Google Calendar")
         token = await self._get_google_token(ctx)
         if not token:
-            return _error("Google credentials not configured (set GOOGLE_ACCESS_TOKEN or GOOGLE_REFRESH_TOKEN)")
+            return _error("Google credentials not configured (use `/nugget setup google`)")
         action = str(args.get("action") or "list").lower().strip()
         headers = {"Authorization": f"Bearer {token}"}
         tz = tzinfo()
@@ -1957,48 +2017,107 @@ class Toolbox:
                 ]
             )
 
-        if action == "create":
+        if action in {"create", "update"}:
+            event_id = str(args.get("event_id") or "").strip()
+            if action == "update" and not event_id:
+                return _error("event_id is required to update an event")
             summary = str(args.get("summary") or "").strip()
             start_raw = str(args.get("start_time") or "").strip()
-            if not summary or not start_raw:
+            end_raw = str(args.get("end_time") or "").strip()
+            if action == "create" and (not summary or not start_raw):
                 return _error("summary and start_time are required")
 
-            def _parse_dt(val: str) -> datetime | None:
-                try:
-                    dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
-                    return dt if dt.tzinfo else dt.replace(tzinfo=tz)
-                except ValueError:
-                    parsed = parse_when(val, tz=tz, require_rest=False)
-                    return parsed.when if parsed else None
+            body: dict[str, Any] = {}
+            if summary:
+                body["summary"] = summary
+            if args.get("description") is not None:
+                body["description"] = str(args.get("description") or "")
+            if args.get("location") is not None:
+                body["location"] = str(args.get("location") or "")
 
-            start_dt = _parse_dt(start_raw)
-            if not start_dt:
+            start_dt = _calendar_datetime(start_raw, tz) if start_raw else None
+            if start_raw and not start_dt:
                 return _error(f"could not parse start_time: {start_raw!r}")
-            end_raw = str(args.get("end_time") or "").strip()
-            end_dt = _parse_dt(end_raw) if end_raw else (start_dt + timedelta(hours=1))
-            if not end_dt or end_dt <= start_dt:
+            end_dt = _calendar_datetime(end_raw, tz) if end_raw else None
+            if end_raw and not end_dt:
+                return _error(f"could not parse end_time: {end_raw!r}")
+            if start_dt and not end_dt:
                 end_dt = start_dt + timedelta(hours=1)
+            if end_dt and not start_dt and action == "create":
+                return _error("start_time is required when end_time is set")
+            if start_dt and end_dt and end_dt <= start_dt:
+                return _error("end_time must be after start_time")
+            if start_dt:
+                body["start"] = {"dateTime": start_dt.isoformat()}
+            if end_dt:
+                body["end"] = {"dateTime": end_dt.isoformat()}
 
-            body: dict[str, Any] = {
-                "summary": summary,
-                "start": {"dateTime": start_dt.isoformat()},
-                "end": {"dateTime": end_dt.isoformat()},
-            }
-            if args.get("description"):
-                body["description"] = str(args["description"])
             attendees = args.get("attendees")
             if isinstance(attendees, list) and attendees:
                 body["attendees"] = [{"email": str(a).strip()} for a in attendees if str(a).strip()]
+            if action == "update" and not body:
+                return _error("nothing to update; pass a summary, time, description, location, or attendees")
 
             async with httpx.AsyncClient(timeout=15, headers=headers) as http:
+                if action == "create":
+                    resp = await http.post(
+                        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                        json=body,
+                    )
+                else:
+                    resp = await http.patch(
+                        "https://www.googleapis.com/calendar/v3/calendars/primary/events/"
+                        f"{quote(event_id, safe='')}",
+                        json=body,
+                    )
+            if resp.status_code not in {200, 201}:
+                return _error(f"calendar {action} error ({resp.status_code}): {resp.text[:300]}")
+            ev = resp.json()
+            when = ""
+            ev_start = (ev.get("start") or {}).get("dateTime")
+            if ev_start:
+                when = f" at {ev_start}"
+            return (
+                f"{'created' if action == 'create' else 'updated'} event "
+                f"'{ev.get('summary') or summary}'{when} ({ev.get('htmlLink')})."
+            )
+
+        if action == "delete":
+            event_id = str(args.get("event_id") or "").strip()
+            if not event_id:
+                return _error("event_id is required to delete an event")
+            async with httpx.AsyncClient(timeout=15, headers=headers) as http:
+                resp = await http.delete(
+                    "https://www.googleapis.com/calendar/v3/calendars/primary/events/"
+                    f"{quote(event_id, safe='')}"
+                )
+            if resp.status_code not in {200, 204}:
+                return _error(f"calendar delete error ({resp.status_code}): {resp.text[:300]}")
+            return f"deleted calendar event `{event_id}`."
+
+        if action == "freebusy":
+            try:
+                days = max(1, min(90, int(args.get("days") or 1)))
+            except (TypeError, ValueError):
+                days = 1
+            body = {
+                "timeMin": now.isoformat(),
+                "timeMax": (now + timedelta(days=days)).isoformat(),
+                "items": [{"id": "primary"}],
+            }
+            async with httpx.AsyncClient(timeout=15, headers=headers) as http:
                 resp = await http.post(
-                    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                    "https://www.googleapis.com/calendar/v3/freeBusy",
                     json=body,
                 )
-            if resp.status_code not in {200, 201}:
-                return _error(f"calendar create error ({resp.status_code}): {resp.text[:300]}")
-            ev = resp.json()
-            return f"created event '{ev.get('summary')}' at {start_dt.strftime('%Y-%m-%d %H:%M %Z')} ({ev.get('htmlLink')})."
+            if resp.status_code != 200:
+                return _error(f"calendar freebusy error ({resp.status_code}): {resp.text[:300]}")
+            busy = (
+                ((resp.json() or {}).get("calendars") or {}).get("primary") or {}
+            ).get("busy") or []
+            if not busy:
+                return f"no busy blocks in the next {days} day(s)."
+            return _json({"window_days": days, "busy": busy})
 
         return _error(f"unknown google_calendar action: {action}")
 
@@ -2007,7 +2126,7 @@ class Toolbox:
             return _error("only the owner/admin can access Gmail")
         token = await self._get_google_token(ctx)
         if not token:
-            return _error("Google credentials not configured (set GOOGLE_ACCESS_TOKEN or GOOGLE_REFRESH_TOKEN)")
+            return _error("Google credentials not configured (use `/nugget setup google`)")
         action = str(args.get("action") or "list").lower().strip()
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -2113,6 +2232,32 @@ class Toolbox:
                 return _error(f"gmail send error ({resp.status_code}): {resp.text[:300]}")
             return f"sent email to {to} with subject '{subject}' (id {resp.json().get('id')})."
 
+        if action in {"archive", "mark_read", "mark_unread"}:
+            msg_id = str(args.get("message_id") or "").strip()
+            if not msg_id:
+                return _error("message_id is required")
+            body: dict[str, Any] = {}
+            if action == "archive":
+                body["removeLabelIds"] = ["INBOX"]
+            elif action == "mark_read":
+                body["removeLabelIds"] = ["UNREAD"]
+            else:
+                body["addLabelIds"] = ["UNREAD"]
+            async with httpx.AsyncClient(timeout=15, headers=headers) as http:
+                resp = await http.post(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+                    f"{quote(msg_id)}/modify",
+                    json=body,
+                )
+            if resp.status_code != 200:
+                return _error(f"gmail {action} error ({resp.status_code}): {resp.text[:300]}")
+            words = {
+                "archive": "archived",
+                "mark_read": "marked read",
+                "mark_unread": "marked unread",
+            }
+            return f"{words[action]} Gmail message `{msg_id}`."
+
         return _error(f"unknown gmail action: {action}")
 
     async def _tool_google_drive(self, args: dict[str, Any], ctx: ToolContext) -> str:
@@ -2120,7 +2265,7 @@ class Toolbox:
             return _error("only the owner/admin can access Google Drive")
         token = await self._get_google_token(ctx)
         if not token:
-            return _error("Google credentials not configured (set GOOGLE_ACCESS_TOKEN or GOOGLE_REFRESH_TOKEN)")
+            return _error("Google credentials not configured (use `/nugget setup google`)")
         action = str(args.get("action") or "list").lower().strip()
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -2191,9 +2336,9 @@ class Toolbox:
     async def _tool_mac_control(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can control the Mac")
-        kv = ctx.db.kv_get if ctx.db else (lambda _k: None)
-        bridge_url = kv("config:mac_bridge_url") or ctx.settings.mac_bridge_url
-        bridge_token = kv("config:mac_bridge_token") or ctx.settings.mac_bridge_token
+        mac = integrations.mac_config(ctx.db, ctx.settings)
+        bridge_url = mac["url"]
+        bridge_token = mac["token"]
 
         if bridge_url:
             headers = {"Authorization": f"Bearer {bridge_token}"} if bridge_token else {}
@@ -2316,6 +2461,21 @@ class Toolbox:
             code, out, err = await _run("/bin/zsh", "-c", command)
             combined = "\n".join(x for x in (out, err) if x)
             return f"exit {code}:\n{combined[:4000]}" if combined else f"exit {code} (no output)"
+
+        if action == "lock":
+            code, _, err = await _run("pmset", "displaysleepnow")
+            return "locked the Mac screen." if code == 0 else _error(err or "failed to lock the Mac")
+
+        if action == "sleep":
+            code, _, err = await _run("pmset", "sleepnow")
+            return "put the Mac to sleep." if code == 0 else _error(err or "failed to sleep the Mac")
+
+        if action == "say":
+            text = str(args.get("text") or "").strip()
+            if not text:
+                return _error("text is required for say")
+            code, _, err = await _run("say", text, timeout=30)
+            return "spoke the text on the Mac." if code == 0 else _error(err or "say failed")
 
         return _error(f"unknown mac_control action: {action}")
 
@@ -2850,14 +3010,17 @@ class Toolbox:
     async def _tool_check_emails(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can check emails")
-        host = self.settings.imap_host
-        user = self.settings.imap_user
-        password = self.settings.imap_password
-        port = self.settings.imap_port or 993
+        imap = integrations.imap_config(ctx.db, ctx.settings)
+        host = imap["host"]
+        user = imap["user"]
+        password = imap["password"]
+        try:
+            port = int(imap["port"] or 993)
+        except ValueError:
+            port = 993
         if not host or not user or not password:
             return (
-                "email credentials not configured. "
-                "Set IMAP_HOST, IMAP_USER, and IMAP_PASSWORD in .env (for Gmail/Fastmail, use an App Password)."
+                "email credentials not configured. run `/nugget setup email` or ask me to open the setup panel."
             )
         action = str(args.get("action") or "unread").lower().strip()
         query = str(args.get("query") or "").strip()
@@ -2901,18 +3064,52 @@ class Toolbox:
 
     async def _tool_github_info(self, args: dict[str, Any], ctx: ToolContext) -> str:
         action = str(args.get("action") or "repo").lower().strip()
-        target = str(args.get("target") or _default_repo(ctx.settings)).strip()
-        if not target:
-            if action == "user":
-                return _error("username is required for action='user'")
-            return _error("target is required; set REPO_URL for a default repository")
+        github = integrations.github_config(ctx.db, ctx.settings)
+        target = str(args.get("target") or _default_repo(ctx.settings, ctx.db)).strip()
+        if action == "user" and not target:
+            target = github["username"]
         state = str(args.get("state") or "open").lower().strip()
         if state not in {"open", "closed", "all"}:
             state = "open"
         headers = {"User-Agent": "chicen-nugget-bot", "Accept": "application/vnd.github+json"}
-        token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+        token = github["token"]
         if token:
             headers["Authorization"] = f"Bearer {token}"
+
+        if action == "notifications":
+            if not token:
+                return _error("github notifications need a token. connect one with `/nugget setup github`")
+            try:
+                async with httpx.AsyncClient(timeout=12, headers=headers, follow_redirects=True) as http:
+                    resp = await http.get(
+                        "https://api.github.com/notifications",
+                        params={"all": "false", "per_page": 10},
+                    )
+                if resp.status_code == 401:
+                    return _error("github rejected the stored token. reconnect it with `/nugget setup github`")
+                resp.raise_for_status()
+                items = [
+                    {
+                        "id": n.get("id"),
+                        "reason": n.get("reason"),
+                        "unread": n.get("unread"),
+                        "title": (n.get("subject") or {}).get("title"),
+                        "type": (n.get("subject") or {}).get("type"),
+                        "repo": (n.get("repository") or {}).get("full_name"),
+                        "updated_at": n.get("updated_at"),
+                        "url": (n.get("subject") or {}).get("url"),
+                    }
+                    for n in (resp.json() or [])
+                    if isinstance(n, dict)
+                ]
+                return _json(items) if items else "no unread GitHub notifications."
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"github notifications error: {exc}")
+
+        if not target:
+            if action == "user":
+                return _error("username is required for action='user'")
+            return _error("target is required; connect a default repository with `/nugget setup github`")
 
         try:
             async with httpx.AsyncClient(timeout=12, headers=headers, follow_redirects=True) as http:
@@ -3549,7 +3746,17 @@ class Toolbox:
             "boi_fallback_model": "ai_assistant_fallback_model",
             "google_token": "google_access_token",
             "google_auth": "google_access_token",
+            "google_redirect": "google_redirect_uri",
             "mac_url": "mac_bridge_url",
+            "mac_token": "mac_bridge_token",
+            "github_token": "github_token",
+            "gh_token": "github_token",
+            "github_repo": "repo_url",
+            "repo": "repo_url",
+            "email_host": "imap_host",
+            "email_port": "imap_port",
+            "email_user": "imap_user",
+            "email_password": "imap_password",
         }
         key = key_aliases.get(raw_key, raw_key)
         known_keys = [
@@ -3575,11 +3782,18 @@ class Toolbox:
             "google_refresh_token",
             "google_client_id",
             "google_client_secret",
+            "google_redirect_uri",
             "mac_bridge_url",
             "mac_bridge_token",
+            "github_token",
+            "repo_url",
+            "imap_host",
+            "imap_port",
+            "imap_user",
+            "imap_password",
         ]
 
-        secret_keys = {"google_access_token", "google_refresh_token", "google_client_secret", "mac_bridge_token"}
+        secret_keys = integrations.SECRET_CONFIG_KEYS
 
         if action == "list":
             lines = ["current bot runtime settings:"]
@@ -3602,6 +3816,11 @@ class Toolbox:
             return _error("key is required for get/set/reset")
         if key not in known_keys:
             return _error(f"unknown setting '{raw_key}'. valid settings: {', '.join(known_keys)}")
+        if action == "set" and key in secret_keys:
+            return _error(
+                "secrets can't be set in chat. "
+                f"use `/nugget setup {integrations.secret_setup_target(key)}` instead."
+            )
 
         if key == "recaps" and raw_chan:
             if not channel_id:
@@ -3840,6 +4059,150 @@ class Toolbox:
             return f":wastebasket: cleared {count} completed task(s)."
 
         return _error(f"unknown task action: {action}")
+
+    async def _tool_daily_briefing(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can build a personal briefing")
+        try:
+            days = max(1, min(7, int(args.get("days") or 1)))
+        except (TypeError, ValueError):
+            days = 1
+        include = args.get("include")
+        wanted = (
+            {str(item).lower().strip() for item in include if str(item).strip()}
+            if isinstance(include, list)
+            else None
+        )
+
+        def wants(section: str) -> bool:
+            return wanted is None or section in wanted
+
+        tz = tzinfo()
+        sections: dict[str, Any] = {}
+
+        if wants("tasks"):
+            tasks = ctx.db.list_tasks(ctx.user_id, limit=10)
+            sections["tasks"] = [
+                {"id": task["id"], "title": task["title"]} for task in tasks
+            ]
+
+        if wants("reminders"):
+            reminders = []
+            for reminder in ctx.db.list_reminders(ctx.user_id)[:10]:
+                try:
+                    when = datetime.fromtimestamp(float(reminder["next_run"]), tz)
+                except (TypeError, ValueError, OSError):
+                    when = None
+                reminders.append(
+                    {
+                        "id": reminder["id"],
+                        "text": reminder["text"],
+                        "next_run": when.isoformat() if when else reminder.get("next_run"),
+                        "recurrence": reminder.get("recurrence"),
+                    }
+                )
+            sections["reminders"] = reminders
+
+        google = integrations.google_credentials(ctx.db, ctx.settings)
+        google_ready = bool(google["access_token"] or google["refresh_token"])
+
+        if wants("calendar"):
+            if not google_ready:
+                sections["calendar"] = "not connected"
+            else:
+                result = await self._tool_google_calendar(
+                    {"action": "list", "days": days}, ctx
+                )
+                sections["calendar"] = _tool_json(result) or result
+
+        if wants("email"):
+            if google_ready:
+                result = await self._tool_gmail({"action": "list", "limit": 5}, ctx)
+                sections["email"] = _tool_json(result) or result
+            else:
+                imap = integrations.imap_config(ctx.db, ctx.settings)
+                if imap["host"] and imap["user"] and imap["password"]:
+                    sections["email"] = await self._tool_check_emails(
+                        {"action": "unread", "limit": 5}, ctx
+                    )
+                else:
+                    sections["email"] = "not connected"
+
+        if wants("github"):
+            github = integrations.github_config(ctx.db, ctx.settings)
+            if github["token"]:
+                result = await self._tool_github_info({"action": "notifications"}, ctx)
+                sections["github"] = _tool_json(result) or result
+            else:
+                sections["github"] = "no token connected"
+
+        if wants("weather"):
+            location = (
+                (ctx.db.kv_get("config:weather_location") if ctx.db else None)
+                or ctx.settings.weather_default_location
+                or ""
+            )
+            if isinstance(location, str) and location:
+                sections["weather"] = await self._tool_get_weather(
+                    {"location": location, "days": 1}, ctx
+                )
+
+        return _json(
+            {
+                "now": format_now(ctx.settings),
+                "window_days": days,
+                "sections": sections,
+            }
+        )
+
+    async def _tool_integration_setup(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can change integration setup")
+        action = str(args.get("action") or "panel").lower().strip()
+        integration = str(args.get("integration") or "").strip().lower()
+
+        if action == "status":
+            return integrations.setup_status_text(
+                ctx.db,
+                ctx.settings,
+                owner_posting=runtime.owner_client is not None,
+                assistant_identity=runtime.user_client is not None,
+            )
+
+        if action == "disconnect":
+            names_set = {name for name, _ in integrations.SETUP_INTEGRATIONS}
+            if integration not in names_set and integration != "all":
+                return _error("integration must be google, mac, github, email, slack, or all")
+            targets = (
+                [name for name, _ in integrations.SETUP_INTEGRATIONS]
+                if integration == "all"
+                else [integration]
+            )
+            for name in targets:
+                integrations.clear_integration(ctx.db, name)
+                if name == "slack":
+                    deactivate_owner_posting()
+            names = ", ".join(name for name in targets)
+            return f"disconnected: {names}. environment defaults may still apply after a restart."
+
+        if action != "panel":
+            return _error("action must be panel, status, or disconnect")
+
+        if integration and integration not in {name for name, _ in integrations.SETUP_INTEGRATIONS}:
+            return _error("integration must be google, mac, github, email, or slack")
+        blocks = integrations.setup_panel_blocks(integration or None)
+        result = await post(
+            ctx.client,
+            ctx.user_id,
+            "integration setup",
+            blocks=blocks,
+        )
+        if not result:
+            return _error("couldn't send the setup panel DM. check my DM permissions.")
+        return (
+            f"sent the {integration or 'all'} setup panel to your DMs. "
+            "tap a button to open the secret form."
+        )
 
     # ---------------------------------------------------------------- helpers
     async def _resolve_channel(self, ctx: ToolContext, value: str) -> str | None:
