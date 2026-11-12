@@ -39,13 +39,25 @@ def register(app) -> None:
     app.action(SKIP_ACTION)(on_usergroup_skip)
 
 
+def _watches(channel_id: str | None) -> bool:
+    """Watched channels come from runtime config first, then WATCHED_CHANNEL_IDS."""
+    if not channel_id:
+        return False
+    if runtime.db:
+        raw = runtime.db.kv_get("config:watched_channel_ids")
+        if raw is not None:
+            watched = {item.strip() for item in raw.split(",") if item.strip()}
+            return "*" in watched or channel_id in watched
+    return runtime.settings.watches(channel_id)
+
+
 async def on_member_joined(event: dict[str, Any], client) -> None:
     if runtime.db and runtime.db.kv_get("config:welcomer") == "false":
         return
     settings = runtime.settings
     channel = event.get("channel")
     user_id = event.get("user")
-    if not user_id or not settings.watches(channel):
+    if not user_id or not _watches(channel):
         return
     if event.get("user_type") == "bot" or user_id == runtime.bot_user_id:
         return
@@ -90,7 +102,7 @@ async def on_member_left(event: dict[str, Any], client) -> None:
     settings = runtime.settings
     channel = event.get("channel")
     user_id = event.get("user")
-    if not user_id or not settings.watches(channel):
+    if not user_id or not _watches(channel):
         return
     if event.get("user_type") == "bot" or user_id == runtime.bot_user_id:
         return
@@ -137,7 +149,7 @@ async def _send_welcome_dm(
 
     values = dict(
         user=f"<@{user_id}>",
-        channel=f"<#{channel}>" if channel else "the server",
+        channel=f"<#{channel}>" if channel else "this channel",
         bot=settings.bot_name,
         name=name,
     )

@@ -24,6 +24,7 @@ from bot.utils.text import (
     chunk_text,
     disarm_broadcasts,
     format_mrkdwn,
+    has_owner_signature,
     strip_mentions,
 )
 
@@ -252,6 +253,8 @@ class UserGateway:
 
         channel = event.get("channel") or ""
         text = (event.get("text") or "").strip()
+        if has_owner_signature(text):
+            return
         is_dm = channel.startswith("D")
         is_mention = bool(self.user_id and f"<@{self.user_id}>" in text)
         thread_ts = event.get("thread_ts")

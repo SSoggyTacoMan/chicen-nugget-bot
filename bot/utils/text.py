@@ -35,6 +35,16 @@ def strip_mentions(text: str) -> str:
     return re.sub(r"<@[^>]+>", "", text or "").strip()
 
 
+def has_owner_signature(text: str) -> bool:
+    """True for messages we posted through the owner's profile.
+
+    Those messages mention the assistant in the footer; without this guard the
+    bot and Boi would treat their own attribution as a fresh mention and reply
+    to the owner's message.
+    """
+    return "sent by <@" in (text or "").lower()
+
+
 def user_mention(user_id: str) -> str:
     return f"<@{user_id}>"
 

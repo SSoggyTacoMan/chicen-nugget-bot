@@ -30,9 +30,11 @@ class Runtime:
     app: "AsyncApp | None" = None
     client: AsyncWebClient | None = None
     user_client: AsyncWebClient | None = None
+    owner_client: AsyncWebClient | None = None
     bot_user_id: str = ""
     bot_id: str = ""
     user_id: str = ""
+    owner_user_id: str = ""
     user_gateway: Any | None = None
     agent: "Agent | None" = None
     gate: "Gate | None" = None

@@ -67,6 +67,8 @@ class Settings:
     slack_app_token: str
     slack_user_token: str | None
     slack_user_cookie: str | None
+    slack_owner_token: str | None
+    slack_owner_cookie: str | None
     bot_name: str
     owner_user_id: str
     admin_user_ids: frozenset[str]
@@ -80,6 +82,8 @@ class Settings:
     ai_base_url: str
     ai_model: str
     ai_fallback_model: str | None
+    ai_assistant_model: str
+    ai_assistant_fallback_model: str | None
     ai_max_tokens: int
     ai_history_limit: int
     ai_channels: frozenset[str]
@@ -252,6 +256,8 @@ def load_settings() -> Settings:
         slack_app_token=_str("SLACK_APP_TOKEN"),
         slack_user_token=_str("SLACK_USER_TOKEN") or None,
         slack_user_cookie=_str("SLACK_USER_COOKIE") or None,
+        slack_owner_token=_str("SLACK_OWNER_TOKEN") or None,
+        slack_owner_cookie=_str("SLACK_OWNER_COOKIE") or None,
         bot_name=_str("BOT_NAME", "Chicen Nugget Bot") or "Chicen Nugget Bot",
         owner_user_id=owner,
         admin_user_ids=frozenset(admins),
@@ -262,6 +268,10 @@ def load_settings() -> Settings:
         ai_base_url=_str("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
         ai_model=_str("AI_MODEL", "deepseek/deepseek-v4.1-flash"),
         ai_fallback_model=_str("AI_FALLBACK_MODEL", "anthropic/claude-haiku-5.5") or None,
+        ai_assistant_model=_str("AI_ASSISTANT_MODEL", "anthropic/claude-sonnet-5"),
+        ai_assistant_fallback_model=_str(
+            "AI_ASSISTANT_FALLBACK_MODEL", "anthropic/claude-haiku-5.5"
+        ) or None,
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),
         ai_history_limit=_int("AI_HISTORY_LIMIT", 24),
         ai_channels=frozenset(_list("AI_CHANNELS", ("*",))),
@@ -289,13 +299,12 @@ def load_settings() -> Settings:
         welcome_public=_bool("WELCOME_PUBLIC", True),
         welcome_message=_str(
             "WELCOME_MESSAGE",
-            "welcome to the server, {user}! :wave: glad you're here.",
+            "welcome to {channel}, {user}! :wave: glad you're here.",
         ),
         welcome_dm=_str(
             "WELCOME_DM",
-            "hey {user}! welcome to the server :blob-wave: i'm {bot}, the resident bot. "
-            "if you want access to the private tier 2 channel, hit the button below and "
-            "i'll pass it along.",
+            "hey {user}! welcome to {channel} :blob-wave: i'm {bot}. "
+            "if you ever need anything in here, just ping me.",
         ),
         welcome_dm_once=_bool("WELCOME_DM_ONCE", True),
         welcome_ping=_str("WELCOME_PING"),
@@ -329,8 +338,8 @@ def load_settings() -> Settings:
         weather_default_location=_str("WEATHER_DEFAULT_LOCATION") or None,
         tavily_api_key=_str("TAVILY_API_KEY") or None,
         max_reminders=max(1, _int("MAX_REMINDERS", 200)),
-        repo_url=_str("REPO_URL", "https://github.com/SSoggyTacoMan/chicen-nugget-bot"),
-        github_username=_str("GITHUB_USERNAME", "SSoggyTacoMan") or "SSoggyTacoMan",
+        repo_url=_str("REPO_URL"),
+        github_username=_str("GITHUB_USERNAME") or None,
         imap_host=_str("IMAP_HOST") or None,
         imap_port=_int("IMAP_PORT", 993),
         imap_user=_str("IMAP_USER") or None,

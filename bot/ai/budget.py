@@ -39,13 +39,18 @@ class Price:
 # Longest-prefix matching means dated snapshots ("...-1017") and ":batch"
 # variants inherit the base model's price.
 PRICES: dict[str, Price] = {
+    "openai/gpt-6-luna": Price(0.10, 0.50),
     "openai/gpt-5.6-luna": Price(0.20, 1.20),
     "openai/gpt-5.6-luna-pro": Price(0.20, 1.20),
     "anthropic/claude-haiku-5.5": Price(0.10, 0.50),
     "anthropic/claude-sonnet-5.5": Price(2.00, 10.00),
-    "deepseek/deepseek-v4.1-flash": Price(0.006, 0.50),
-    "z-ai/glm-5.3-flash": Price(0.15, 0.50),
+    "anthropic/claude-sonnet-5": Price(2.00, 10.00),
+    "deepseek/deepseek-v4.1-flash": Price(0.022, 0.40),
+    "deepseek/deepseek-v4-flash": Price(0.09, 0.18),
+    "z-ai/glm-5.3-flash": Price(0.04, 0.078),
+    "qwen/qwen3.7-flash": Price(0.03, 0.13),
     "qwen/qwen3.8-flash": Price(0.15, 0.47),
+    "google/gemini-4-carbon": Price(2.00, 10.00),
     "google/gemini-3.8-flash": Price(0.75, 3.75),
     "google/gemini-2.5-flash": Price(0.30, 2.50),
     "openai/gpt-5.5": Price(5.00, 30.00),

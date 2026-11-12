@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 from slack_sdk.web.async_client import AsyncWebClient
 
 from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens
-from bot.ai.tools import ToolContext, Toolbox, format_now, get_user_memory_prompt
+from bot.ai.tools import Toolbox, ToolContext, format_now, get_user_memory_prompt
 from bot.config import Settings
 from bot.db import Database
 from bot.runtime import runtime
@@ -113,7 +113,14 @@ class Agent:
             if is_user_identity
             else "Chicen Nugget Bot (workspace bot app)"
         )
-        assistant_id = self.user_id or getattr(runtime, "user_id", "") or "unknown"
+        assistant_id = (self.user_id or getattr(runtime, "user_id", "")) or "unknown"
+        active_identity_id = (
+            assistant_id if is_user_identity else (self.bot_user_id or "unknown")
+        )
+        owner_client = getattr(runtime, "owner_client", None)
+        owner_posting = bool(owner_client)
+        assistant_identity = bool(self.user_client)
+        bot_model, bot_fallback, assistant_model, assistant_fallback = self._model_settings()
         history = self.db.history(conversation, self.settings.ai_history_limit)
         role = "owner" if user_id == self.settings.owner_user_id else "guest"
         location = await self._location(channel_id, is_dm, client=active_client)
@@ -136,17 +143,21 @@ class Agent:
         gh_user = (
             (self.db.kv_get("config:github_username") if self.db else None)
             or self.settings.github_username
-            or "SSoggyTacoMan"
+            or "not set (ask the owner or use bot_config github_username)"
         )
         integrations = (
             f"- GitHub & Hackatime: connected (default user: {gh_user})\n"
             f"- Google Workspace (Calendar, Gmail, Drive): {'connected' if has_google else 'not configured'}\n"
-            f"- Mac companion link (Volume, Apps, Clipboard, Shell): {'connected' if has_mac else 'not configured'}"
+            f"- Mac companion link (Volume, Apps, Clipboard, Shell): {'connected' if has_mac else 'not configured'}\n"
+            f"- Boi personal user account (SLACK_USER_TOKEN): {'connected' if assistant_identity else 'not configured'}\n"
+            f"- Posting through the owner's own Slack profile (SLACK_OWNER_TOKEN): {'connected' if owner_posting else 'not configured'}\n"
+            f"- models: bot app `{bot_model}`, Boi `{assistant_model}`"
         )
         system = (
             self.system_template.replace("{bot_name}", self.settings.bot_name)
             .replace("{bot_user_id}", self.bot_user_id or "unknown")
             .replace("{assistant_user_id}", assistant_id)
+            .replace("{active_identity_user_id}", active_identity_id)
             .replace("{active_identity}", active_identity)
             .replace("{now}", format_now(self.settings))
             .replace("{user_id}", user_id)
@@ -158,8 +169,10 @@ class Agent:
             .replace("{jev}", jev or "no extra classification")
             .replace("{memory}", memory)
             .replace("{integrations}", integrations)
-            .replace("{ai_model}", self.settings.ai_model)
-            .replace("{ai_fallback_model}", self.settings.ai_fallback_model or "none")
+            .replace("{ai_model}", bot_model)
+            .replace("{ai_fallback_model}", bot_fallback or "none")
+            .replace("{ai_assistant_model}", assistant_model)
+            .replace("{ai_assistant_fallback_model}", assistant_fallback or "none")
             .replace("{imagine_model}", self.settings.imagine_model or "none")
             .replace("{gate_model}", self.settings.ai_gate_model or "none")
             .replace("{repo_url}", self.settings.repo_url)
@@ -193,12 +206,19 @@ class Agent:
             is_owner=user_id == self.settings.owner_user_id,
             is_admin=self.settings.is_admin(user_id),
             bot_client=self.client,
+            owner_client=owner_client,
+            assistant_user_id=active_identity_id,
         )
 
         answer = ""
         try:
             for _ in range(MAX_TOOL_ROUNDS):
-                response = await self._chat(messages, tools=True, user_id=user_id)
+                response = await self._chat(
+                    messages,
+                    tools=True,
+                    user_id=user_id,
+                    is_user_identity=is_user_identity,
+                )
                 message = response.choices[0].message
                 tool_calls = message.tool_calls or []
                 if tool_calls:
@@ -242,7 +262,7 @@ class Agent:
             answer = _budget_text(exc)
         except Exception as exc:  # noqa: BLE001
             logger.exception("agent completion failed")
-            answer = self._friendly_error(exc)
+            answer = self._friendly_error(exc, model=self._models_for(is_user_identity)[0])
 
         answer = format_mrkdwn(answer)
 
@@ -286,6 +306,34 @@ class Agent:
             logger.exception("one-shot completion failed")
             return self._friendly_error(exc)
 
+    def _model_settings(self) -> tuple[str, str | None, str, str | None]:
+        """Models can be overridden at runtime with /nugget config; env is the fallback."""
+
+        def runtime(key: str, default: str | None) -> str | None:
+            value = self.db.kv_get(f"config:{key}") if self.db else None
+            return value if value else default
+
+        return (
+            runtime("ai_model", self.settings.ai_model) or self.settings.ai_model,
+            runtime("ai_fallback_model", self.settings.ai_fallback_model),
+            runtime("ai_assistant_model", self.settings.ai_assistant_model)
+            or self.settings.ai_assistant_model,
+            runtime("ai_assistant_fallback_model", self.settings.ai_assistant_fallback_model),
+        )
+
+    def _models_for(self, is_user_identity: bool) -> list[str]:
+        """Bot app and Boi can run different models; each keeps its own fallback."""
+        bot_model, bot_fallback, assistant_model, assistant_fallback = self._model_settings()
+        if is_user_identity:
+            candidates = [assistant_model, assistant_fallback, bot_model, bot_fallback]
+        else:
+            candidates = [bot_model, bot_fallback]
+        models: list[str] = []
+        for model in candidates:
+            if model and model not in models:
+                models.append(model)
+        return models or [bot_model]
+
     async def _chat(
         self,
         messages: list[dict[str, Any]],
@@ -294,11 +342,9 @@ class Agent:
         temperature: float = 0.7,
         max_tokens: int | None = None,
         user_id: str | None = None,
+        is_user_identity: bool = False,
     ):
-        models = [self.settings.ai_model]
-        fallback = self.settings.ai_fallback_model
-        if fallback and fallback != self.settings.ai_model:
-            models.append(fallback)
+        models = self._models_for(is_user_identity)
 
         kwargs: dict[str, Any] = {
             "messages": messages,
@@ -372,7 +418,7 @@ class Agent:
             return f"the {kind} #{info.get('name')} (<#{channel_id}>)"
         return f"channel <#{channel_id}>"
 
-    def _friendly_error(self, exc: Exception) -> str:
+    def _friendly_error(self, exc: Exception, model: str | None = None) -> str:
         text = str(exc)
         lower = text.lower()
         if "402" in text or "payment required" in lower or "spending limit" in lower or "budget" in lower:
@@ -380,7 +426,7 @@ class Agent:
         if "api key" in lower or "401" in text or "unauthorized" in lower:
             return "my ai key got rejected. check AI_API_KEY / AI_BASE_URL in my .env."
         if "model" in lower and ("not found" in lower or "does not exist" in lower):
-            return f"i couldn't find the model `{self.settings.ai_model}`. check AI_MODEL."
+            return f"i couldn't find the model `{model or self.settings.ai_model}`. check AI_MODEL."
         if "tool" in lower:
             return (
                 "that model doesn't seem to support tool calling. try a tool-capable model "

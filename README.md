@@ -12,13 +12,14 @@ optional second identity: replies as a real user, with native typing indicators
 
 - **AI agent** — mentions, DMs, thread follow-ups and optional ambient replies. Tool calling, SQLite memory, per-user budgets and rate limits. Works with any OpenAI-compatible endpoint; defaults to Hack Club AI.
 - **Dual identity (optional)** — a second Slack account replies through a client WebSocket gateway, so messages look human and show native `… is typing`. The bot account keeps handling workspace events in parallel.
+- **Owner-profile posting (optional)** — with the owner's own token, the agent can post in their name and adds a small muted `Sent by @assistant` line, so authorship is always clear.
 - **Jev gate** — a typed classifier decides whether an unaddressed message deserves a reply, who it is aimed at, and whether answering needs live data. Fails closed.
 - **Rich artifacts** — AI images, rendered charts (`make_chart` → PNG) and PowerPoint decks (`make_deck` → PPTX), uploaded into the conversation.
 - **Welcomer** — public welcome, onboarding DM, optional ping-group opt-in.
 - **Tier-2 access** — request modal, admin approve/deny buttons, automatic channel invite.
 - **Daily recap** — scheduled prompt with a done button, optional private follow-up and usergroup ping.
 - **Reminders, polls, dice** — one-off and recurring reminders, button polls with live tallies, dice notation.
-- **Runtime settings** — recaps, digest, personal updates, thread follows, welcomer, tier-2 and ambient AI can be toggled from chat.
+- **Runtime settings** — recaps, digest, personal updates, thread follows, welcomer channels, tier-2, ambient AI, and per-identity models can be changed from chat.
 - **Slack-native output** — mrkdwn sanitising, broadcast-ping disarming, link-unfurl suppression, chunking for long replies.
 
 ## Architecture
@@ -29,7 +30,7 @@ Slack ──socket mode──▶ bot account (xoxb / xapp) ──▶ features, s
    └──client websocket──▶ user account (xoxc / xoxd) ──▶ personal assistant replies + typing
 ```
 
-Both identities share one process, one SQLite database, one model configuration and one toolbox. The bot account owns everything that needs app scopes (events, buttons, slash commands). The user account is a normal Slack session: it can read what the user can read, post as the user, and emit typing frames the Slack client renders natively.
+Both identities share one process, one SQLite database and one toolbox, but can run different models. The bot account owns everything that needs app scopes (events, buttons, slash commands). The user account is a normal Slack session: it can read what the user can read, post as itself, and emit typing frames the Slack client renders natively. Neither token can post as the owner — that needs the owner's own token, below.
 
 ### The user account
 
@@ -44,6 +45,15 @@ The user gateway connects to `wss://wss-primary.slack.com` using a browser sessi
 - **Deployment** — set `SLACK_USER_TOKEN` and `SLACK_USER_COOKIE`; leave them empty to run bot-only.
 
 > Session tokens expire when the browser session is revoked. Treat `xoxc` and `xoxd` as passwords: they grant full access to the account, including reading private channels. Rotate them by signing out and in again, then updating `.env`.
+
+### Posting as the owner
+
+`as_user=true` on `send_dm` / `post_message` posts through the owner's **own** Slack profile, then adds a small muted `Sent by <@assistant>` context line.
+
+- Set `SLACK_OWNER_TOKEN` to the owner's own user token (`xoxp-…`, or `xoxc-…` plus `SLACK_OWNER_COOKIE`).
+- On startup the token is checked with `auth_test()`; if it does not belong to `OWNER_USER_ID`, owner posting is disabled.
+- If the token is missing, the tool fails clearly. It never silently falls back to Boi or the bot app.
+- Slack does not allow one account to post as another, so Boi's `SLACK_USER_TOKEN` can never post as the owner.
 
 ## Quick start
 
@@ -65,6 +75,8 @@ The manifest enables socket mode, events, interactivity and the single `/nugget`
 | `OWNER_USER_ID` (`U…`) | your profile → More → Copy member ID |
 | `SLACK_USER_TOKEN` | optional, see [the user account](#the-user-account) |
 | `SLACK_USER_COOKIE` (`xoxd-…`) | optional, required alongside an `xoxc` token |
+| `SLACK_OWNER_TOKEN` | optional, the owner's own token for posting in their name |
+| `SLACK_OWNER_COOKIE` (`xoxd-…`) | optional, required alongside an `xoxc` owner token |
 
 ### 3. Configure
 
@@ -109,8 +121,11 @@ Settings live in SQLite and change from chat through the `bot_config` tool, or w
 | `thread_followups` | unprompted replies in threads the bot is already in |
 | `ambient_ai` | unprompted chime-ins in `AI_AMBIENT_CHANNELS` |
 | `welcomer` | joins/leaves and onboarding DMs |
+| `watched_channel_ids` | channel ids the welcomer watches; `*` for all |
 | `tier2` | access request flow |
 | `weather_location` | default location for the weather tool |
+| `ai_model` | bot app model (runtime override) |
+| `ai_assistant_model` | Boi model (runtime override) |
 
 Examples:
 
@@ -319,8 +334,10 @@ AI:
 |---|---|---|
 | `AI_API_KEY` | — | enables the agent |
 | `AI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
-| `AI_MODEL` | `deepseek/deepseek-v4.1-flash` | primary model, must support tools |
-| `AI_FALLBACK_MODEL` | `anthropic/claude-haiku-5.5` | retried on failure |
+| `AI_MODEL` | `deepseek/deepseek-v4.1-flash` | bot app model, must support tools |
+| `AI_FALLBACK_MODEL` | `anthropic/claude-haiku-5.5` | bot app fallback, retried on failure |
+| `AI_ASSISTANT_MODEL` | `anthropic/claude-sonnet-5` | Boi model (personal DMs) |
+| `AI_ASSISTANT_FALLBACK_MODEL` | `anthropic/claude-haiku-5.5` | Boi fallback |
 | `AI_MAX_TOKENS` | `1200` | max reply length |
 | `AI_HISTORY_LIMIT` | `24` | turns loaded per reply |
 | `AI_MAX_CONTEXT_CHARS` | `24000` | trim older turns above this size |
@@ -346,6 +363,8 @@ AI:
 | `WEATHER_DEFAULT_LOCATION` | — | default weather location |
 | `TAVILY_API_KEY` | — | optional search backend |
 | `MAX_REMINDERS` | `200` | active reminder cap |
+
+Jev is only the ambient-reply gate for the bot app. Boi DMs and explicit mentions skip it. Both models can be changed at runtime with `/nugget config ai_model …` and `/nugget config ai_assistant_model …`.
 
 ## Deployment
 
