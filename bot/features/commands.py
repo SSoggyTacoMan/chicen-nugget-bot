@@ -8,7 +8,7 @@ import re
 import time
 from typing import Any
 
-from bot import image_access
+from bot import image_access, integrations
 from bot.features.stats import (
     build_digest,
     collect_system_diagnostics,
@@ -47,6 +47,11 @@ HELP = """*{bot}: everything lives under `/nugget`*
 • `/nugget access` - request tier 2 access
 • `/nugget pending` - admin: list pending requests
 • `/nugget accesspanel` - admin: post/update the access panel
+
+*setup*
+• `/nugget setup` - connect Google, Mac, GitHub, email, or your Slack profile
+• `/nugget setup status` - see what is connected
+• `/nugget setup disconnect <name>` - remove stored credentials
 
 *reminders*
 • `/nugget reminder 10m stretch` - DM reminder
@@ -514,7 +519,17 @@ async def cmd_config(ack, command, client) -> None:
         "boi_fallback_model": "ai_assistant_fallback_model",
         "google_token": "google_access_token",
         "google_auth": "google_access_token",
+        "google_redirect": "google_redirect_uri",
         "mac_url": "mac_bridge_url",
+        "mac_token": "mac_bridge_token",
+        "github_token": "github_token",
+        "gh_token": "github_token",
+        "github_repo": "repo_url",
+        "repo": "repo_url",
+        "email_host": "imap_host",
+        "email_port": "imap_port",
+        "email_user": "imap_user",
+        "email_password": "imap_password",
     }
     known_keys = [
         "recaps",
@@ -539,13 +554,20 @@ async def cmd_config(ack, command, client) -> None:
         "google_refresh_token",
         "google_client_id",
         "google_client_secret",
+        "google_redirect_uri",
         "mac_bridge_url",
         "mac_bridge_token",
+        "github_token",
+        "repo_url",
+        "imap_host",
+        "imap_port",
+        "imap_user",
+        "imap_password",
     ]
 
     if action in {"list", "show"} or not parts:
         lines = ["*bot runtime settings*"]
-        secret_keys = {"google_access_token", "google_refresh_token", "google_client_secret", "mac_bridge_token"}
+        secret_keys = integrations.SECRET_CONFIG_KEYS
         for k in known_keys:
             val = runtime.db.kv_get(f"config:{k}") if runtime.db else None
             if val is not None and k in secret_keys:
@@ -599,7 +621,10 @@ async def cmd_config(ack, command, client) -> None:
             await _say(client, command, f"unknown setting `{raw_key}`. valid settings: {', '.join(known_keys)}", ephemeral=True)
             return
         val = runtime.db.kv_get(f"config:{key}") if runtime.db else None
-        status = f"`{val}`" if val is not None else "_(default)_"
+        if val is not None and key in integrations.SECRET_CONFIG_KEYS:
+            status = f"`{val[:4]}...{val[-4:]}`" if len(val) > 8 else "`****`"
+        else:
+            status = f"`{val}`" if val is not None else "_(default)_"
         await _say(client, command, f"• *{key}*: {status}", ephemeral=True)
         return
 
@@ -617,6 +642,16 @@ async def cmd_config(ack, command, client) -> None:
     key = key_aliases.get(raw_key, raw_key)
     if key not in known_keys:
         await _say(client, command, f"unknown setting `{raw_key}`. valid settings: {', '.join(known_keys)}", ephemeral=True)
+        return
+
+    if key in integrations.SECRET_CONFIG_KEYS:
+        await _say(
+            client,
+            command,
+            "secrets can't be set in chat. "
+            f"use `/nugget setup {integrations.secret_setup_target(key)}`.",
+            ephemeral=True,
+        )
         return
 
     # Per-channel recap toggle: /nugget config recaps <channel> off/on

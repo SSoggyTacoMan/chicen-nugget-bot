@@ -162,6 +162,10 @@ class Settings:
     google_refresh_token: str | None = None
     google_client_id: str | None = None
     google_client_secret: str | None = None
+    google_redirect_uri: str = "http://localhost:9876/oauth2callback"
+
+    # github API (optional token raises the rate limit and enables notifications)
+    github_token: str | None = None
 
     # mac companion link
     mac_bridge_url: str | None = None
@@ -348,6 +352,11 @@ def load_settings() -> Settings:
         google_refresh_token=_str("GOOGLE_REFRESH_TOKEN") or None,
         google_client_id=_str("GOOGLE_CLIENT_ID") or None,
         google_client_secret=_str("GOOGLE_CLIENT_SECRET") or None,
+        google_redirect_uri=_str(
+            "GOOGLE_REDIRECT_URI", "http://localhost:9876/oauth2callback"
+        )
+        or "http://localhost:9876/oauth2callback",
+        github_token=_str("GITHUB_TOKEN") or None,
         mac_bridge_url=_str("MAC_BRIDGE_URL") or None,
         mac_bridge_token=_str("MAC_BRIDGE_TOKEN") or None,
     )

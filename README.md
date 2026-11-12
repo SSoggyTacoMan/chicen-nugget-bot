@@ -50,10 +50,48 @@ The user gateway connects to `wss://wss-primary.slack.com` using a browser sessi
 
 `as_user=true` on `send_dm` / `post_message` posts through the owner's **own** Slack profile, then adds a small muted `Sent by <@assistant>` context line.
 
-- Set `SLACK_OWNER_TOKEN` to the owner's own user token (`xoxp-…`, or `xoxc-…` plus `SLACK_OWNER_COOKIE`).
-- On startup the token is checked with `auth_test()`; if it does not belong to `OWNER_USER_ID`, owner posting is disabled.
+- Connect it with `/nugget setup slack` (recommended), or set `SLACK_OWNER_TOKEN` / `SLACK_OWNER_COOKIE`.
+- Use the owner's own user token (`xoxp-…`, or `xoxc-…` plus the `d` cookie). A bot token cannot post as a person.
+- The token is checked with `auth_test()` when saved and at startup; if it does not belong to `OWNER_USER_ID`, owner posting is disabled.
 - If the token is missing, the tool fails clearly. It never silently falls back to Boi or the bot app.
 - Slack does not allow one account to post as another, so Boi's `SLACK_USER_TOKEN` can never post as the owner.
+
+## Setup from chat
+
+You do not need to SSH into the VPS to connect personal integrations. Run `/nugget setup`, or ask the bot to open the setup panel. Each integration opens a Slack modal, so secrets are not posted in chat.
+
+| integration | setup |
+|---|---|
+| Google Workspace | `/nugget setup google` |
+| Mac companion | `/nugget setup mac` |
+| GitHub | `/nugget setup github` |
+| Email (IMAP) | `/nugget setup email` |
+| Your Slack profile | `/nugget setup slack` |
+| Status | `/nugget setup status` |
+| Remove credentials | `/nugget setup disconnect <name>` |
+
+Settings are stored in SQLite (`data/bot.db`) and override environment variables. Environment values remain a fallback for fresh deploys and CI.
+
+### Google OAuth
+
+Google uses a desktop-client OAuth flow, so it works on a headless VPS:
+
+1. Create a Google Cloud project and enable the Calendar, Gmail, and Drive APIs.
+2. Create an OAuth client of type **Desktop app**.
+3. Add `http://localhost:9876/oauth2callback` as an authorized redirect URI.
+4. Run `/nugget setup google`, paste the client id and secret, then open the DM authorization link on your own machine.
+5. Google redirects to `localhost` and shows an error page. That is expected. Copy the full URL from the address bar and paste it into the setup modal.
+6. The bot exchanges the code server-side and stores the refresh token. Calendar, Gmail, and Drive become available immediately.
+
+The flow uses `calendar`, `gmail.modify`, `drive.readonly`, and `userinfo.email` scopes. Revoke access from your Google account page and run `/nugget setup disconnect google` to remove the stored token.
+
+### Mac companion
+
+Run `scripts/mac_companion.py` on the Mac, expose it through a Cloudflare Tunnel or ngrok, then `/nugget setup mac`. It supports battery/volume/status, open apps/files/URLs, notifications, clipboard, lock, sleep, speak, AppleScript, and shell commands.
+
+### GitHub and email
+
+A GitHub token is optional for public reads, but enables notifications and higher rate limits. IMAP works with Gmail/Fastmail app passwords; use an app password, not your account password.
 
 ## Quick start
 
@@ -111,7 +149,7 @@ Invite it to the welcome, logs and panel channels, and to the private tier-2 cha
 
 ## Personal controls
 
-Settings live in SQLite and change from chat through the `bot_config` tool, or with `/nugget config`. Owner/admin only.
+Settings live in SQLite and change from chat through the `bot_config` tool, or with `/nugget config`. Owner/admin only. Secret values (tokens, app passwords) are rejected in chat; connect those through `/nugget setup` modals instead.
 
 | key | effect |
 |---|---|
@@ -162,7 +200,9 @@ The fallback model is tried when the primary errors or times out. Turns and note
 |---|---|
 | web/research | `search_web`, `fetch_url`, `http_status`, `hacker_news`, `ocr_document` |
 | code/dev | `run_code`, `github_info`, `hackatime_stats`, `system_diagnostics` |
-| slack | `search_slack`, `fetch_slack_message`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `send_dm`, `post_message` |
+| slack | `search_slack`, `fetch_slack_message`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `send_dm`, `post_message`, `slack_status`, `slack_dnd`, `slack_react`, `slack_activity` |
+| personal operator | `google_calendar`, `gmail`, `google_drive`, `mac_control`, `check_emails`, `daily_briefing`, `hackatime_stats` |
+| setup | `integration_setup` |
 | workspace | `flaron`, `pending_access_requests`, `get_stats`, `bot_config` |
 | personal | `remember`, `recall`, `manage_tasks`, `remind`, `list_reminders`, `cancel_reminder` |
 | media | `generate_image`, `make_chart`, `make_deck` |
@@ -261,6 +301,7 @@ Everything lives under `/nugget`, so it never collides with other apps.
 | `/nugget forget` | wipe stored AI memory | DM / admin |
 | `/nugget pinggroup [join\|leave]` | manage the ping group | anyone |
 | `/nugget config` | view or change runtime settings | admin |
+| `/nugget setup` | connect Google, Mac, GitHub, email, or your Slack profile | admin |
 | `/nugget whois @user` | user lookup | anyone |
 
 ### Reminder syntax
