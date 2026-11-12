@@ -1710,5 +1710,81 @@ def test_transcribe_slack_audio():
     asyncio.run(run())
 
 
+def test_github_info_runs():
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import httpx
+
+    from bot.ai.tools import Toolbox, ToolContext
+
+    settings = MagicMock()
+    box = Toolbox(settings)
+    ctx = ToolContext(
+        db=MagicMock(),
+        settings=settings,
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="C1",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+    )
+
+    async def run():
+        async def fake_gh_get(self, url, *args, **kwargs):
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            resp.json.return_value = {
+                "workflow_runs": [
+                    {
+                        "id": 123456,
+                        "name": "deploy",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_branch": "main",
+                        "event": "push",
+                        "created_at": "2026-11-12T10:00:00Z",
+                        "html_url": "https://github.com/owner/repo/actions/runs/123456",
+                    }
+                ]
+            }
+            return resp
+
+        with patch.object(httpx.AsyncClient, "get", new=fake_gh_get):
+            res = await box.execute("github_info", {"action": "runs", "target": "owner/repo"}, ctx)
+            data = json.loads(res)
+            assert len(data) == 1
+            assert data[0]["name"] == "deploy"
+            assert data[0]["conclusion"] == "success"
+
+    asyncio.run(run())
+
+
+def test_cmd_accounts():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from bot.features.commands import cmd_accounts
+
+    async def run():
+        ack = AsyncMock()
+        client = AsyncMock()
+        command = {"channel_id": "C123", "user_id": "U123"}
+        await cmd_accounts(ack, command, client)
+        ack.assert_called_once()
+        client.chat_postEphemeral.assert_called_once()
+        _, kwargs = client.chat_postEphemeral.call_args
+        assert "Chicen Nugget Bot" in kwargs["text"]
+        assert "Chicen Nugget Boi" in kwargs["text"]
+
+    asyncio.run(run())
+
+
+
 
 

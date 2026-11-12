@@ -38,6 +38,7 @@ HELP = """*{bot}: everything lives under `/nugget`*
 *basics*
 • `/nugget` - a random nugget fact
 • `/nugget help` - this message
+• `/nugget accounts` - explain the 2 bot & assistant identities
 • `/nugget ping` - check I'm alive
 • `/nugget id` - show channel/user ids
 • `/nugget whois @someone`
@@ -108,6 +109,29 @@ async def cmd_ping(ack, command, client) -> None:
         f":ping_pong: pong - {settings.bot_name} is awake "
         f"({elapsed:.0f} ms api round trip, up {format_uptime(runtime.started_at)}). ai: {ai}",
     )
+
+
+async def cmd_accounts(ack, command, client) -> None:
+    await ack()
+    bot_id = runtime.bot_user_id or "unknown"
+    user_id = runtime.user_id or getattr(runtime.settings, "assistant_user_id", "") or "not configured"
+    lines = [
+        "*parallel account architecture*",
+        "",
+        f"• *Chicen Nugget Bot* (<@{bot_id}>) — `[APP]`",
+        "  - Role: workspace bot app & community assistant.",
+        "  - Where it lives: Slack sidebar under *Apps*, and in channels it's invited to.",
+        "  - Handles: slash commands (`/nugget`), welcoming new members, access requests, daily recaps, public channel mentions, and ambient listening.",
+        "",
+        f"• *Chicen Nugget Boi* (<@{user_id}>) — `[USER]`",
+        "  - Role: your 1-on-1 personal operator & executive assistant.",
+        "  - Where it lives: Slack sidebar under *Direct Messages* (normal user account with typing indicators).",
+        "  - Handles: private DMs, Mac companion control, Google Calendar, Gmail, Google Drive, Hackatime, GitHub CI runs, Slack status/snooze, reminders, to-dos, and transcribing voice notes.",
+        "  - Can post as user (`as_user=true`) only with explicit owner permission.",
+        "",
+        "_Tip: Message the *Bot App* for workspace questions or /nugget commands; message *Boi* in DMs for personal operator tasks._",
+    ]
+    await _say(client, command, "\n".join(lines), ephemeral=True)
 
 
 async def cmd_id(ack, command, client) -> None:
