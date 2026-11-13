@@ -33,6 +33,7 @@ import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
 from bot import image_access, integrations
+from bot.ai.browser import BrowserError, BrowserManager
 from bot.ai.sandbox import SandboxError, SandboxManager, safe_env, safe_name
 from bot.api_keys import API_SERVICES, api_service, api_token, auth_headers, save_api_token
 from bot.config import Settings
@@ -475,6 +476,7 @@ class Toolbox:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._browser_manager: BrowserManager | None = None
 
     # ------------------------------------------------------------ definitions
     @property
@@ -1252,6 +1254,50 @@ class Toolbox:
                     },
                 },
                 ["service", "path"],
+            ),
+            tool(
+                "browser",
+                "Control a real headless Chromium browser: open public pages, read rendered text, click, fill forms, press keys, wait for elements, and take screenshots. Owner/admin only, DM only. Logged-in sites are not supported yet.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "open",
+                            "read",
+                            "screenshot",
+                            "click",
+                            "fill",
+                            "press",
+                            "wait",
+                            "back",
+                            "forward",
+                            "reload",
+                            "close",
+                        ],
+                        "description": "Browser action.",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "For action='open': public http(s) URL.",
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector for click/fill/wait.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text for action='fill'.",
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Key for action='press', e.g. 'Enter' or 'Tab'.",
+                    },
+                    "full_page": {
+                        "type": "boolean",
+                        "description": "For action='screenshot': capture the full page. Default false.",
+                    },
+                },
+                ["action"],
             ),
             tool(
                 "daily_briefing",
@@ -4583,6 +4629,99 @@ class Toolbox:
                 "body": parsed,
             }
         )
+
+    def _browser_for(self, ctx: ToolContext) -> BrowserManager | None:
+        if not bool(getattr(ctx.settings, "browser_enabled", True)):
+            return None
+        if self._browser_manager is None:
+            root = getattr(ctx.settings, "browser_dir", None) or (
+                Path(ctx.settings.data_dir) / "browser"
+            )
+            self._browser_manager = BrowserManager(
+                Path(root),
+                headless=bool(getattr(ctx.settings, "browser_headless", True)),
+                timeout=int(getattr(ctx.settings, "browser_timeout", 30) or 30),
+                max_sessions=int(
+                    getattr(ctx.settings, "browser_max_sessions", 2) or 2
+                ),
+                idle_timeout=int(
+                    getattr(ctx.settings, "browser_idle_timeout", 900) or 900
+                ),
+            )
+        return self._browser_manager
+
+    async def _tool_browser(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can use the browser")
+        if not ctx.is_dm:
+            return _error("browser is only permitted in direct messages")
+        manager = self._browser_for(ctx)
+        if manager is None:
+            return _error("browser automation is disabled (BROWSER_ENABLED=false)")
+        action = str(args.get("action") or "").lower().strip()
+        session_key = f"{ctx.channel_id or 'dm'}:{ctx.thread_ts or 'root'}"
+
+        try:
+            if action == "open":
+                url = str(args.get("url") or "").strip()
+                if not url:
+                    return _error("url is required for action='open'")
+                return _json(await manager.open(session_key, url))
+            if action == "close":
+                return await manager.close(session_key)
+            if not manager.has_session(session_key):
+                return _error("no browser page is open. use action='open' first.")
+
+            if action == "read":
+                return _json(await manager.read(session_key))
+            if action == "screenshot":
+                data = await manager.screenshot(
+                    session_key, full_page=bool(args.get("full_page", False))
+                )
+                filename = f"browser-{int(time.time())}.png"
+                try:
+                    await ctx.client.files_upload_v2(
+                        channel=ctx.channel_id,
+                        thread_ts=ctx.thread_ts,
+                        file=data,
+                        filename=filename,
+                        initial_comment=":camera: browser screenshot",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return _error(f"couldn't upload the screenshot: {exc}")
+                return f"uploaded {filename}"
+            if action == "click":
+                selector = str(args.get("selector") or "").strip()
+                if not selector:
+                    return _error("selector is required for action='click'")
+                return _json(await manager.click(session_key, selector))
+            if action == "fill":
+                selector = str(args.get("selector") or "").strip()
+                text = str(args.get("text") or "")
+                if not selector:
+                    return _error("selector is required for action='fill'")
+                return _json(await manager.fill(session_key, selector, text))
+            if action == "press":
+                key_name = str(args.get("key") or "").strip()
+                if not key_name:
+                    return _error("key is required for action='press'")
+                return _json(await manager.press(session_key, key_name))
+            if action == "wait":
+                selector = str(args.get("selector") or "").strip()
+                if not selector:
+                    return _error("selector is required for action='wait'")
+                return _json(await manager.wait_for(session_key, selector))
+            if action == "back":
+                return _json(await manager.back(session_key))
+            if action == "forward":
+                return _json(await manager.forward(session_key))
+            if action == "reload":
+                return _json(await manager.reload(session_key))
+            return _error(f"unknown action: {action}")
+        except BrowserError as exc:
+            return _error(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"browser failed: {exc}")
 
     async def _tool_daily_briefing(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):

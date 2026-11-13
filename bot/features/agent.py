@@ -42,14 +42,14 @@ _last_unsubscribe: dict[tuple[str, str], float] = {}
 _UNSUBSCRIBE_COOLDOWN = 15.0
 _UNSUBSCRIBE_WORDS = {"unsubscribe", "unsub"}
 _NAME_ADDRESS = (
-    re.compile(r"^\s*(?:hey|yo|hi|ok|okay|so|alright)?\s*(?:chicen\s+nugget|chicen|nugget)\b", re.I),
-    re.compile(r"\b(?:chicen\s+nugget|chicen)\b", re.I),
-    re.compile(r"\bnugget\s*[,?!:]", re.I),
+    re.compile(r"^\s*(?:hey|yo|hi|ok|okay|so|alright)?\s*(?:chicen\s+nugget|chicen|nugget)\b", re.IGNORECASE),
+    re.compile(r"\b(?:chicen\s+nugget|chicen)\b", re.IGNORECASE),
+    re.compile(r"\bnugget\s*[,?!:]", re.IGNORECASE),
 )
 _REQUEST_RE = re.compile(
     r"\b(?:can|could|would|will)\s+you\b|"
     r"\b(?:help|check|look at|fix|review|explain|thoughts|opinion|advice|debug)\b",
-    re.I,
+    re.IGNORECASE,
 )
 _names: dict[str, str] = {}
 
@@ -67,6 +67,9 @@ async def on_message(event: dict[str, Any], client) -> None:
     channel_type = event.get("channel_type")
     if channel_type == "im":
         await _handle_dm(event, client)
+        return
+    if channel_type == "mpim":
+        await _handle_mpim(event, client)
         return
     if channel_type in {"channel", "group"}:
         if await _handle_unsubscribe(event, client):
@@ -90,7 +93,7 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
     # DM mentions are handled by the message event.
     if channel.startswith("D"):
         return
-    if not runtime.settings.ai_allowed(channel):
+    if not _ai_allowed(event):
         return
     images = await fetch_slack_images(event, runtime.settings.slack_bot_token)
     voice_transcripts = await transcribe_slack_audio(
@@ -111,7 +114,11 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
     if not text and images:
         text = "What is in this image?"
     await _handle_channel(
-        event, client, text=text, trigger="mention", images=images
+        event,
+        client,
+        text=text,
+        trigger="mpim_mention" if event.get("channel_type") == "mpim" else "mention",
+        images=images,
     )
 
 
@@ -184,6 +191,33 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
     finally:
         if message_ts:
             await unreact(client, event["channel"], message_ts, "eyes")
+
+
+def _ai_allowed(event: dict[str, Any]) -> bool:
+    """Group DMs are direct-ish spaces, so don't require an AI_CHANNELS entry."""
+    if event.get("channel_type") == "mpim":
+        return True
+    return runtime.settings.ai_allowed(event.get("channel") or "")
+
+
+async def _handle_mpim(event: dict[str, Any], client) -> None:
+    """Group DMs: mentions and bot-owned thread followups only, never ambient."""
+    channel = event.get("channel") or ""
+    text = (event.get("text") or "").strip()
+    if not channel or not text:
+        return
+    if runtime.bot_user_id and f"<@{runtime.bot_user_id}>" in text:
+        return  # app_mention owns this one
+    if runtime.user_id and f"<@{runtime.user_id}>" in text:
+        return  # Boi owns this one
+    thread_ts = event.get("thread_ts")
+    if not thread_ts or runtime.db is None:
+        return
+    if not runtime.db.is_thread(channel, thread_ts, owner="bot"):
+        return
+    if runtime.db.kv_get("config:thread_followups") == "false":
+        return
+    await _handle_thread_continuation(event, client)
 
 
 def _is_unsubscribe(text: str | None) -> bool:
@@ -269,7 +303,7 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
     user_id = event.get("user")
     if not channel or not thread_ts or not user_id:
         return
-    if not runtime.settings.ai_allowed(channel):
+    if not _ai_allowed(event):
         return
     if not runtime.db.is_thread(channel, thread_ts, owner="bot"):
         return
@@ -295,7 +329,8 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         voice_block = "\n".join(voice_transcripts)
         text = f"{text}\n\n[Voice message]: {voice_block}".strip()
 
-    rows = runtime.db.history(f"ch:{channel}:{thread_ts}", 8)
+    prefix = "mpim" if event.get("channel_type") == "mpim" else "ch"
+    rows = runtime.db.history(f"{prefix}:{channel}:{thread_ts}", 8)
     bot_last = bool(rows and rows[-1].get("role") == "assistant")
     recent = await _recent_lines(client, rows)
 
@@ -338,10 +373,14 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
 
     cooldown = runtime.settings.ai_thread_cooldown
     key = (channel, thread_ts)
-    if isinstance(cooldown, (int, float)) and cooldown > 0:
-        if not explicitly_named and time.monotonic() - _last_thread.get(key, 0.0) < cooldown:
-            logger.info("thread followup cooldown in %s (%ss)", channel, cooldown)
-            return
+    if (
+        isinstance(cooldown, (int, float))
+        and cooldown > 0
+        and not explicitly_named
+        and time.monotonic() - _last_thread.get(key, 0.0) < cooldown
+    ):
+        logger.info("thread followup cooldown in %s (%ss)", channel, cooldown)
+        return
 
     posted = await _handle_channel(
         event,
@@ -472,10 +511,11 @@ async def _handle_channel(
         )
         return False
     root_ts = thread_ts or event.get("thread_ts") or event.get("ts")
-    conversation = f"ch:{channel}:{root_ts}"
+    prefix = "mpim" if event.get("channel_type") == "mpim" else "ch"
+    conversation = f"{prefix}:{channel}:{root_ts}"
     message_ts = event.get("ts")
 
-    if message_ts and trigger in {"mention", "named", "thread_followup"}:
+    if message_ts and trigger in {"mention", "mpim_mention", "named", "thread_followup"}:
         await react(client, channel, message_ts, "eyes")
     posted = False
     try:
@@ -487,6 +527,7 @@ async def _handle_channel(
                 channel_id=channel,
                 thread_ts=root_ts,
                 is_dm=False,
+                is_mpim=event.get("channel_type") == "mpim",
                 trigger=trigger,
                 jev=jev,
                 images=images,
@@ -507,6 +548,6 @@ async def _handle_channel(
         )
         posted = True
     finally:
-        if message_ts and trigger in {"mention", "named", "thread_followup"}:
+        if message_ts and trigger in {"mention", "mpim_mention", "named", "thread_followup"}:
             await unreact(client, channel, message_ts, "eyes")
     return posted

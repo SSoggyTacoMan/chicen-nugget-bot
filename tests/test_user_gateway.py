@@ -157,6 +157,55 @@ def test_user_gateway_channel_mention():
     asyncio.run(run())
 
 
+def test_user_gateway_mpim_mention():
+    async def run():
+        mock_client = AsyncMock()
+        gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
+        mock_agent = AsyncMock()
+        mock_agent.reply = AsyncMock(return_value="group dm reply")
+        runtime.agent = mock_agent
+
+        mock_db = MagicMock()
+        runtime.db = mock_db
+
+        old_settings = runtime.settings
+        mock_settings = MagicMock()
+        mock_settings.owner_user_id = "U_OWNER"
+        mock_settings.is_admin.return_value = False
+        mock_settings.ai_enabled = True
+        # Group DMs are allowed even when AI_CHANNELS is restrictive.
+        mock_settings.ai_allowed.return_value = False
+        runtime.settings = mock_settings
+
+        event = {
+            "type": "message",
+            "channel": "G_TEST",
+            "channel_type": "mpim",
+            "user": "U_GUEST",
+            "text": "<@U_ALT> can you check this",
+            "ts": "210.002",
+            "thread_ts": "210.000",
+        }
+
+        try:
+            with patch("bot.user_gateway.fetch_slack_images", AsyncMock(return_value=[])):
+                await gw._handle_event(event)
+
+            mock_agent.reply.assert_called_once()
+            call_kwargs = mock_agent.reply.call_args[1]
+            assert call_kwargs["trigger"] == "mpim_mention"
+            assert call_kwargs["conversation"] == "user_mpim:G_TEST"
+            assert call_kwargs["is_mpim"] is True
+            assert call_kwargs["thread_ts"] == "210.000"
+            mock_db.mark_thread.assert_called_with("G_TEST", "210.000", owner="user")
+            mock_client.chat_postMessage.assert_called_once()
+            assert mock_client.chat_postMessage.call_args[1]["thread_ts"] == "210.000"
+        finally:
+            runtime.settings = old_settings
+
+    asyncio.run(run())
+
+
 def test_user_gateway_handle_dm_success():
     async def run():
         mock_client = AsyncMock()

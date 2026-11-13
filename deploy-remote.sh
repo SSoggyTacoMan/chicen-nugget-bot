@@ -32,6 +32,7 @@ ssh "${SSH_OPTS[@]}" "${REMOTE}" "cd ${REMOTE_DIR} && \
   \$PY -m venv .venv && \
   .venv/bin/pip install -q --upgrade pip && \
   .venv/bin/pip install -q -r requirements.txt && \
+  (.venv/bin/playwright install chromium >/dev/null 2>&1 || true) && \
   echo DEPS_OK && \$PY --version"
 
 echo "==> configuring systemd service"

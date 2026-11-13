@@ -108,6 +108,12 @@ class Settings:
     sandbox_max_workspaces: int
     sandbox_exec_timeout: int
     sandbox_max_exec_timeout: int
+    browser_enabled: bool
+    browser_headless: bool
+    browser_timeout: int
+    browser_max_sessions: int
+    browser_idle_timeout: int
+    browser_dir: Path
     imagine_model: str | None
     imagine_fallback_model: str | None
     image_user_ids: frozenset[str]
@@ -265,6 +271,11 @@ def load_settings() -> Settings:
         if _str("SANDBOX_DIR")
         else data_dir / "sandboxes"
     )
+    browser_dir = (
+        _path("BROWSER_DIR", "")
+        if _str("BROWSER_DIR")
+        else data_dir / "browser"
+    )
 
     return Settings(
         slack_bot_token=_str("SLACK_BOT_TOKEN"),
@@ -311,6 +322,12 @@ def load_settings() -> Settings:
         sandbox_max_workspaces=max(1, _int("SANDBOX_MAX_WORKSPACES", 20)),
         sandbox_exec_timeout=max(5, _int("SANDBOX_EXEC_TIMEOUT", 120)),
         sandbox_max_exec_timeout=max(5, _int("SANDBOX_MAX_EXEC_TIMEOUT", 600)),
+        browser_enabled=_bool("BROWSER_ENABLED", True),
+        browser_headless=_bool("BROWSER_HEADLESS", True),
+        browser_timeout=max(5, _int("BROWSER_TIMEOUT", 30)),
+        browser_max_sessions=max(1, _int("BROWSER_MAX_SESSIONS", 2)),
+        browser_idle_timeout=max(60, _int("BROWSER_IDLE_TIMEOUT", 900)),
+        browser_dir=browser_dir,
         imagine_model=_str("IMAGINE_MODEL", "google/gemini-3.1-flash-image") or None,
         imagine_fallback_model=_str("IMAGINE_FALLBACK_MODEL", "google/gemini-2.5-flash-image") or None,
         image_user_ids=frozenset(_list("IMAGE_ALLOWED_USER_IDS")),

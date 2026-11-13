@@ -10,10 +10,11 @@ Both run in one Python process over Socket Mode. No public URL, no web server, n
 
 ## what you get
 
-- mentions, name calls ("hey nugget"), DMs, thread follow-ups and optional ambient replies, with tool calling and per-user memory
+- mentions, name calls ("hey nugget"), DMs, group DMs, thread follow-ups and optional ambient replies, with tool calling and per-user memory
 - workspace search (messages and files) plus channel join, leave, create and member tools
 - a second Slack identity for personal assistant work
 - optional API tokens for Vercel, Cloudflare, Notion, Linear, Sentry, Resend, OpenAI and Anthropic
+- headless Chromium for pages that need JavaScript, clicking or forms
 - posting in the owner's name, either as a customized bot message or from their real account
 - jev, a small classifier that decides whether an unaddressed message actually deserves a reply
 - AI images, charts and PowerPoint decks uploaded straight into the conversation
@@ -38,6 +39,7 @@ Boi connects to `wss://wss-primary.slack.com` with a browser session token (`xox
 
 - **typing:** while the model runs, the gateway sends a typing frame every 2.5 seconds.
 - **messages:** the socket delivers `message` events. the gateway ignores bots, its own messages, the bot account, duplicate timestamps and thread chatter that isn't addressed to it.
+- **group DMs:** Boi answers when someone `@mentions` it in a group DM. private 1-on-1 history stays separate from group history.
 - **threads:** in channels it follows a thread only if the agent already knows it, otherwise it answers direct mentions. DM threads stay in the thread they started in, and top-level DMs stay top-level.
 - **reconnects:** Slack sends a `reconnect_url` frame after connect. the gateway caches it, falls back to `client.getWebSocketURL` when it expires, and backs off exponentially up to 30 seconds.
 - **presence:** on connect it asks Slack for `auto` presence. Slack still marks human accounts away after about 10 minutes of no activity. there's no API to force a user account active.
@@ -207,7 +209,7 @@ The fallback model kicks in when the primary errors or times out. Conversation h
 
 | group | tools |
 |---|---|
-| web and research | `search_web`, `fetch_url`, `http_status`, `hacker_news`, `ocr_document` |
+| web and research | `search_web`, `fetch_url`, `http_status`, `hacker_news`, `ocr_document`, `browser` |
 | code and dev | `inspect_code`, `clone_repo`, `sandbox`, `run_code`, `github_info`, `hackatime_stats`, `system_diagnostics` |
 | slack | `search_slack`, `fetch_slack_message`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `manage_channel`, `send_dm`, `post_message`, `slack_status`, `slack_dnd`, `slack_react`, `slack_activity` |
 | personal operator | `google_calendar`, `gmail`, `google_drive`, `mac_control`, `check_emails`, `daily_briefing`, `hackatime_stats`, `api_request` |
@@ -260,6 +262,30 @@ SANDBOX_MAX_WORKSPACES=20
 SANDBOX_EXEC_TIMEOUT=120
 SANDBOX_MAX_EXEC_TIMEOUT=600
 ```
+
+### browser
+
+`browser` is a real headless Chromium session for pages that `fetch_url` can't handle. Boi can open a public page, read the rendered text, click, fill forms, press keys, wait for elements, go back/forward/reload, and upload a screenshot.
+
+Owner/admin only, DM only. Public `http`/`https` pages only: localhost, private IPs, link-local and cloud metadata addresses are blocked, along with `file://` and `javascript:`. It does not log into sites yet. Sessions are capped and expire after 15 minutes of idle time.
+
+```dotenv
+BROWSER_ENABLED=true
+BROWSER_HEADLESS=true
+BROWSER_TIMEOUT=30
+BROWSER_MAX_SESSIONS=2
+BROWSER_IDLE_TIMEOUT=900
+BROWSER_DIR=
+```
+
+Install Chromium once on the server:
+
+```bash
+.venv/bin/pip install -r requirements.txt
+./scripts/install_browser.sh
+```
+
+If Chromium is missing, the tool says so instead of taking the bot down.
 
 ### artifacts
 
@@ -455,6 +481,12 @@ AI:
 | `SANDBOX_MAX_WORKSPACES` | `20` | maximum sandboxes kept at once |
 | `SANDBOX_EXEC_TIMEOUT` | `120` | default seconds before a sandbox command is killed |
 | `SANDBOX_MAX_EXEC_TIMEOUT` | `600` | hard cap for a sandbox command, even if the model asks for longer |
+| `BROWSER_ENABLED` | `true` | enable the browser tool |
+| `BROWSER_HEADLESS` | `true` | run Chromium headless |
+| `BROWSER_TIMEOUT` | `30` | seconds for navigation and selector actions |
+| `BROWSER_MAX_SESSIONS` | `2` | open browser sessions before the oldest is closed |
+| `BROWSER_IDLE_TIMEOUT` | `900` | seconds before an idle browser session is closed |
+| `BROWSER_DIR` | `<DATA_DIR>/browser` | browser data root |
 | `IMAGINE_MODEL` | `google/gemini-3.1-flash-image` | image model. empty disables `/imagine` and `generate_image` |
 | `IMAGINE_FALLBACK_MODEL` | `google/gemini-2.5-flash-image` | image fallback |
 | `AI_IMAGE_COST_USD` | `0.04` | per-image budget charge |
@@ -538,6 +570,7 @@ bot/
   reminders.py             reminder creation and delivery
   ai/
     agent.py               prompt assembly, history, tool loop, prompt digest
+    browser.py             headless Chromium sessions and URL guards
     tools.py               tool registry and implementations
     gate.py                Jev gate: questions, thresholds, decision
     jev.py                 typed Jev client
