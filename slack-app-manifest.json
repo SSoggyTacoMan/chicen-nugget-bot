@@ -26,12 +26,17 @@
   "oauth_config": {
     "scopes": {
       "user": [
+        "channels:write",
         "chat:write",
         "files:read",
+        "groups:write",
         "reactions:write",
         "search:read",
         "usergroups:read",
-        "usergroups:write"
+        "usergroups:write",
+        "users.profile:read",
+        "users.profile:write",
+        "users:write"
       ],
       "bot": [
         "app_mentions:read",
@@ -41,6 +46,7 @@
         "channels:read",
         "chat:write",
         "chat:write.customize",
+        "chat:write.public",
         "commands",
         "files:read",
         "files:write",
