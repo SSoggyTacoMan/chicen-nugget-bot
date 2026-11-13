@@ -183,7 +183,7 @@ async def run() -> None:
     scheduler.start()
 
     logger.info(
-        "%s online as bot user %s (%s) | ai=%s welcomer=%s access=%s user_token=%s owner_posting=%s",
+        "%s online as bot user %s (%s) | ai=%s welcomer=%s access=%s user_token=%s owner_native=%s",
         settings.bot_name,
         runtime.bot_user_id,
         auth.get("team"),

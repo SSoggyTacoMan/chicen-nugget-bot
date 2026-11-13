@@ -1,8 +1,10 @@
-"""Activation and validation of the owner's own Slack user token.
+"""Optional native owner posting via the owner's own Slack user token.
 
-Slack does not let a bot token or another user's token post as the owner. Owner
-posting only works with the owner's own `xoxp-` token (or `xoxc-` plus the `d`
-cookie). This module validates that at startup and after chat-based setup.
+Posting "in the owner's name" works by default without this: the bot app shows
+the owner's display name and avatar on a bot message via `chat:write.customize`.
+A token validated here upgrades that to a fully native post from the owner's own
+account, with no app badge. It must be an `xoxp-` token (or `xoxc-` plus the `d`
+cookie) that belongs to ``OWNER_USER_ID``.
 """
 
 from __future__ import annotations

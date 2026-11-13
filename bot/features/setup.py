@@ -279,7 +279,7 @@ def _usage() -> str:
         "• `/nugget setup github` - username, token, default repo\n"
         "• `/nugget setup email` - IMAP inbox\n"
         "• `/nugget setup mac` - companion bridge\n"
-        "• `/nugget setup slack` - post through your own profile\n"
+        "• `/nugget setup slack` - posting in your name (optional native token)\n"
         "• `/nugget setup disconnect <name>` - remove stored credentials\n\n"
         "secrets go into Slack modals, never chat. Google uses a desktop OAuth "
         "client and a `http://localhost:9876/oauth2callback` redirect; you paste "
@@ -630,25 +630,28 @@ def _integration_modal(integration: str) -> dict[str, Any] | None:
             "Your Slack profile",
             [
                 _note(
-                    "Slack does not let the bot or Boi post as you. this needs *your own* "
-                    "user token: `xoxp-...` from a Slack app installed to your account, or "
-                    "`xoxc-...` plus the `d` cookie from your Slack web session.\n"
-                    "the token is validated against your configured owner id before it is saved."
+                    "posting in your name works out of the box. the bot app posts with your "
+                    "*display name and profile picture* (Slack `chat:write.customize`), so it "
+                    "looks like you and still carries the small `APP` badge plus a "
+                    "`Sent by` line.\n"
+                    "optional: add *your own* user token for a fully native post with no app "
+                    "badge. `xoxp-...`, or `xoxc-...` plus the `d` cookie from your Slack web "
+                    "session. it is validated against your owner id before it is saved."
                 ),
                 _input(
                     "token",
-                    "Owner user token",
-                    placeholder="xoxp-... or xoxc-...",
+                    "Optional: your own user token",
+                    placeholder="xoxp-... or xoxc-... (blank keeps current, '-' clears)",
                     max_length=500,
                 ),
                 _input(
                     "cookie",
-                    "Slack d cookie (only for xoxc tokens)",
+                    "Optional: Slack d cookie (only for xoxc)",
                     placeholder="leave blank to keep the current cookie",
                     max_length=1000,
                 ),
             ],
-            submit="Enable posting",
+            submit="Save",
         )
     return None
 
@@ -750,7 +753,14 @@ async def on_slack_submit(ack, body, view, client) -> None:
     token = _merge(values.get("token", ""), current["token"])
     cookie = _merge(values.get("cookie", ""), current["cookie"])
     if not token:
-        await _dm(client, user_id or "", "owner posting needs your own Slack user token.")
+        save_owner_credentials(runtime.db, token="", cookie="")
+        deactivate_owner_posting()
+        await _dm(
+            client,
+            user_id or "",
+            "no owner token stored. posting in your name will use your display name and "
+            "profile picture on a bot message (app badge visible).",
+        )
         return
     if token.startswith("xoxp-"):
         cookie = ""
@@ -759,7 +769,7 @@ async def on_slack_submit(ack, body, view, client) -> None:
         token=token, cookie=cookie, settings=runtime.settings, quiet=True
     )
     if result.error:
-        await _dm(client, user_id or "", f"owner posting not enabled: {result.error}")
+        await _dm(client, user_id or "", f"owner token not saved: {result.error}")
         return
 
     save_owner_credentials(runtime.db, token=token, cookie=cookie)
@@ -768,8 +778,9 @@ async def on_slack_submit(ack, body, view, client) -> None:
     await _dm(
         client,
         user_id or "",
-        f"owner posting enabled as <@{result.user_id}>. messages posted with `as_user=true` "
-        "will use your profile with the small `Sent by` line.",
+        f"native owner posting enabled as <@{result.user_id}>. messages posted with "
+        "`as_user=true` now come from your real profile with no app badge, plus the "
+        "small `Sent by` line.",
     )
 
 

@@ -152,9 +152,13 @@ async def cmd_accounts(ack, command, client) -> None:
         "  - Boi DMs and direct mentions do not go through Jev.",
         "",
         f"• *You* (<@{owner_id}>) — your own Slack profile",
-        f"  - posting through your profile: {'connected' if owner_posting else 'not configured'} (`SLACK_OWNER_TOKEN`).",
-        "  - when `as_user=true` is used, the bot posts with *your* token and adds a small \"Sent by <@assistant>\" line.",
-        "  - Slack does not let one account post as another, so Boi's token can never post as you.",
+        (
+            "  - native posting: enabled with your own user token (no app badge)."
+            if owner_posting
+            else "  - posting in your name: the bot app shows your display name + avatar on a bot message (app badge)."
+        ),
+        "  - `as_user=true` adds a small \"Sent by <@assistant>\" line either way.",
+        "  - add your own user token with `/nugget setup slack` for a native post; Boi's token can never post as you.",
         "",
         "• *shared brain*: the bot app and Boi use the same code, SQLite memory, notes, tasks, and runtime config.",
         f"• *welcomer*: {watched} (change with `/nugget config watched_channels #channel`).",

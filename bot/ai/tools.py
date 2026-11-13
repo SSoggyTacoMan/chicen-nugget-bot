@@ -53,6 +53,7 @@ from bot.slack_api import (
     is_private_host,
     post,
     ssrf_filter,
+    user_display,
     user_info,
 )
 from bot.utils import dice
@@ -156,6 +157,16 @@ def get_user_memory_prompt(db: Database | None, settings: Settings, user_id: str
     if not sections:
         return "none stored yet"
     return "\n\n".join(sections)
+
+
+@dataclass
+class _PostRoute:
+    """Where a message goes, and how Slack should render the sender."""
+
+    client: AsyncWebClient | None = None
+    customize: dict[str, str] | None = None
+    native_owner: bool = False
+    error: str | None = None
 
 
 @dataclass
@@ -392,6 +403,14 @@ def _posted_by_signature(ctx: ToolContext) -> str:
     return f"_Sent by <@{mention_id}>_" if mention_id else "_Sent by chicen nugget boi_"
 
 
+def _sender_label(route: _PostRoute) -> str:
+    if route.native_owner:
+        return "your Slack profile (native post)"
+    if route.customize:
+        return "your name and avatar (bot message, app badge visible)"
+    return "the bot app"
+
+
 def _owner_message_blocks(text: str, signature: str) -> list[dict[str, Any]] | None:
     """Small muted signature under an owner-posted message, via Block Kit."""
     if len(text) > 2900:
@@ -547,13 +566,13 @@ class Toolbox:
             ),
             tool(
                 "send_dm",
-                "Send a direct message as the bot app, or through the owner's own Slack profile when as_user is true. Owner/admin only.",
+                "Send a direct message as the bot app, or under the owner's name and avatar when as_user is true. Owner/admin only.",
                 {
                     "user": {"type": "string", "description": "User id, @name, display name, or email."},
                     "text": {"type": "string", "description": "Message text (Slack mrkdwn)."},
                     "as_user": {
                         "type": "boolean",
-                        "description": "Post through the owner's own Slack profile (SLACK_OWNER_TOKEN), with a small 'Sent by @assistant' signature. Only use when the owner explicitly asked or gave permission to post in their name. Default false (bot app).",
+                        "description": "Post under the owner's display name and profile picture (Slack chat:write.customize), with a small 'Sent by @assistant' signature. It stays a bot message with the app badge. If the owner configured their own user token, it posts natively instead. Only use when the owner explicitly asked or gave permission to post in their name. Default false (bot app).",
                     },
                 },
                 ["user", "text"],
@@ -616,13 +635,13 @@ class Toolbox:
             ),
             tool(
                 "post_message",
-                "Post a message to a Slack channel as the bot app, or through the owner's own Slack profile when as_user is true. Owner/admin only.",
+                "Post a message to a Slack channel as the bot app, or under the owner's name and avatar when as_user is true. Owner/admin only.",
                 {
                     "channel": {"type": "string", "description": "Channel id, #name, or 'here'."},
                     "text": {"type": "string", "description": "Message text (Slack mrkdwn)."},
                     "as_user": {
                         "type": "boolean",
-                        "description": "Post through the owner's own Slack profile (SLACK_OWNER_TOKEN), with a small 'Sent by @assistant' signature. Only use when the owner explicitly asked or gave permission to post in their name. Default false (bot app).",
+                        "description": "Post under the owner's display name and profile picture (Slack chat:write.customize), with a small 'Sent by @assistant' signature. It stays a bot message with the app badge. If the owner configured their own user token, it posts natively instead. Only use when the owner explicitly asked or gave permission to post in their name. Default false (bot app).",
                     },
                     "thread_ts": {
                         "type": "string",
@@ -1425,17 +1444,33 @@ class Toolbox:
             "purpose": ((channel.get("purpose") or {}).get("value")),
         }
 
-    def _get_target_client(self, ctx: ToolContext, as_user: bool) -> tuple[AsyncWebClient | None, str | None]:
-        if as_user:
-            if not ctx.owner_client:
-                return None, (
-                    "posting as you is not configured. connect your own Slack user token "
-                    "with `/nugget setup slack` (or set SLACK_OWNER_TOKEN): xoxp-..., or "
-                    "xoxc-... plus the `d` cookie. slack does not allow one account to post "
-                    "as another, so Boi's token cannot post as you."
+    async def _post_route(self, ctx: ToolContext, as_user: bool) -> _PostRoute:
+        """Resolve who a message is posted as.
+
+        Default ``as_user`` mode mirrors how other Slack apps (e.g. pixl) do it:
+        the bot app posts with ``username`` + ``icon_url`` taken from the owner's
+        profile (``chat:write.customize``). That is a bot message wearing the
+        owner's name and avatar, so Slack keeps the app badge. If the owner has
+        also supplied their own user token, use it instead for a fully native
+        post with no badge.
+        """
+        if not as_user:
+            return _PostRoute(client=ctx.bot_client or ctx.client)
+        if ctx.owner_client is not None:
+            return _PostRoute(client=ctx.owner_client, native_owner=True)
+        client = ctx.bot_client or ctx.client
+        if client is None:
+            return _PostRoute(error="slack client not available")
+        display = await user_display(client, ctx.settings.owner_user_id)
+        if not display:
+            return _PostRoute(
+                error=(
+                    "couldn't read your Slack profile, so i can't post under your name. "
+                    "the app needs `users:read` and `chat:write.customize`; add them at "
+                    "api.slack.com/apps and reinstall the app to the workspace."
                 )
-            return ctx.owner_client, None
-        return ctx.bot_client or ctx.client, None
+            )
+        return _PostRoute(client=client, customize=display)
 
     async def _tool_get_channel_history(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
@@ -1506,9 +1541,10 @@ class Toolbox:
         if not user:
             return _error(f"could not find a user matching {query!r}")
         user_id = user.get("id")
-        target_client, err = self._get_target_client(ctx, as_user)
-        if err or not target_client:
-            return _error(err or "slack client not available")
+        route = await self._post_route(ctx, as_user)
+        if route.error or not route.client:
+            return _error(route.error or "slack client not available")
+        target_client = route.client
         target = user_id
         try:
             opened = await target_client.conversations_open(users=user_id)
@@ -1525,10 +1561,16 @@ class Toolbox:
             if "sent by <@" not in formatted.lower():
                 blocks = _owner_message_blocks(formatted, signature)
                 formatted = f"{formatted}\n\n{signature}"
-        if not await post(target_client, target, formatted, blocks=blocks):
+        if not await post(
+            target_client, target, formatted, blocks=blocks, **(route.customize or {})
+        ):
+            if route.customize:
+                return _error(
+                    "slack rejected the DM. if this is the first time, the app needs the "
+                    "`chat:write.customize` scope and a reinstall."
+                )
             return _error("slack rejected the DM")
-        sender = "your profile (owner)" if as_user else "Bot app"
-        return f"sent a DM to <@{user_id}> as {sender}."
+        return f"sent a DM to <@{user_id}> as {_sender_label(route)}."
 
     async def _tool_nugget_fact(self, args: dict[str, Any], ctx: ToolContext) -> str:
         return random_fact()
@@ -1745,9 +1787,9 @@ class Toolbox:
         channel_id = await self._resolve_channel(ctx, channel_value)
         if not channel_id:
             return _error(f"could not resolve channel {channel_value!r}")
-        target_client, err = self._get_target_client(ctx, as_user)
-        if err or not target_client:
-            return _error(err or "slack client not available")
+        route = await self._post_route(ctx, as_user)
+        if route.error or not route.client:
+            return _error(route.error or "slack client not available")
         thread_ts = str(args.get("thread_ts") or "").strip() or None
         formatted = disarm_broadcasts(format_mrkdwn(text))
         blocks = None
@@ -1757,17 +1799,22 @@ class Toolbox:
                 blocks = _owner_message_blocks(formatted, signature)
                 formatted = f"{formatted}\n\n{signature}"
         result = await post(
-            target_client,
+            route.client,
             channel_id,
             formatted,
             blocks=blocks,
             thread_ts=thread_ts,
+            **(route.customize or {}),
         )
         if not result:
+            if route.customize:
+                return _error(
+                    "slack rejected the message. if this is the first time, the app needs "
+                    "the `chat:write.customize` scope and a reinstall."
+                )
             return _error("slack rejected the message")
-        sender = "your profile (owner)" if as_user else "Bot app"
         loc = f"<#{channel_id}> (thread {thread_ts})" if thread_ts else f"<#{channel_id}>"
-        return f"posted to {loc} (ts {result.get('ts')}) as {sender}."
+        return f"posted to {loc} (ts {result.get('ts')}) as {_sender_label(route)}."
 
     async def _tool_slack_status(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):

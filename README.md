@@ -48,13 +48,18 @@ The user gateway connects to `wss://wss-primary.slack.com` using a browser sessi
 
 ### Posting as the owner
 
-`as_user=true` on `send_dm` / `post_message` posts through the owner's **own** Slack profile, then adds a small muted `Sent by <@assistant>` context line.
+`as_user=true` on `send_dm` / `post_message` makes a message look like it came from you, and adds a small muted `Sent by <@assistant>` context line.
 
-- Connect it with `/nugget setup slack` (recommended), or set `SLACK_OWNER_TOKEN` / `SLACK_OWNER_COOKIE`.
-- Use the owner's own user token (`xoxp-…`, or `xoxc-…` plus the `d` cookie). A bot token cannot post as a person.
-- The token is checked with `auth_test()` when saved and at startup; if it does not belong to `OWNER_USER_ID`, owner posting is disabled.
-- If the token is missing, the tool fails clearly. It never silently falls back to Boi or the bot app.
-- Slack does not allow one account to post as another, so Boi's `SLACK_USER_TOKEN` can never post as the owner.
+There are two ways to do it:
+
+- **Default (no extra credentials):** the bot app posts with your display name and profile picture using Slack's `chat:write.customize` scope. It looks like you, keeps the small `APP` badge, and needs only the bot token. This is how apps like `hackclub/pixl` render helper replies — `chat.postMessage` with `username` + `icon_url` from `users.info`.
+- **Optional native mode:** add your own user token with `/nugget setup slack` (or `SLACK_OWNER_TOKEN` / `SLACK_OWNER_COOKIE`). Then `as_user=true` posts from your real Slack profile with no app badge.
+
+Notes:
+
+- Native mode needs the owner's own user token (`xoxp-…`, or `xoxc-…` plus the `d` cookie). The token is checked with `auth_test()` when saved and at startup; if it does not belong to `OWNER_USER_ID`, native mode is disabled and the default mode stays active.
+- The bot app needs `chat:write` and `chat:write.customize` for the default mode, plus `users:read` to look up your name and avatar. Add the scopes at api.slack.com/apps and reinstall the app to the workspace.
+- Slack does not allow one account to post as another, so Boi's `SLACK_USER_TOKEN` can never post natively as the owner.
 
 ## Setup from chat
 
@@ -113,7 +118,7 @@ The manifest enables socket mode, events, interactivity and the single `/nugget`
 | `OWNER_USER_ID` (`U…`) | your profile → More → Copy member ID |
 | `SLACK_USER_TOKEN` | optional, see [the user account](#the-user-account) |
 | `SLACK_USER_COOKIE` (`xoxd-…`) | optional, required alongside an `xoxc` token |
-| `SLACK_OWNER_TOKEN` | optional, the owner's own token for posting in their name |
+| `SLACK_OWNER_TOKEN` | optional, the owner's own token for native posts in their name |
 | `SLACK_OWNER_COOKIE` (`xoxd-…`) | optional, required alongside an `xoxc` owner token |
 
 ### 3. Configure
@@ -336,6 +341,8 @@ Core:
 | `DATA_DIR` / `LOG_DIR` | `data` / `logs` | storage paths |
 | `SLACK_USER_TOKEN` | — | optional user token (`xoxp`/`xoxc`) |
 | `SLACK_USER_COOKIE` | — | `d` cookie (`xoxd`) for `xoxc` sessions |
+| `SLACK_OWNER_TOKEN` | — | optional owner token for native "in my name" posts (no app badge) |
+| `SLACK_OWNER_COOKIE` | — | `d` cookie for an `xoxc` owner token |
 
 Welcomer and access:
 
@@ -434,6 +441,7 @@ Secrets never enter the repo. `.env`, `data/` and `logs/` are gitignored.
 |---|---|---|
 | `invalid_auth` on start | stale bot token | reinstall the app, update `SLACK_BOT_TOKEN` |
 | `not_authed` / `missing_scope` | scope or install missing | update scopes, reinstall |
+| posting in your name fails | `chat:write.customize` or `users:read` missing | add both scopes, reinstall the app |
 | bot ignores mentions | channel not in `AI_CHANNELS`, or mention in a channel it was not invited to | check `/nugget id` |
 | bot replies to everything | gate disabled or thresholds too low | `AI_GATE_ENABLED=true`, raise `AI_GATE_MIN_CONFIDENCE` |
 | bot is silent in threads | `thread_followups` off or cooldown active | enable it, lower `AI_THREAD_COOLDOWN` |
