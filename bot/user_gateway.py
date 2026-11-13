@@ -259,6 +259,9 @@ class UserGateway:
         is_mention = bool(self.user_id and f"<@{self.user_id}>" in text)
         thread_ts = event.get("thread_ts")
         root_ts = thread_ts or event.get("ts")
+        # DMs stay flat by default, but if the owner replies in a DM thread,
+        # keep the answer in that thread instead of dropping it into the main DM.
+        reply_thread_ts = root_ts if (not is_dm or thread_ts) else None
 
         if not (is_dm or is_mention):
             return
@@ -289,7 +292,7 @@ class UserGateway:
                     await self.user_client.chat_postMessage(
                         channel=channel,
                         text=f"slow down a lil, try again in {retry}s :3",
-                        thread_ts=root_ts if not is_dm else None,
+                        thread_ts=reply_thread_ts,
                         unfurl_links=False,
                         unfurl_media=False,
                     )
@@ -317,14 +320,14 @@ class UserGateway:
         try:
             async with (
                 runtime.lock(conv_key),
-                self.typing(channel, thread_ts=root_ts if not is_dm else None),
+                self.typing(channel, thread_ts=reply_thread_ts),
             ):
                 answer = await runtime.agent.reply(
                     conversation=conv_key,
                     user_id=sender_id,
                     text=clean_text,
                     channel_id=channel,
-                    thread_ts=root_ts if not is_dm else None,
+                    thread_ts=reply_thread_ts,
                     is_dm=is_dm,
                     trigger=trigger,
                     jev="",
@@ -347,7 +350,7 @@ class UserGateway:
                     await self.user_client.chat_postMessage(
                         channel=channel,
                         text=chunk,
-                        thread_ts=root_ts if not is_dm else None,
+                        thread_ts=reply_thread_ts,
                         unfurl_links=False,
                         unfurl_media=False,
                     )

@@ -933,7 +933,6 @@ def test_sandbox_clone_persists(tmp_path):
 
 def test_sandbox_clone_failure_cleans_up(tmp_path):
     import asyncio
-    from pathlib import Path
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from bot.ai.tools import Toolbox
@@ -971,6 +970,39 @@ def test_sandbox_max_workspaces(tmp_path):
         assert "one" in first
         second = await box.execute("sandbox", {"action": "create", "name": "two"}, ctx)
         assert "too many sandboxes" in second
+
+    asyncio.run(run())
+
+
+def test_sandbox_defaults_to_latest_workspace(tmp_path):
+    import asyncio
+    import json
+
+    from bot.ai.tools import Toolbox
+
+    box = Toolbox(_sandbox_ctx(tmp_path).settings)
+    ctx = _sandbox_ctx(tmp_path)
+
+    async def run():
+        empty = await box.execute("sandbox", {"action": "exec", "command": "echo hi"}, ctx)
+        assert "create one first" in empty
+
+        await box.execute("sandbox", {"action": "create", "name": "first"}, ctx)
+        await box.execute("sandbox", {"action": "create", "name": "second"}, ctx)
+
+        # No name means the newest sandbox, so "run it again" just works.
+        ran = await box.execute(
+            "sandbox", {"action": "exec", "command": "pwd && echo latest"}, ctx
+        )
+        payload = json.loads(ran)
+        assert payload["exit_code"] == 0
+        assert "second" in payload["stdout"]
+        assert "latest" in payload["stdout"]
+
+        # Delete must always be explicit.
+        refused = await box.execute("sandbox", {"action": "delete"}, ctx)
+        assert "name is required" in refused
+        assert (tmp_path / "sandboxes" / "second").exists()
 
     asyncio.run(run())
 

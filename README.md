@@ -36,7 +36,7 @@ Boi connects to `wss://wss-primary.slack.com` with a browser session token (`xox
 
 - **typing:** while the model runs, the gateway sends a typing frame every 2.5 seconds.
 - **messages:** the socket delivers `message` events. the gateway ignores bots, its own messages, the bot account, duplicate timestamps and thread chatter that isn't addressed to it.
-- **threads:** it follows a thread only if the agent already knows it. otherwise it answers DMs and direct mentions.
+- **threads:** in channels it follows a thread only if the agent already knows it, otherwise it answers direct mentions. DM threads stay in the thread they started in, and top-level DMs stay top-level.
 - **reconnects:** Slack sends a `reconnect_url` frame after connect. the gateway caches it, falls back to `client.getWebSocketURL` when it expires, and backs off exponentially up to 30 seconds.
 - **presence:** on connect it asks Slack for `auto` presence. Slack still marks human accounts away after about 10 minutes of no activity. there's no API to force a user account active.
 - **isolation:** the gateway never handles workspace admin actions. those stay on the bot account, so a stolen user session can't approve access or change settings.
@@ -221,13 +221,15 @@ Owner/admin only, DM only. It is a workspace boundary, not a security boundary: 
 | action | what it does |
 |---|---|
 | `create` | make a named workspace. pass `repo_url` (`owner/repo` or an https git url) to shallow-clone into it |
-| `exec` | run a shell command in the workspace, optionally in a subdirectory with `cwd` |
+| `exec` | run a shell command in the workspace, optionally in a subdirectory with `cwd`. uses the newest workspace when `name` is omitted |
 | `read` | read a file with line numbers, with `offset` and `limit` |
 | `list_files` | list a directory. `.git` and noisy build dirs are skipped |
 | `search` | text or regex search across the workspace |
 | `info` | show the repo and created/updated timestamps for one workspace |
 | `list` | list all workspaces plus free disk |
-| `delete` | remove the workspace and its metadata |
+| `delete` | remove the workspace and its metadata. always needs an explicit name |
+
+`exec`, `read`, `list_files`, `search` and `info` default to the most recently updated workspace, so "run it again" works without repeating the name. `delete` never guesses.
 
 A typical DM goes like this:
 

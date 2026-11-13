@@ -1154,7 +1154,7 @@ class Toolbox:
                     },
                     "name": {
                         "type": "string",
-                        "description": "Sandbox name (letters, numbers, dot, dash, underscore). Required for everything except 'list'. If omitted on create, it is derived from repo_url.",
+                        "description": "Sandbox name (letters, numbers, dot, dash, underscore). Required for create and delete. For exec/read/list_files/search/info it defaults to the most recently updated sandbox.",
                     },
                     "repo_url": {
                         "type": "string",
@@ -3542,7 +3542,7 @@ class Toolbox:
             try:
                 proc.kill()
                 await proc.wait()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110
                 pass
             return f"git clone timed out after {int(timeout)}s"
         except Exception as exc:  # noqa: BLE001
@@ -3611,6 +3611,15 @@ class Toolbox:
         action = str(args.get("action") or "").lower().strip()
         raw_name = str(args.get("name") or "").strip()
         manager = self._sandbox(ctx)
+
+        # Small ergonomic win: most actions can target the newest workspace
+        # without making the model repeat its name every turn. Delete still
+        # requires an explicit name so a stray call can't nuke the latest box.
+        if action in {"exec", "read", "list_files", "search", "info"} and not raw_name:
+            recent = manager.list()
+            if not recent:
+                return _error("no sandboxes yet; create one first")
+            raw_name = recent[0].name
 
         try:
             if action == "create":
