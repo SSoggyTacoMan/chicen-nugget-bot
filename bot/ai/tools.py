@@ -33,6 +33,7 @@ import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
 from bot import image_access, integrations
+from bot.ai.sandbox import SandboxError, SandboxManager, safe_env, safe_name
 from bot.config import Settings
 from bot.db import Database
 from bot.features.nuggets import random_fact
@@ -1103,7 +1104,7 @@ class Toolbox:
             ),
             tool(
                 "clone_repo",
-                "Shallow clone a remote Git repository into an isolated sandbox, inspect its files (list, read, or search), and auto-delete immediately after. Owner/admin only.",
+                "Shallow clone a remote Git repository into an isolated sandbox, inspect its files (list, read, or search), and auto-delete immediately after. For anything you need across turns or want to run commands in, use `sandbox` instead. Owner/admin only.",
                 {
                     "repo_url": {
                         "type": "string",
@@ -1132,6 +1133,63 @@ class Toolbox:
                     },
                 },
                 ["repo_url"],
+            ),
+            tool(
+                "sandbox",
+                "Persistent workspace for repo investigation and shell work. Create a named sandbox (optionally cloning a repo), run commands in it, read/list/search files over several turns, and delete it when you are done. It stays on disk until deleted. Owner/admin only, DM only.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "create",
+                            "list",
+                            "info",
+                            "exec",
+                            "read",
+                            "list_files",
+                            "search",
+                            "delete",
+                        ],
+                        "description": "Action: 'create' (optional repo_url), 'list', 'info', 'exec', 'read', 'list_files', 'search', or 'delete'.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Sandbox name (letters, numbers, dot, dash, underscore). Required for everything except 'list'. If omitted on create, it is derived from repo_url.",
+                    },
+                    "repo_url": {
+                        "type": "string",
+                        "description": "For action='create': Git URL (https://...) or GitHub 'owner/repo' shorthand to clone in. Omit for an empty workspace.",
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "For action='exec': shell command to run inside the workspace, e.g. 'rg TODO', 'npm test', 'python script.py', or 'curl -L <url> -o page.html'.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "For action='exec': optional relative directory inside the sandbox to run in.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "For read/list_files/search: relative file or directory path inside the sandbox.",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "For action='search': text or regex to search for.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "For action='read': line number to start from (1-based, default 1).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "For action='read': maximum lines (default 150, max 500).",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "For action='exec': seconds before the command is killed. Default 120, max 600.",
+                    },
+                },
+                ["action"],
             ),
             tool(
                 "daily_briefing",
@@ -3316,11 +3374,8 @@ class Toolbox:
         if not code:
             return _error("code is required")
         # ponytail: for multi-tenant code execution, upgrade to Sandbox SDK or gVisor container.
-        safe_env = {
-            k: v for k, v in os.environ.items()
-            if not any(s in k.upper() for s in ("TOKEN", "KEY", "SECRET", "PASS", "AUTH", "SSH_"))
-        }
-        safe_env["PYTHONPATH"] = ""
+        env = safe_env()
+        env["PYTHONPATH"] = ""
         try:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable,
@@ -3329,7 +3384,7 @@ class Toolbox:
                 code,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=safe_env,
+                env=env,
                 cwd=tempfile.gettempdir(),
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=5.0)
@@ -3448,122 +3503,220 @@ class Toolbox:
 
         return _error(f"unknown action: {action}")
 
+    async def _resolve_clone_url(self, raw_url: str) -> tuple[str, str]:
+        """Return (clone_url, error). Shared by clone_repo and sandbox."""
+        raw_url = (raw_url or "").strip()
+        if not raw_url:
+            return "", "repo_url is required"
+        if raw_url.startswith("-") or any(ch in raw_url for ch in (";", "&", "|", "`", "$", "\n")):
+            return "", "invalid repo_url"
+        if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", raw_url):
+            return f"https://github.com/{raw_url}.git", ""
+        if raw_url.startswith(("https://", "http://")):
+            parsed = urlparse(raw_url)
+            if not parsed.hostname or await self._is_private_host(parsed.hostname):
+                return "", "invalid or private repository host"
+            return raw_url, ""
+        return "", "only https:// or 'owner/repo' GitHub URLs are allowed"
+
+    async def _clone_into(self, dest: Path, clone_url: str, *, timeout: float = 25.0) -> str:
+        """Clone into dest. Returns an error string, or '' on success."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                "-c",
+                "core.symlinks=false",
+                "-c",
+                "protocol.file.allow=never",
+                "clone",
+                "--depth",
+                "1",
+                "--single-branch",
+                clone_url,
+                str(dest),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:  # noqa: BLE001
+                pass
+            return f"git clone timed out after {int(timeout)}s"
+        except Exception as exc:  # noqa: BLE001
+            return f"failed to run git clone: {exc}"
+        if proc.returncode != 0:
+            return stderr.decode(errors="replace").strip() or f"git clone exited with code {proc.returncode}"
+        return ""
+
     async def _tool_clone_repo(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can clone repositories")
-        raw_url = str(args.get("repo_url") or "").strip()
-        if not raw_url:
-            return _error("repo_url is required")
-        if raw_url.startswith("-") or any(ch in raw_url for ch in (";", "&", "|", "`", "$", "\n")):
-            return _error("invalid repo_url")
-        if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", raw_url):
-            clone_url = f"https://github.com/{raw_url}.git"
-        elif raw_url.startswith(("https://", "http://")):
-            parsed = urlparse(raw_url)
-            if not parsed.hostname or await self._is_private_host(parsed.hostname):
-                return _error("invalid or private repository host")
-            clone_url = raw_url
-        else:
-            return _error("only https:// or 'owner/repo' GitHub URLs are allowed")
-
+        clone_url, err = await self._resolve_clone_url(str(args.get("repo_url") or ""))
+        if err:
+            return _error(err)
         action = str(args.get("action") or "list").lower().strip()
-        # ponytail: sandbox cloning uses temporary directory; upgrade to container sandbox for untrusted git hooks/LFS.
+        # ponytail: one-shot clones use a temporary directory and disappear after
+        # the call. use `sandbox` for work that needs to survive across turns.
         with tempfile.TemporaryDirectory() as tmpdir:
             dest = (Path(tmpdir) / "repo").resolve()
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "git",
-                    "-c",
-                    "core.symlinks=false",
-                    "-c",
-                    "protocol.file.allow=never",
-                    "clone",
-                    "--depth",
-                    "1",
-                    "--single-branch",
-                    clone_url,
-                    str(dest),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
-            except TimeoutError:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                return _error("git clone timed out after 25s")
-            except Exception as exc:
-                return _error(f"failed to run git clone: {exc}")
-
-            if proc.returncode != 0:
-                err = stderr.decode(errors="replace").strip() or f"git clone exited with code {proc.returncode}"
+            err = await self._clone_into(dest, clone_url)
+            if err:
                 return _error(f"clone failed: {err}")
 
-            rel_path = str(args.get("path") or "").strip().lstrip("/")
-            target = (dest / rel_path).resolve() if rel_path else dest
+            manager = SandboxManager(Path(tmpdir))
             try:
-                target.relative_to(dest.resolve())
-            except ValueError:
-                return _error("access denied: path escapes cloned repository")
+                if action == "list":
+                    return manager.list_files("repo", str(args.get("path") or ""))[:MAX_TOOL_RESULT]
+                if action == "read":
+                    return manager.read(
+                        "repo",
+                        str(args.get("path") or ""),
+                        offset=int(args.get("offset") or 1),
+                        limit=int(args.get("limit") or 150),
+                    )[:MAX_TOOL_RESULT]
+                if action == "search":
+                    return manager.search(
+                        "repo", str(args.get("pattern") or "")
+                    )[:MAX_TOOL_RESULT]
+            except SandboxError as exc:
+                return _error(str(exc))
+            return _error(f"unknown action: {action}")
+
+    def _sandbox(self, ctx: ToolContext) -> SandboxManager:
+        settings = ctx.settings
+        root = Path(
+            getattr(settings, "sandbox_dir", None)
+            or (Path(settings.data_dir) / "sandboxes")
+        )
+        return SandboxManager(
+            root,
+            max_workspaces=int(getattr(settings, "sandbox_max_workspaces", 20) or 20),
+            exec_timeout=int(getattr(settings, "sandbox_exec_timeout", 120) or 120),
+            max_exec_timeout=int(getattr(settings, "sandbox_max_exec_timeout", 600) or 600),
+        )
+
+    @staticmethod
+    def _sandbox_time(ts: float) -> str:
+        return datetime.fromtimestamp(ts, tz=tzinfo()).isoformat(timespec="seconds")
+
+    async def _tool_sandbox(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can use sandboxes")
+        if not ctx.is_dm:
+            return _error("sandbox is only permitted in direct messages")
+
+        action = str(args.get("action") or "").lower().strip()
+        raw_name = str(args.get("name") or "").strip()
+        manager = self._sandbox(ctx)
+
+        try:
+            if action == "create":
+                repo_url = str(args.get("repo_url") or "").strip()
+                if not raw_name and not repo_url:
+                    return _error("name or repo_url is required for create")
+                if not raw_name:
+                    raw_name = repo_url.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
+                name = safe_name(raw_name)
+                clone_url = ""
+                if repo_url:
+                    clone_url, err = await self._resolve_clone_url(repo_url)
+                    if err:
+                        return _error(err)
+                info = manager.create(name, repo=repo_url or None)
+                if clone_url:
+                    err = await self._clone_into(info.path, clone_url, timeout=120.0)
+                    if err:
+                        manager.delete(name)
+                        return _error(f"clone failed: {err}")
+                return _json(
+                    {
+                        "sandbox": name,
+                        "repo": repo_url or None,
+                        "created": self._sandbox_time(info.created),
+                        "hint": "use action=exec, read, list_files or search, then delete when done",
+                    }
+                )
 
             if action == "list":
-                if not target.exists():
-                    return _error(f"path not found: {rel_path}")
-                if target.is_file():
-                    return f"file: {target.relative_to(dest)} ({target.stat().st_size} bytes)"
-                entries = []
-                for item in sorted(target.iterdir()):
-                    if item.name == ".git":
-                        continue
-                    suffix = "/" if item.is_dir() else ""
-                    entries.append(f"{item.relative_to(dest)}{suffix}")
-                return "\n".join(entries[:150])[:MAX_TOOL_RESULT] or "(empty directory)"
+                infos = manager.list()
+                return _json(
+                    {
+                        "sandboxes": [
+                            {
+                                "name": info.name,
+                                "repo": info.repo,
+                                "created": self._sandbox_time(info.created),
+                                "updated": self._sandbox_time(info.updated),
+                            }
+                            for info in infos
+                        ],
+                        "disk_free_bytes": manager.disk_free(),
+                        "max_workspaces": manager.max_workspaces,
+                    }
+                )
+
+            if not raw_name:
+                return _error(f"name is required for action={action}")
+            name = safe_name(raw_name)
+
+            if action == "info":
+                info = manager.get(name)
+                return _json(
+                    {
+                        "sandbox": info.name,
+                        "repo": info.repo,
+                        "created": self._sandbox_time(info.created),
+                        "updated": self._sandbox_time(info.updated),
+                    }
+                )
+
+            if action == "exec":
+                result = await manager.exec(
+                    name,
+                    str(args.get("command") or ""),
+                    cwd=str(args.get("cwd") or "").strip() or None,
+                    timeout=int(args.get("timeout") or 0) or None,
+                )
+                return _json(
+                    {
+                        "sandbox": name,
+                        "exit_code": result.code,
+                        "stdout": result.stdout[:3000],
+                        "stderr": result.stderr[:3000],
+                        "timed_out": result.timed_out,
+                        "cwd": result.cwd,
+                    }
+                )
 
             if action == "read":
-                if not target.exists() or not target.is_file():
-                    return _error(f"file not found: {rel_path}")
-                try:
-                    offset = max(1, int(args.get("offset") or 1))
-                    limit = max(1, min(500, int(args.get("limit") or 150)))
-                    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-                    slice_lines = lines[offset - 1 : offset - 1 + limit]
-                    formatted = [f"{i}: {line}" for i, line in enumerate(slice_lines, start=offset)]
-                    return "\n".join(formatted)[:MAX_TOOL_RESULT]
-                except Exception as exc:
-                    return _error(f"failed to read file: {exc}")
+                return manager.read(
+                    name,
+                    str(args.get("path") or ""),
+                    offset=int(args.get("offset") or 1),
+                    limit=int(args.get("limit") or 150),
+                )[:MAX_TOOL_RESULT]
+
+            if action == "list_files":
+                return manager.list_files(
+                    name, str(args.get("path") or "")
+                )[:MAX_TOOL_RESULT]
 
             if action == "search":
-                pattern = str(args.get("pattern") or "").strip()
-                if not pattern:
-                    return _error("pattern is required for search")
-                try:
-                    rx = re.compile(pattern, re.IGNORECASE)
-                except re.error:
-                    rx = re.compile(re.escape(pattern), re.IGNORECASE)
-                matches = []
-                for p in dest.rglob("*"):
-                    if not p.is_file() or p.is_symlink() or ".git" in p.parts:
-                        continue
-                    if p.stat().st_size > 512_000:
-                        continue
-                    rel = p.relative_to(dest)
-                    try:
-                        content_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-                        for idx, line in enumerate(content_lines, 1):
-                            if rx.search(line):
-                                matches.append(f"{rel}:{idx}: {line.strip()}")
-                                if len(matches) >= 60:
-                                    break
-                    except Exception:
-                        continue
-                    if len(matches) >= 60:
-                        break
-                if not matches:
-                    return f"no matches for pattern: {pattern}"
-                return "\n".join(matches)[:MAX_TOOL_RESULT]
+                return manager.search(
+                    name, str(args.get("pattern") or "")
+                )[:MAX_TOOL_RESULT]
+
+            if action == "delete":
+                deleted = manager.delete(name)
+                return _json({"deleted": deleted})
 
             return _error(f"unknown action: {action}")
+        except (SandboxError, ValueError, OSError) as exc:
+            return _error(str(exc))
+
 
     async def _tool_hacker_news(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
