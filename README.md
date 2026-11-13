@@ -1,24 +1,24 @@
 # chicen nugget
 
-A Slack bot with two faces.
+A Slack bot for a Hack Club workspace. Two faces, one process.
 
-The first is a normal workspace bot. It welcomes people, handles tier-2 access requests, runs reminders and polls, posts daily recaps, and has an AI agent with tools.
+The first one is the bot you'd expect. It welcomes people, runs tier-2 access requests, reminders and polls, posts recaps, and has an AI agent with a real toolbox.
 
-The second is optional: a real Slack account (call it Boi) that answers your DMs and shows a typing indicator, so it feels like a person instead of an app.
+The second one is optional. Give it a real Slack account and it answers your DMs as that account, typing indicator and all. It reads like a person instead of an app.
 
-Both run in one Python process over Socket Mode. No public URL, no web server, no external database. Everything lives in SQLite.
+Both run in one Python process over Socket Mode. No public URL, no web server, no external database. SQLite holds the whole thing.
 
-## What's in the box
+## what you get
 
-- Mentions, DMs, thread follow-ups and optional ambient replies, with tool calling and per-user memory.
-- A second Slack identity for personal assistant work.
-- Posting in the owner's name, either as a customized bot message or from their real account (optional).
-- Jev, a small classifier that decides whether an unaddressed message actually deserves a reply.
-- AI images, charts and PowerPoint decks uploaded straight into the conversation.
-- Welcomer, access requests, recaps, reminders, polls and dice.
-- Runtime settings you can change from chat instead of editing `.env`.
+- mentions, DMs, thread follow-ups and optional ambient replies, with tool calling and per-user memory
+- a second Slack identity for personal assistant work
+- posting in the owner's name, either as a customized bot message or from their real account
+- jev, a small classifier that decides whether an unaddressed message actually deserves a reply
+- AI images, charts and PowerPoint decks uploaded straight into the conversation
+- welcomer, access requests, recaps, reminders, polls and dice
+- runtime settings you can change from chat instead of editing `.env`
 
-## How it fits together
+## how it fits together
 
 ```
 Slack --socket mode--> bot account (xoxb / xapp) --> features, scheduler, slash commands
@@ -26,39 +26,39 @@ Slack --socket mode--> bot account (xoxb / xapp) --> features, scheduler, slash 
    +--- websocket ----> user account (xoxc / xoxd) --> personal replies + typing
 ```
 
-One process, one database, one toolbox. The bot account owns everything that needs app scopes: events, buttons, slash commands. The user account is a normal Slack session, so it can read what that user can read, post as itself, and send typing frames Slack renders natively.
+One process, one database, one toolbox. The bot account owns everything that needs app scopes: events, buttons, slash commands. The user account is just a normal Slack session, so it can see what that user sees, post as itself, and send typing frames Slack renders natively.
 
 The two identities can run different models. They share memory, notes, tasks and settings.
 
-### The user account
+### the user account
 
-Boi connects to `wss://wss-primary.slack.com` with a browser session token (`xoxc-...`) and the matching cookie (`xoxd-...`). It is not an app token and needs no OAuth install.
+Boi connects to `wss://wss-primary.slack.com` with a browser session token (`xoxc-...`) and the matching cookie (`xoxd-...`). That's not an app token, and there's no OAuth install.
 
-- **Typing:** while the model runs, the gateway sends a typing frame every 2.5 seconds.
-- **Messages:** the socket delivers `message` events. The gateway ignores bots, its own messages, the bot account, duplicate timestamps and thread chatter that is not addressed to it.
-- **Threads:** it follows a thread only if the agent already knows it. Otherwise it answers DMs and direct mentions.
-- **Reconnects:** Slack sends a `reconnect_url` frame after connect. The gateway caches it, falls back to `client.getWebSocketURL` when it expires, and backs off exponentially up to 30 seconds.
-- **Presence:** on connect it asks Slack for `auto` presence. Slack still marks human accounts away after about 10 minutes of no activity. There is no API to force a user account active.
-- **Isolation:** the gateway never handles workspace admin actions. Those stay on the bot account, so a stolen user session cannot approve access or change settings.
+- **typing:** while the model runs, the gateway sends a typing frame every 2.5 seconds.
+- **messages:** the socket delivers `message` events. the gateway ignores bots, its own messages, the bot account, duplicate timestamps and thread chatter that isn't addressed to it.
+- **threads:** it follows a thread only if the agent already knows it. otherwise it answers DMs and direct mentions.
+- **reconnects:** Slack sends a `reconnect_url` frame after connect. the gateway caches it, falls back to `client.getWebSocketURL` when it expires, and backs off exponentially up to 30 seconds.
+- **presence:** on connect it asks Slack for `auto` presence. Slack still marks human accounts away after about 10 minutes of no activity. there's no API to force a user account active.
+- **isolation:** the gateway never handles workspace admin actions. those stay on the bot account, so a stolen user session can't approve access or change settings.
 
-Treat `xoxc` and `xoxd` like passwords. They grant full access to the account, including private channels. Rotate them by signing out and back in, then updating `.env`.
+Treat `xoxc` and `xoxd` like passwords. They grant full access to the account, including private channels. To rotate them, sign out and back in, then update `.env`.
 
-### Posting in the owner's name
+### posting in the owner's name
 
 `as_user=true` on `send_dm` or `post_message` makes a message look like it came from the owner, then adds a small muted `Sent by <@assistant>` line.
 
-There are two modes:
+Two modes:
 
-- **Default:** the bot app posts with the owner's display name and profile picture using Slack's `chat:write.customize` scope. It looks like them, keeps the small `APP` badge, and needs no extra credentials. This is the same trick `hackclub/pixl` uses for dashboard ticket replies.
-- **Native (optional):** if the owner adds their own user token with `/nugget setup slack` (or `SLACK_OWNER_TOKEN` / `SLACK_OWNER_COOKIE`), the same call posts from their real profile with no app badge.
+- **default:** the bot app posts with the owner's display name and profile picture using Slack's `chat:write.customize` scope. it looks like them, keeps the small `APP` badge, and needs no extra credentials. same trick `hackclub/pixl` uses for dashboard ticket replies.
+- **native (optional):** if the owner adds their own user token with `/nugget setup slack` (or `SLACK_OWNER_TOKEN` / `SLACK_OWNER_COOKIE`), the same call posts from their real profile with no app badge.
 
-The default mode needs `chat:write`, `chat:write.customize` and `users:read` on the bot app. Add those at api.slack.com/apps and reinstall the app. Native mode is validated against `OWNER_USER_ID` on save and on startup. If the token belongs to someone else, native mode is disabled and the default mode keeps working.
+The default mode needs `chat:write`, `chat:write.customize` and `users:read` on the bot app. add those at api.slack.com/apps and reinstall the app. native mode is validated against `OWNER_USER_ID` on save and on startup. if the token belongs to someone else, native mode turns off and the default keeps working.
 
-Boi's token can never post natively as the owner. Slack does not allow one account to post as another.
+Boi's token can never post natively as the owner. Slack doesn't let one account post as another.
 
-## Quick start
+## quick start
 
-### 1. Create the Slack app
+### 1. make the Slack app
 
 1. Open <https://api.slack.com/apps>, choose **Create New App**, then **From an app manifest**.
 2. Pick the workspace and paste [`slack-app-manifest.json`](slack-app-manifest.json).
@@ -67,7 +67,7 @@ Boi's token can never post natively as the owner. Slack does not allow one accou
 
 The manifest sets up Socket Mode, events, interactivity and the single `/nugget` command.
 
-### 2. Grab the credentials
+### 2. grab the credentials
 
 | value | where to find it |
 |---|---|
@@ -79,7 +79,7 @@ The manifest sets up Socket Mode, events, interactivity and the single `/nugget`
 | `SLACK_OWNER_TOKEN` | optional, for native posts in the owner's name |
 | `SLACK_OWNER_COOKIE` (`xoxd-...`) | optional, required alongside an `xoxc` owner token |
 
-### 3. Configure
+### 3. configure
 
 ```bash
 cp .env.example .env
@@ -95,7 +95,7 @@ TIMEZONE=Europe/Amsterdam
 AI_API_KEY=sk-hc-v1-...
 ```
 
-### 4. Run it
+### 4. run it
 
 ```bash
 python3 -m venv .venv
@@ -106,13 +106,13 @@ python main.py
 
 A healthy start logs `online as bot user ...`. If the second identity is configured you also get `user token active as ...`.
 
-### 5. Invite the bot
+### 5. invite the bot
 
 Invite it to the welcome, logs and panel channels, plus the private tier-2 channel. Slack only lets an app add members to a private channel it is already in.
 
-## Setup from chat
+## setup from chat
 
-You should not need to SSH into the VPS to connect personal integrations. Run `/nugget setup`, or ask the bot to open the setup panel. Each integration opens a Slack modal, so tokens and passwords never appear in chat.
+You shouldn't need to SSH into the VPS to connect personal stuff. Run `/nugget setup`, or ask the bot to open the setup panel. It all goes through a Slack modal, so tokens and passwords never end up in chat.
 
 | integration | command |
 |---|---|
@@ -124,9 +124,9 @@ You should not need to SSH into the VPS to connect personal integrations. Run `/
 | Status | `/nugget setup status` |
 | Remove credentials | `/nugget setup disconnect <name>` |
 
-Settings are stored in SQLite (`data/bot.db`) and override environment variables. Env values stay as a fallback for fresh deploys and CI.
+Settings land in SQLite (`data/bot.db`) and override environment variables. Env values stay as a fallback for fresh deploys and CI.
 
-### Google OAuth
+### google oauth
 
 Google uses a desktop-client flow so it works on a headless VPS:
 
@@ -134,22 +134,22 @@ Google uses a desktop-client flow so it works on a headless VPS:
 2. Create an OAuth client of type **Desktop app**.
 3. Add `http://localhost:9876/oauth2callback` as an authorized redirect URI.
 4. Run `/nugget setup google`, paste the client id and secret, then open the authorization link on your own machine.
-5. Google redirects to localhost and shows an error page. That is expected. Copy the full URL from the address bar and paste it into the setup modal.
-6. The bot exchanges the code server-side and stores a refresh token. Calendar, Gmail and Drive become available right away.
+5. Google redirects to localhost and shows an error page. That's expected. Copy the full URL from the address bar and paste it into the setup modal.
+6. The bot exchanges the code server-side and stores a refresh token. Calendar, Gmail and Drive are available right away.
 
 Scopes: `calendar`, `gmail.modify`, `drive.readonly` and `userinfo.email`. To revoke access, remove the app from your Google account page and run `/nugget setup disconnect google`.
 
-### Mac companion
+### mac companion
 
-Run `scripts/mac_companion.py` on the Mac, expose it with a Cloudflare Tunnel or ngrok, then run `/nugget setup mac`. It supports battery and volume checks, opening apps, files and URLs, notifications, clipboard, lock, sleep, speak, AppleScript and shell commands.
+Run `scripts/mac_companion.py` on the Mac, expose it with a Cloudflare Tunnel or ngrok, then run `/nugget setup mac`. It can check battery and volume, open apps, files and URLs, send notifications, read the clipboard, lock, sleep, speak, and run AppleScript or shell commands.
 
-### GitHub and email
+### github and email
 
-A GitHub token is optional for public reads. With a token you get notifications and a higher rate limit. IMAP works with Gmail and Fastmail app passwords. Use an app password, not your account password.
+A GitHub token is optional for public reads. With one you get notifications and a higher rate limit. IMAP works with Gmail and Fastmail app passwords. Use an app password, not your account password.
 
-## Runtime settings
+## runtime settings
 
-Settings live in SQLite and can be changed from chat with the `bot_config` tool or `/nugget config`. Owner and admins only. Secret values are rejected in chat, so tokens and app passwords have to go through the setup modals.
+Settings live in SQLite and you can change them from chat with the `bot_config` tool or `/nugget config`. Owner and admins only. Secret values are rejected in chat, so tokens and app passwords have to go through the setup modals.
 
 | key | effect |
 |---|---|
@@ -176,7 +176,7 @@ set weather_location to Amsterdam
 
 `AI_THREAD_COOLDOWN` (120 seconds by default) limits how often an unprompted thread reply can happen. Mentions and DMs skip it.
 
-## The AI agent
+## the ai agent
 
 Any OpenAI-compatible endpoint with function calling works. The default is Hack Club AI.
 
@@ -192,9 +192,9 @@ IMAGINE_MODEL=google/gemini-3.1-flash-image
 IMAGINE_FALLBACK_MODEL=google/gemini-2.5-flash-image
 ```
 
-The fallback model is used when the primary errors or times out. Conversation history and notes live in `data/bot.db`.
+The fallback model kicks in when the primary errors or times out. Conversation history and notes live in `data/bot.db`.
 
-### Tools
+### tools
 
 | group | tools |
 |---|---|
@@ -208,21 +208,21 @@ The fallback model is used when the primary errors or times out. Conversation hi
 | media | `generate_image`, `make_chart`, `make_deck` |
 | misc | `get_weather`, `public_holidays`, `roll_dice`, `dog_fact`, `taco_recipe`, `urban_dict`, `nugget_fact` |
 
-Owner and admin checks run in code against the real Slack sender. The prompt cannot grant permissions on its own.
+Owner and admin checks run in code against the real Slack sender. The prompt can't grant permissions on its own.
 
-`flaron` also looks up workspace emojis, which is handy when you want a custom one to render.
+`flaron` also looks up workspace emojis, which is handy when you want a custom one to actually render.
 
-### Artifacts
+### artifacts
 
-- **Charts:** `make_chart` renders bar, line, pie, scatter and histogram charts with matplotlib, then uploads a PNG.
-- **Decks:** `make_deck` builds a real PPTX with python-pptx. Title slide plus title and bullet slides, optional speaker notes, capped at 30 slides.
-- **Images:** `generate_image`, or `/imagine`, uploads an AI image using the configured image model.
+- **charts:** `make_chart` renders bar, line, pie, scatter and histogram charts with matplotlib, then uploads a PNG.
+- **decks:** `make_deck` builds a real PPTX with python-pptx. Title slide plus title and bullet slides, optional speaker notes, capped at 30 slides.
+- **images:** `generate_image`, or `/imagine`, uploads an AI image using the configured image model.
 
 Uploads land in the current channel or thread. Link unfurling is off so conversations stay compact.
 
-## The Jev gate
+## the jev gate
 
-A bot that replies to everything is noise. Jev is a typed classifier: no prose, just a probability or choice per question in one pass. For an unaddressed message the bot asks six questions.
+A bot that replies to everything is noise. Jev is a typed classifier: no prose, just a probability or a choice per question in one pass. For an unaddressed message the bot asks six questions.
 
 | question | type | purpose |
 |---|---|---|
@@ -255,9 +255,9 @@ AI_AMBIENT_COOLDOWN=120
 AI_THREAD_COOLDOWN=120
 ```
 
-Mentions and DMs skip the gate. Errors and timeouts fail closed. `AI_AMBIENT_CHANNELS=*` turns on ambient replies everywhere the bot is a member.
+Mentions and DMs skip the gate. Errors and timeouts fail closed. `AI_AMBIENT_CHANNELS=*` turns ambient replies on everywhere the bot is a member.
 
-## Spend limits
+## spend limits
 
 Every completion is priced and recorded: chat, Jev calls, images and token-billed tools. Hack Club AI also enforces an account-wide daily allowance.
 
@@ -272,7 +272,7 @@ AI_IMAGE_COST_USD=0.04
 
 Three limits work together: per-user rate limit, workspace rate limit and a per-user daily cap. `/nugget budget` shows your spend, the workspace total and the top users for the day.
 
-## Commands
+## commands
 
 Everything lives under `/nugget` so it never collides with another app.
 
@@ -306,7 +306,7 @@ Everything lives under `/nugget` so it never collides with another app.
 | `/nugget setup` | connect Google, Mac, GitHub, email or your Slack profile | admin |
 | `/nugget whois @user` | user lookup | anyone |
 
-### Reminder syntax
+### reminder syntax
 
 ```text
 10m stretch
@@ -323,7 +323,7 @@ every 2h drink water
 
 Times use `TIMEZONE`. The first time expression is removed from the front, and the rest becomes the reminder body.
 
-## Environment reference
+## environment reference
 
 Core:
 
@@ -411,7 +411,7 @@ AI:
 
 Jev only gates ambient replies for the bot app. Boi DMs and explicit mentions skip it. Both models can be changed at runtime with `/nugget config ai_model ...` and `/nugget config ai_assistant_model ...`.
 
-## Deployment
+## deployment
 
 The included workflow ships the repo to a server over SSH and restarts a systemd unit.
 
@@ -421,15 +421,15 @@ The included workflow ships the repo to a server over SSH and restarts a systemd
 
 Secrets never enter the repo. `.env`, `data/` and `logs/` are gitignored.
 
-## Data and privacy
+## data and privacy
 
-- **Storage:** one SQLite file at `data/bot.db`. Conversation history, AI notes, reminders, polls, access requests, runtime settings and a key/value store.
-- **Retention:** history is per conversation and trimmed to `AI_HISTORY_LIMIT` turns. `/nugget forget` wipes your stored AI memory. Delete `data/bot.db` to reset everything.
-- **Logs:** stdout plus rotating files in `logs/`. Tool arguments and reply text can show up in debug logs, so do not run debug logging on a shared host.
-- **Third parties:** prompts go to your configured model provider (Hack Club AI by default). Jev calls go to the same base URL. Tool calls reach whatever public service they query.
-- **Prompt injection:** web pages, files and Slack messages are treated as untrusted data. They are never treated as instructions.
+- **storage:** one SQLite file at `data/bot.db`. conversation history, AI notes, reminders, polls, access requests, runtime settings and a key/value store.
+- **retention:** history is per conversation and trimmed to `AI_HISTORY_LIMIT` turns. `/nugget forget` wipes your stored AI memory. delete `data/bot.db` to reset everything.
+- **logs:** stdout plus rotating files in `logs/`. tool arguments and reply text can show up in debug logs, so don't run debug logging on a shared host.
+- **third parties:** prompts go to your configured model provider (Hack Club AI by default). Jev calls go to the same base URL. tool calls reach whatever public service they query.
+- **prompt injection:** web pages, files and Slack messages are treated as untrusted data. they are never treated as instructions.
 
-## Troubleshooting
+## troubleshooting
 
 | symptom | cause | fix |
 |---|---|---|
@@ -448,7 +448,7 @@ Secrets never enter the repo. `.env`, `data/` and `logs/` are gitignored.
 
 Run `python main.py` in the foreground first. Startup failures print a plain error before Socket Mode starts.
 
-### Docker
+### docker
 
 ```bash
 docker compose up -d --build
@@ -457,11 +457,11 @@ docker compose logs -f
 
 Mount `.env` and persist `data/` and `logs/` as volumes. The compose file matches the systemd setup: one process, Socket Mode, no exposed ports.
 
-### Script
+### script
 
 `./deploy-remote.sh user@host remote-dir` rsyncs the tree and restarts the `chicen-nugget-bot` systemd unit.
 
-## Project layout
+## project layout
 
 ```text
 main.py                    entry point
@@ -494,7 +494,7 @@ tests/                     pytest suite
 .github/workflows/         deploy and log tailing
 ```
 
-## Development
+## development
 
 ```bash
 python3 -m venv .venv
@@ -506,10 +506,10 @@ pip install -r requirements.txt
 
 Tests are plain pytest with `asyncio.run`. No network access and no Slack credentials needed.
 
-## Contributing
+## contributing
 
-Open an issue or a pull request. Keep changes small, keep the gate failing closed, and add a test when the behaviour is not obvious.
+Open an issue or a pull request. Keep changes small, keep the gate failing closed, and add a test when the behavior isn't obvious.
 
-## License
+## license
 
 MIT. See [LICENSE](LICENSE).
