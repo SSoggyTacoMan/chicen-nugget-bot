@@ -203,6 +203,57 @@ def test_user_gateway_handle_dm_success():
     asyncio.run(run())
 
 
+def test_user_gateway_dm_threads_stay_in_thread():
+    async def run():
+        mock_client = AsyncMock()
+        gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
+
+        mock_agent = AsyncMock()
+        mock_agent.reply = AsyncMock(return_value="thread reply")
+        runtime.agent = mock_agent
+
+        old_settings = runtime.settings
+        mock_settings = MagicMock()
+        mock_settings.owner_user_id = "U_OWNER"
+        mock_settings.is_admin.return_value = False
+        mock_settings.ai_enabled = True
+        mock_settings.ai_allowed.return_value = True
+        runtime.settings = mock_settings
+
+        top_level = {
+            "type": "message",
+            "channel": "D_TEST",
+            "user": "U_OWNER",
+            "text": "top level dm",
+            "ts": "100.000",
+        }
+        threaded = {
+            "type": "message",
+            "channel": "D_TEST",
+            "user": "U_OWNER",
+            "text": "in a dm thread",
+            "ts": "100.002",
+            "thread_ts": "100.000",
+        }
+
+        try:
+            with patch("bot.user_gateway.fetch_slack_images", AsyncMock(return_value=[])):
+                await gw._handle_event(top_level)
+                await gw._handle_event(threaded)
+
+            reply_calls = mock_agent.reply.call_args_list
+            assert reply_calls[0][1]["thread_ts"] is None
+            assert reply_calls[1][1]["thread_ts"] == "100.000"
+
+            posts = mock_client.chat_postMessage.call_args_list
+            assert posts[0][1]["thread_ts"] is None
+            assert posts[1][1]["thread_ts"] == "100.000"
+        finally:
+            runtime.settings = old_settings
+
+    asyncio.run(run())
+
+
 def test_user_gateway_ignores_bot_owned_thread(tmp_path):
     from bot.db import Database
 
