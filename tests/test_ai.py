@@ -1878,6 +1878,56 @@ def test_cmd_accounts():
     asyncio.run(run())
 
 
+def test_unsubscribe_gag():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
 
+    from bot.features.agent import _last_unsubscribe, on_message
+    from bot.runtime import runtime
 
+    old_bot_user_id = runtime.bot_user_id
+    runtime.bot_user_id = "UBOT"
+    _last_unsubscribe.clear()
+    client = AsyncMock()
+
+    base = {
+        "channel": "C_THREAD",
+        "channel_type": "channel",
+        "thread_ts": "100.000",
+        "ts": "101.000",
+        "user": "U_ALICE",
+    }
+
+    async def run():
+        with patch("bot.features.agent.post", AsyncMock()) as mock_post, \
+             patch("bot.features.agent._handle_thread_continuation", AsyncMock()) as mock_thread, \
+             patch("bot.features.agent._maybe_ambient", AsyncMock()):
+            await on_message({**base, "text": "UNSUBSCRIBE"}, client)
+            mock_post.assert_called_once()
+            args, kwargs = mock_post.call_args
+            assert args[1] == "C_THREAD"
+            assert "<@U_ALICE> RESUBSCRIBE" in args[2]
+            assert "(use \"turn off notifications for replies\" instead)" in args[2]
+            assert "See how" in args[2]
+            assert kwargs["thread_ts"] == "100.000"
+            mock_thread.assert_not_called()
+
+            # Cooldown keeps a spammer from turning it into a loop.
+            await on_message({**base, "text": "unsubscribe"}, client)
+            assert mock_post.call_count == 1
+
+            # Not a thread reply, or not a bare unsubscribe, is left to the AI.
+            await on_message({**base, "ts": "100.000", "text": "unsubscribe"}, client)
+            await on_message({**base, "ts": "102.000", "text": "unsubscribe from this"}, client)
+            assert mock_post.call_count == 1
+
+            # Bot messages never trigger it.
+            await on_message({**base, "text": "unsubscribe", "bot_id": "B1"}, client)
+            assert mock_post.call_count == 1
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.bot_user_id = old_bot_user_id
+        _last_unsubscribe.clear()
 
