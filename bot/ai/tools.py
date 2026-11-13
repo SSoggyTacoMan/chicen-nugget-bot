@@ -34,6 +34,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from bot import image_access, integrations
 from bot.ai.sandbox import SandboxError, SandboxManager, safe_env, safe_name
+from bot.api_keys import API_SERVICES, api_service, api_token, auth_headers, save_api_token
 from bot.config import Settings
 from bot.db import Database
 from bot.features.nuggets import random_fact
@@ -49,8 +50,10 @@ from bot.runtime import runtime
 from bot.slack_api import (
     all_channels,
     all_users,
+    app_manage_url,
     channel_info,
     error_code,
+    granted_scopes,
     is_private_host,
     post,
     ssrf_filter,
@@ -537,10 +540,15 @@ class Toolbox:
             ),
             tool(
                 "search_slack",
-                "Search Slack messages as the bot's user token. Needs SLACK_USER_TOKEN with search:read.",
+                "Search Slack messages and files across the workspace. Uses the connected user session for full workspace search and falls back to local conversation history. Owner/admin only.",
                 {
-                    "query": {"type": "string", "description": "Slack search query, supports in:#channel, from:@user, etc."},
+                    "query": {"type": "string", "description": "Slack search query, supports in:#channel, from:@user, before:, after:, etc."},
                     "count": {"type": "integer", "description": "Max results, 1-20."},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["messages", "files", "all"],
+                        "description": "What to search: 'messages' (default), 'files', or 'all'.",
+                    },
                 },
                 ["query"],
             ),
@@ -564,6 +572,31 @@ class Toolbox:
                     "limit": {"type": "integer", "description": "How many messages, 1-100. Default 30."},
                 },
                 ["channel"],
+            ),
+            tool(
+                "manage_channel",
+                "List, inspect, join, leave, create, or list members of Slack channels. Owner/admin only. Joining and leaving are public actions, so confirm with the owner first.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "info", "join", "leave", "members", "create"],
+                        "description": "Action to perform.",
+                    },
+                    "channel": {
+                        "type": "string",
+                        "description": "Channel id or #name. Required for info/join/leave/members/create.",
+                    },
+                    "as": {
+                        "type": "string",
+                        "enum": ["bot", "boi"],
+                        "description": "Which identity should join/leave. Default 'bot'.",
+                    },
+                    "private": {
+                        "type": "boolean",
+                        "description": "For create: make a private channel. Default false.",
+                    },
+                },
+                ["action"],
             ),
             tool(
                 "send_dm",
@@ -1192,6 +1225,35 @@ class Toolbox:
                 ["action"],
             ),
             tool(
+                "api_request",
+                "Call a connected third-party API with the stored token: Vercel, Cloudflare, Notion, Linear, Sentry, Resend, OpenAI, or Anthropic. Use the service's real docs for the path and body. Owner/admin only, DM only.",
+                {
+                    "service": {
+                        "type": "string",
+                        "enum": list(API_SERVICES),
+                        "description": "Which connected service to call.",
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                        "description": "HTTP method. Default GET.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "API path after the service base URL, starting with '/', e.g. '/v6/deployments'.",
+                    },
+                    "query": {
+                        "type": "object",
+                        "description": "Optional query string parameters as key/value pairs.",
+                    },
+                    "body": {
+                        "type": "object",
+                        "description": "Optional JSON body for POST/PUT/PATCH/DELETE.",
+                    },
+                },
+                ["service", "path"],
+            ),
+            tool(
                 "daily_briefing",
                 "Build a compact personal briefing for the owner: today's calendar, unread email, open tasks, reminders, weather, and GitHub notifications, using whatever is connected. Owner/admin only.",
                 {
@@ -1218,7 +1280,7 @@ class Toolbox:
                     },
                     "integration": {
                         "type": "string",
-                        "enum": ["google", "mac", "github", "email", "slack"],
+                        "enum": ["google", "mac", "github", "email", "apis", "slack"],
                         "description": "Which integration for action='panel' or 'disconnect'. Omit for all.",
                     },
                 },
@@ -1383,24 +1445,18 @@ class Toolbox:
         return f"cancelled reminder #{reminder_id}."
 
     async def _tool_search_slack(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if ctx.user_client is None:
-            return _error("SLACK_USER_TOKEN is not configured (needs search:read)")
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can search slack")
         query = str(args.get("query") or "").strip()
         if not query:
             return _error("query is required")
         count = max(1, min(20, int(args.get("count") or 10)))
-        try:
-            response = await ctx.user_client.search_messages(
-                query=query, count=count, sort="timestamp", sort_dir="desc"
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _error(f"slack search failed: {error_code(exc)}")
-        matches = (((response.get("messages") or {}).get("matches")) or [])[:count]
-        if not matches:
-            return "no slack messages matched that search."
-        cleaned = []
-        for match in matches:
-            cleaned.append(
+        kind = str(args.get("kind") or "messages").lower().strip()
+        if kind not in {"messages", "files", "all"}:
+            kind = "messages"
+
+        def message_rows(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
                 {
                     "text": (match.get("text") or "")[:800],
                     "user": match.get("user"),
@@ -1410,8 +1466,78 @@ class Toolbox:
                     "permalink": match.get("permalink"),
                     "ts": match.get("ts"),
                 }
+                for match in matches[:count]
+            ]
+
+        def file_rows(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
+                {
+                    "name": match.get("name") or match.get("title"),
+                    "title": match.get("title"),
+                    "filetype": match.get("filetype"),
+                    "user": match.get("user"),
+                    "size": match.get("size"),
+                    "permalink": match.get("permalink"),
+                    "created": match.get("created"),
+                }
+                for match in matches[:count]
+            ]
+
+        if ctx.user_client is not None:
+            try:
+                if kind == "files":
+                    response = await ctx.user_client.search_files(
+                        query=query, count=count
+                    )
+                    files = (((response.get("files") or {}).get("matches")) or [])
+                    if not files:
+                        return "no slack files matched that search."
+                    return _json({"files": file_rows(files)})
+                if kind == "all":
+                    response = await ctx.user_client.search_all(
+                        query=query, count=count
+                    )
+                    messages = (((response.get("messages") or {}).get("matches")) or [])
+                    files = (((response.get("files") or {}).get("matches")) or [])
+                    if not messages and not files:
+                        return "no slack messages or files matched that search."
+                    return _json(
+                        {
+                            "messages": message_rows(messages),
+                            "files": file_rows(files),
+                        }
+                    )
+                response = await ctx.user_client.search_messages(
+                    query=query, count=count, sort="timestamp", sort_dir="desc"
+                )
+                matches = (((response.get("messages") or {}).get("matches")) or [])
+                if matches:
+                    return _json(message_rows(matches))
+            except Exception as exc:  # noqa: BLE001
+                logger.info("slack search failed: %s", error_code(exc))
+
+        # No user session or Slack search unavailable: search what the bot has
+        # stored locally. This only covers conversations the bot was part of.
+        rows = ctx.db.search_messages(query, count)
+        if not rows:
+            return (
+                "no slack results. full workspace search needs the Boi user session "
+                "(SLACK_USER_TOKEN); local history has no match either."
             )
-        return _json(cleaned)
+        return _json(
+            {
+                "source": "local history (bot conversations only)",
+                "messages": [
+                    {
+                        "conversation": row.get("conversation"),
+                        "user": row.get("user_id"),
+                        "text": (row.get("text") or "")[:800],
+                        "created_at": row.get("created_at"),
+                    }
+                    for row in rows
+                ],
+            }
+        )
 
     async def _tool_lookup_user(self, args: dict[str, Any], ctx: ToolContext) -> str:
         query = str(args.get("query") or "").strip()
@@ -1483,7 +1609,7 @@ class Toolbox:
         needle = query.lstrip("#").lower()
         matches = [
             self._channel_summary(channel)
-            for channel in await all_channels(ctx.client)
+            for channel in await all_channels(ctx.bot_client or ctx.client)
             if needle in str(channel.get("name", "")).lower() or needle == str(channel.get("id", "")).lower()
         ]
         if not matches:
@@ -1519,13 +1645,23 @@ class Toolbox:
         client = ctx.bot_client or ctx.client
         if client is None:
             return _PostRoute(error="slack client not available")
+        scopes = await granted_scopes(client)
+        if scopes is not None and "chat:write.customize" not in scopes:
+            url = await app_manage_url(client)
+            return _PostRoute(
+                error=(
+                    "slack is ignoring your name and avatar because this app was never "
+                    "reinstalled after `chat:write.customize` was added. no personal token "
+                    f"needed; reinstall it here: <{url}|app settings>."
+                )
+            )
         display = await user_display(client, ctx.settings.owner_user_id)
         if not display:
             return _PostRoute(
                 error=(
                     "couldn't read your Slack profile, so i can't post under your name. "
-                    "the app needs `users:read` and `chat:write.customize`; add them at "
-                    "api.slack.com/apps and reinstall the app to the workspace."
+                    "make sure `users:read` and `chat:write.customize` are on the app at "
+                    "api.slack.com/apps, then reinstall it to the workspace."
                 )
             )
         return _PostRoute(client=client, customize=display)
@@ -1584,6 +1720,120 @@ class Toolbox:
         if not messages:
             return "no recent messages in that channel."
         return _json({"channel": channel_id, "messages": messages})
+
+    async def _tool_manage_channel(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can manage channels")
+        action = str(args.get("action") or "").lower().strip()
+        if action == "list":
+            channels = await all_channels(ctx.bot_client or ctx.client)
+            return _json(
+                [
+                    {
+                        **self._channel_summary(channel),
+                        "is_member": bool(channel.get("is_member")),
+                    }
+                    for channel in channels[:100]
+                ]
+            )
+
+        raw_channel = str(args.get("channel") or "").strip()
+        if not raw_channel:
+            return _error("channel is required")
+
+        if action == "create":
+            name = re.sub(r"[^a-z0-9_-]+", "-", raw_channel.lower()).strip("-")[:80]
+            if not name:
+                return _error("that channel name has no usable characters")
+            try:
+                response = await ctx.client.conversations_create(
+                    name=name, is_private=bool(args.get("private", False))
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"could not create #{name}: {error_code(exc)}")
+            channel = response.get("channel") or {}
+            return _json(
+                {
+                    "created": channel.get("name"),
+                    "channel_id": channel.get("id"),
+                    "is_private": channel.get("is_private"),
+                }
+            )
+
+        channel_id = await self._resolve_channel(ctx, raw_channel)
+        if not channel_id:
+            return _error(f"could not resolve channel {raw_channel!r}")
+
+        if action == "info":
+            info = await channel_info(ctx.client, channel_id)
+            if not info:
+                return _error(f"could not read channel {raw_channel!r}")
+            return _json(
+                {
+                    **self._channel_summary(info),
+                    "is_member": bool(info.get("is_member")),
+                    "num_members": info.get("num_members"),
+                }
+            )
+
+        if action == "members":
+            try:
+                response = await ctx.client.conversations_members(
+                    channel=channel_id, limit=100
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"could not list members: {error_code(exc)}")
+            return _json(
+                {
+                    "channel": channel_id,
+                    "members": response.get("members") or [],
+                }
+            )
+
+        as_identity = str(args.get("as") or "bot").lower().strip()
+        if as_identity == "boi":
+            client = ctx.user_client
+            if client is None:
+                return _error("Boi's user session is not configured")
+        else:
+            client = ctx.bot_client or ctx.client
+        if client is None:
+            return _error("slack client not available")
+
+        if action == "join":
+            info = await channel_info(ctx.client, channel_id)
+            if info and info.get("is_archived"):
+                return _error("that channel is archived")
+            if info and info.get("is_private") and not info.get("is_member"):
+                return _error("can't join a private channel without an invite")
+            try:
+                await client.conversations_join(channel=channel_id)
+            except Exception as exc:  # noqa: BLE001
+                code = error_code(exc)
+                if code == "already_in_channel":
+                    return f"already in <#{channel_id}> as {as_identity}."
+                if code == "missing_scope":
+                    return _error(
+                        f"{as_identity} is missing the scope needed to join channels"
+                    )
+                return _error(f"could not join <#{channel_id}>: {code}")
+            return f"joined <#{channel_id}> as {as_identity}."
+
+        if action == "leave":
+            try:
+                await client.conversations_leave(channel=channel_id)
+            except Exception as exc:  # noqa: BLE001
+                code = error_code(exc)
+                if code in {"not_in_channel", "channel_not_found"}:
+                    return f"{as_identity} wasn't in <#{channel_id}>."
+                if code == "missing_scope":
+                    return _error(
+                        f"{as_identity} is missing the scope needed to leave channels"
+                    )
+                return _error(f"could not leave <#{channel_id}>: {code}")
+            return f"left <#{channel_id}> as {as_identity}."
+
+        return _error(f"unknown action: {action}")
 
     async def _tool_send_dm(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
@@ -4269,6 +4519,71 @@ class Toolbox:
 
         return _error(f"unknown task action: {action}")
 
+    async def _tool_api_request(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can call connected APIs")
+        if not ctx.is_dm:
+            return _error("api_request is only permitted in direct messages")
+        service = str(args.get("service") or "").lower().strip()
+        preset = api_service(service)
+        if preset is None:
+            return _error(f"unknown service: {service}")
+        token = api_token(ctx.db, ctx.settings, service)
+        if not token:
+            return _error(
+                f"{preset['label']} isn't connected. use `/nugget setup apis` to add a token."
+            )
+        method = str(args.get("method") or "GET").upper().strip()
+        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            return _error("method must be GET, POST, PUT, PATCH or DELETE")
+        path = str(args.get("path") or "").strip()
+        if (
+            not path.startswith("/")
+            or path.startswith("//")
+            or "://" in path
+            or ".." in path
+            or any(ch in path for ch in ("\r", "\n"))
+        ):
+            return _error("path must be a relative API path starting with '/'")
+        raw_query = args.get("query") or {}
+        if not isinstance(raw_query, dict):
+            return _error("query must be an object of key/value pairs")
+        query = {str(k): v for k, v in raw_query.items() if v is not None}
+        body = args.get("body")
+        if body is not None and not isinstance(body, (dict, list)):
+            return _error("body must be a JSON object or array")
+
+        url = f"{str(preset['base']).rstrip('/')}{path}"
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "chicen-nugget-bot",
+            **auth_headers(service, token),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                response = await http.request(
+                    method,
+                    url,
+                    params=query or None,
+                    json=body if method != "GET" else None,
+                    headers=headers,
+                )
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"{preset['label']} request failed: {exc}")
+
+        try:
+            parsed = response.json()
+        except ValueError:
+            parsed = response.text[:MAX_TOOL_RESULT]
+        return _json(
+            {
+                "service": preset["label"],
+                "status": response.status_code,
+                "ok": response.is_success,
+                "body": parsed,
+            }
+        )
+
     async def _tool_daily_briefing(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can build a personal briefing")
@@ -4381,14 +4696,18 @@ class Toolbox:
         if action == "disconnect":
             names_set = {name for name, _ in integrations.SETUP_INTEGRATIONS}
             if integration not in names_set and integration != "all":
-                return _error("integration must be google, mac, github, email, slack, or all")
+                return _error("integration must be google, mac, github, email, apis, slack, or all")
             targets = (
                 [name for name, _ in integrations.SETUP_INTEGRATIONS]
                 if integration == "all"
                 else [integration]
             )
             for name in targets:
-                integrations.clear_integration(ctx.db, name)
+                if name == "apis":
+                    for service in API_SERVICES:
+                        save_api_token(ctx.db, service, "")
+                else:
+                    integrations.clear_integration(ctx.db, name)
                 if name == "slack":
                     deactivate_owner_posting()
             names = ", ".join(name for name in targets)
@@ -4398,7 +4717,7 @@ class Toolbox:
             return _error("action must be panel, status, or disconnect")
 
         if integration and integration not in {name for name, _ in integrations.SETUP_INTEGRATIONS}:
-            return _error("integration must be google, mac, github, email, or slack")
+            return _error("integration must be google, mac, github, email, apis, or slack")
         blocks = integrations.setup_panel_blocks(integration or None)
         result = await post(
             ctx.client,
@@ -4427,9 +4746,18 @@ class Toolbox:
         if value and value[0] in {"C", "G", "D"} and re.match(r"^[CGD][A-Za-z0-9_\-]+$", value):
             return value
         needle = value.lstrip("#").lower()
-        for channel in await all_channels(ctx.client):
-            if str(channel.get("name", "")).lower() == needle:
-                return channel.get("id")
+        clients = []
+        for candidate in (ctx.bot_client, ctx.client, ctx.user_client):
+            if candidate is not None and candidate not in clients:
+                clients.append(candidate)
+        for client in clients:
+            try:
+                channels = await all_channels(client)
+            except Exception:  # noqa: BLE001
+                continue
+            for channel in channels:
+                if str(channel.get("name", "")).lower() == needle:
+                    return channel.get("id")
         return None
 
     async def _is_private_host(self, hostname: str) -> bool:

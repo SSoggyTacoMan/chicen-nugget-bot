@@ -115,6 +115,8 @@ def test_toolbox_has_expanded_tools():
     assert "inspect_code" in names
     assert "clone_repo" in names
     assert "sandbox" in names
+    assert "manage_channel" in names
+    assert "api_request" in names
 
 
 def test_owner_only_tools_guard():
@@ -1072,6 +1074,160 @@ def test_thread_chatter_suppression_and_speaker_tags(tmp_path):
         asyncio.run(run())
     finally:
         runtime.gate = old_gate
+
+
+def test_named_mention_uses_agent_without_at():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.features.agent import _looks_named, on_message
+    from bot.runtime import runtime
+
+    assert _looks_named("hey nugget what's up")
+    assert _looks_named("nugget?")
+    assert _looks_named("chicen nugget you around")
+    assert not _looks_named("i ate a chicken nugget")
+    assert not _looks_named("the nuggets won")
+
+    old_settings, old_bot, old_user = runtime.settings, runtime.bot_user_id, runtime.user_id
+    runtime.settings = MagicMock()
+    runtime.settings.ai_allowed.return_value = True
+    runtime.settings.slack_bot_token = "xoxb-test"
+    runtime.bot_user_id = "UBOT"
+    runtime.user_id = "UBOI"
+    client = AsyncMock()
+
+    async def run():
+        with patch("bot.features.agent._handle_channel", AsyncMock(return_value=True)) as mock_handle, \
+             patch("bot.features.agent._handle_thread_continuation", AsyncMock()) as mock_thread, \
+             patch("bot.features.agent._maybe_ambient", AsyncMock()) as mock_ambient, \
+             patch("bot.features.agent.fetch_slack_images", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.transcribe_slack_audio", AsyncMock(return_value=[])):
+            base = {"channel": "C1", "channel_type": "channel", "user": "U1", "ts": "1.0"}
+            await on_message({**base, "text": "hey nugget what's up"}, client)
+            mock_handle.assert_called_once()
+            assert mock_handle.call_args[1]["trigger"] == "named"
+            mock_thread.assert_not_called()
+            mock_ambient.assert_not_called()
+
+            # A real @mention belongs to app_mention, not this path.
+            await on_message({**base, "ts": "2.0", "text": "<@UBOT> hey"}, client)
+            assert mock_handle.call_count == 1
+
+            # If Boi is mentioned too, Boi owns it.
+            await on_message({**base, "ts": "3.0", "text": "<@UBOI> nugget hey"}, client)
+            assert mock_handle.call_count == 1
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.settings, runtime.bot_user_id, runtime.user_id = old_settings, old_bot, old_user
+
+
+def test_bot_dm_threads_stay_in_thread():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.features.agent import _handle_dm
+    from bot.runtime import runtime
+
+    old_agent, old_settings = runtime.agent, runtime.settings
+    runtime.agent = MagicMock()
+    runtime.agent.reply = AsyncMock(return_value="ok")
+    runtime.settings = MagicMock()
+    runtime.settings.owner_user_id = "U_OWNER"
+    runtime.settings.ai_allow_admins = False
+    runtime.settings.ai_enabled = True
+    runtime.settings.slack_bot_token = "xoxb-test"
+    client = AsyncMock()
+
+    async def run():
+        with patch("bot.features.agent.fetch_slack_images", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.transcribe_slack_audio", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.react", AsyncMock()), \
+             patch("bot.features.agent.unreact", AsyncMock()), \
+             patch("bot.features.agent.post", AsyncMock()) as mock_post:
+            top_level = {
+                "channel": "D1", "user": "U_OWNER", "text": "top", "ts": "10.0",
+            }
+            threaded = {
+                "channel": "D1", "user": "U_OWNER", "text": "thread", "ts": "10.2", "thread_ts": "10.0",
+            }
+            await _handle_dm(top_level, client)
+            await _handle_dm(threaded, client)
+
+            replies = runtime.agent.reply.call_args_list
+            assert replies[0][1]["thread_ts"] is None
+            assert replies[1][1]["thread_ts"] == "10.0"
+
+            posts = mock_post.call_args_list
+            assert posts[0][1]["thread_ts"] is None
+            assert posts[1][1]["thread_ts"] == "10.0"
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.agent, runtime.settings = old_agent, old_settings
+
+
+def test_thread_followup_ignores_plain_statements(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.ai.gate import GateDecision
+    from bot.db import Database
+    from bot.features.agent import _handle_thread_continuation
+    from bot.runtime import runtime
+
+    db = Database(str(tmp_path / "statement_thread.db"))
+    db.init()
+    db.mark_thread("C1", "1.0")
+    db.add_message("ch:C1:1.0", "user", "U1", "i have 61 hours")
+    runtime.db = db
+
+    old_gate, old_settings = runtime.gate, runtime.settings
+    runtime.gate = MagicMock()
+    runtime.gate.decide = AsyncMock(return_value=GateDecision(reply=True, kind="help"))
+    runtime.settings = MagicMock()
+    runtime.settings.ai_allowed.return_value = True
+    runtime.settings.ai_thread_cooldown = 0
+    runtime.settings.bot_name = "Chicen Nugget Bot"
+    client = AsyncMock()
+
+    async def run():
+        with patch("bot.features.agent._user_name", AsyncMock(return_value="maaren")), \
+             patch("bot.features.agent._channel_name", AsyncMock(return_value="general")), \
+             patch("bot.features.agent.fetch_slack_images", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.transcribe_slack_audio", AsyncMock(return_value=[])), \
+             patch("bot.features.agent._handle_channel", AsyncMock(return_value=True)) as mock_handle:
+            await _handle_thread_continuation(
+                {
+                    "channel": "C1",
+                    "thread_ts": "1.0",
+                    "user": "U1",
+                    "text": "i have 61 hours and cant do shi with it",
+                    "ts": "1.1",
+                },
+                client,
+            )
+            mock_handle.assert_not_called()
+
+            await _handle_thread_continuation(
+                {
+                    "channel": "C1",
+                    "thread_ts": "1.0",
+                    "user": "U1",
+                    "text": "can you check why my build fails",
+                    "ts": "1.2",
+                },
+                client,
+            )
+            mock_handle.assert_called_once()
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.gate, runtime.settings = old_gate, old_settings
 
 
 def test_markdown_notes_memory(tmp_path):

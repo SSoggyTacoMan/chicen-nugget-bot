@@ -25,7 +25,7 @@ from bot.utils.text import (
     disarm_broadcasts,
     format_mrkdwn,
     has_owner_signature,
-    strip_mentions,
+    incoming_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -302,7 +302,11 @@ class UserGateway:
         voice_transcripts = await transcribe_slack_audio(
             event, self.token, settings, cookie=self.cookie
         )
-        clean_text = strip_mentions(text).strip()
+        clean_text = incoming_text(
+            text,
+            bot_user_id=runtime.bot_user_id or "",
+            assistant_user_id=self.user_id or runtime.user_id or "",
+        )
         if voice_transcripts:
             voice_block = "\n".join(voice_transcripts)
             clean_text = (

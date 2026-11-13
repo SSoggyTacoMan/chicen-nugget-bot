@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 import logging
 import time
+from collections.abc import Mapping
+from contextlib import suppress
 
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
-from bot.runtime import runtime
 from bot import integrations
 from bot.ai.agent import Agent
 from bot.ai.budget import Budget
@@ -21,7 +21,8 @@ from bot.features import access, scheduler
 from bot.handlers import register
 from bot.logging_setup import setup_logging
 from bot.owner_posting import activate_owner_posting
-from bot.slack_api import ensure_public_member
+from bot.runtime import runtime
+from bot.slack_api import app_manage_url, ensure_public_member, post
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,32 @@ async def run() -> None:
 
     runtime.bot_user_id = auth.get("user_id") or ""
     runtime.bot_id = auth.get("bot_id") or ""
+
+    scope_headers = getattr(auth, "headers", None)
+    scopes = (
+        scope_headers.get("x-oauth-scopes", "")
+        if isinstance(scope_headers, Mapping)
+        else ""
+    )
+    if isinstance(scopes, str) and scopes and "chat:write.customize" not in scopes:
+        logger.warning(
+            "chat:write.customize is not granted; as_user posting will fail until the "
+            "app is reinstalled"
+        )
+        app_id = auth.get("bot_id") or ""
+        warned = db.kv_get("warned:customize_scope")
+        if settings.owner_user_id and warned != app_id:
+            url = await app_manage_url(app.client)
+            sent = await post(
+                app.client,
+                settings.owner_user_id,
+                "posting in your name needs one reinstall, not a personal token. "
+                f"the app has `chat:write.customize` in its manifest but Slack hasn't "
+                f"applied it yet: <{url}|reinstall the app>. after that, "
+                "`as_user=true` works.",
+            )
+            if sent:
+                db.kv_set("warned:customize_scope", app_id)
 
     user_client = None
     if settings.slack_user_token:

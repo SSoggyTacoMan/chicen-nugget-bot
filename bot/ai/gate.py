@@ -30,16 +30,18 @@ Would a short reply from this bot genuinely add something to the conversation?
 
 True when someone:
 - asks a question, especially about programming, code, tools, servers, APIs or bots
-- asks for help, a review, feedback, a link, an opinion, or a recommendation
-- seems stuck, confused, or blocked on something
+- explicitly asks for help, a review, feedback, a link, an opinion, or a recommendation
+- seems stuck, confused, or blocked and is asking for a way forward
 - is talking to or about the bot, or replying to something it said
 - shares a win, a project, or something they clearly want acknowledged
 
 False when:
 - it is chatter between other people that doesn't involve the bot
+- the speaker is narrating their own day, progress, mood, hours, or plans without asking the bot for anything
+- they are venting or thinking out loud, even if the topic is code or projects
 - it is a joke, meme, reaction, or one-word message that needs no reply
 - it is spam, a link dump, a mass ping, or low-effort noise
-- a reply would just repeat what someone already said
+- a reply would just repeat what someone already said or ask a question they did not ask
 """
 
 ADDRESSED = """\
