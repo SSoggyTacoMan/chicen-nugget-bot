@@ -1136,7 +1136,7 @@ class Toolbox:
             ),
             tool(
                 "sandbox",
-                "Persistent workspace for repo investigation and shell work. Create a named sandbox (optionally cloning a repo), run commands in it, read/list/search files over several turns, and delete it when you are done. It stays on disk until deleted. Owner/admin only, DM only.",
+                "Persistent workspace for repo investigation and shell work. Use this instead of `clone_repo` when a task spans turns or needs commands. Create a named sandbox (optionally cloning a repo), run commands in it, read/list/search files, and delete it when done. It stays on disk until deleted. Owner/admin only, DM only.",
                 {
                     "action": {
                         "type": "string",
