@@ -210,9 +210,43 @@ The fallback model kicks in when the primary errors or times out. Conversation h
 
 Owner and admin checks run in code against the real Slack sender. The prompt can't grant permissions on its own.
 
-`clone_repo` is a one-shot peek: it clones, lets the model list, read, or search, then deletes the checkout. `sandbox` is the longer-lived option. It creates a named workspace under `SANDBOX_DIR`, optionally clones a repo into it, and keeps it around so Boi can run commands, read files, and search across turns. Owner/admin only, DM only, and you delete it when the work is done. It is a workspace boundary, not a security boundary: commands run as the same OS user as the bot.
-
 `flaron` also looks up workspace emojis, which is handy when you want a custom one to actually render.
+
+### sandboxes
+
+`sandbox` is the persistent workspace for actual dev work. Create one, clone a repo into it, run commands, and keep reading or searching it across turns. It stays on disk until deleted. `clone_repo` is still there for a quick look and cleans up immediately.
+
+Owner/admin only, DM only. It is a workspace boundary, not a security boundary: commands run as the same OS user as the bot.
+
+| action | what it does |
+|---|---|
+| `create` | make a named workspace. pass `repo_url` (`owner/repo` or an https git url) to shallow-clone into it |
+| `exec` | run a shell command in the workspace, optionally in a subdirectory with `cwd` |
+| `read` | read a file with line numbers, with `offset` and `limit` |
+| `list_files` | list a directory. `.git` and noisy build dirs are skipped |
+| `search` | text or regex search across the workspace |
+| `info` | show the repo and created/updated timestamps for one workspace |
+| `list` | list all workspaces plus free disk |
+| `delete` | remove the workspace and its metadata |
+
+A typical DM goes like this:
+
+```text
+owner: can you figure out why acme/widget fails on py3.13?
+boi: sandbox create name=widget repo_url=acme/widget
+boi: sandbox exec name=widget command="python -m pytest -q"
+boi: sandbox read name=widget path=tests/test_widget.py offset=40 limit=60
+boi: sandbox delete name=widget
+```
+
+Workspaces live under `SANDBOX_DIR`, which defaults to `data/sandboxes`. `SANDBOX_MAX_WORKSPACES` caps how many stick around (20 by default), so old ones need deleting. `SANDBOX_EXEC_TIMEOUT` is the default command timeout and `SANDBOX_MAX_EXEC_TIMEOUT` is the hard ceiling. Child processes get `HOME` and `TMPDIR` inside the workspace and lose variables that look like tokens, keys, secrets, passwords, auth, ssh, cookies or credentials. That is hygiene, not isolation. Do not point it at code you would not run on the host.
+
+```dotenv
+SANDBOX_DIR=
+SANDBOX_MAX_WORKSPACES=20
+SANDBOX_EXEC_TIMEOUT=120
+SANDBOX_MAX_EXEC_TIMEOUT=600
+```
 
 ### artifacts
 
