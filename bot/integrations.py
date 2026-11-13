@@ -202,11 +202,17 @@ def setup_status_text(
         mac_state = "not configured (run the companion bridge or deploy on a Mac)"
 
     if owner_posting:
-        slack_state = "owner-profile posting active"
+        slack_state = "native posting active (your own token, no app badge)"
     elif owner["token"]:
-        slack_state = "token stored, not validated yet"
+        slack_state = (
+            "token stored but not validated (run `/nugget setup slack`); posting in your "
+            "name currently uses your display name + avatar on a bot message"
+        )
     else:
-        slack_state = "owner-profile posting not configured"
+        slack_state = (
+            "posting in your name uses your display name + avatar on a bot message "
+            "(app badge visible; add your own user token for a native post)"
+        )
 
     boi_state = (
         "connected" if assistant_identity else "not configured (SLACK_USER_TOKEN in the server env)"
@@ -262,11 +268,14 @@ def prompt_integration_lines(
         else "not configured (use `/nugget setup email`)"
     )
     if owner_posting:
-        owner_state = "connected"
+        owner_state = "native, your own token (no app badge)"
     elif owner["token"]:
         owner_state = "token stored but not validated (run `/nugget setup slack`)"
     else:
-        owner_state = "not configured (use `/nugget setup slack`)"
+        owner_state = (
+            "your display name + avatar on a bot message (app badge; add your own token "
+            "for a native post)"
+        )
     gh_user = github["username"] or "not set"
     gh_state = (
         f"@{gh_user} with token"
@@ -284,7 +293,7 @@ def prompt_integration_lines(
         f"- Email (IMAP): {email_state}\n"
         f"- Boi personal user account (SLACK_USER_TOKEN): "
         f"{'connected' if assistant_identity else 'not configured (server env only)'}\n"
-        f"- Posting through the owner's own Slack profile (SLACK_OWNER_TOKEN): {owner_state}\n"
+        f"- Posting in the owner's name: {owner_state}\n"
         f"- models: bot app `{bot_model}`, Boi `{assistant_model}`"
     )
 

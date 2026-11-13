@@ -972,6 +972,7 @@ def test_send_dm_and_post_message_as_user():
     from unittest.mock import AsyncMock, MagicMock
 
     from bot.ai.tools import Toolbox, ToolContext
+    from bot.slack_api import _display_cache
 
     settings = MagicMock()
     settings.owner_user_id = "U0OWNER01"
@@ -981,7 +982,21 @@ def test_send_dm_and_post_message_as_user():
     user_client = AsyncMock()
     owner_client = AsyncMock()
 
-    bot_client.users_info = AsyncMock(return_value={"user": {"id": "U123456789", "name": "target"}})
+    async def fake_users_info(user):
+        if user == "U0OWNER01":
+            return {
+                "user": {
+                    "id": "U0OWNER01",
+                    "name": "maaren",
+                    "profile": {
+                        "display_name": "Maaren",
+                        "image_72": "https://example.com/owner.png",
+                    },
+                }
+            }
+        return {"user": {"id": user, "name": "target"}}
+
+    bot_client.users_info = AsyncMock(side_effect=fake_users_info)
     bot_client.conversations_open = AsyncMock(return_value={"channel": {"id": "D111111111"}})
     bot_client.chat_postMessage = AsyncMock(return_value=MagicMock(data={"ok": True, "ts": "111.000"}))
 
@@ -991,62 +1006,8 @@ def test_send_dm_and_post_message_as_user():
     owner_client.conversations_open = AsyncMock(return_value={"channel": {"id": "D333333333"}})
     owner_client.chat_postMessage = AsyncMock(return_value=MagicMock(data={"ok": True, "ts": "333.000"}))
 
-    ctx = ToolContext(
-        db=MagicMock(),
-        settings=settings,
-        client=bot_client,
-        user_client=user_client,
-        bot_user_id="U_BOT",
-        assistant_user_id="U_BOT",
-        user_id="U0OWNER01",
-        channel_id="C123456789",
-        thread_ts=None,
-        is_dm=True,
-        is_owner=True,
-        is_admin=True,
-        bot_client=bot_client,
-        owner_client=owner_client,
-    )
-
-    async def run():
-        # 1. send_dm default (as bot)
-        res_dm_bot = await box.execute("send_dm", {"user": "U123456789", "text": "hello from bot"}, ctx)
-        assert "sent a DM to <@U123456789> as Bot app." in res_dm_bot
-        bot_client.chat_postMessage.assert_called_once()
-        user_client.chat_postMessage.assert_not_called()
-        owner_client.chat_postMessage.assert_not_called()
-
-        # 2. send_dm as_user=True posts through the OWNER's own profile
-        res_dm_user = await box.execute(
-            "send_dm", {"user": "U123456789", "text": "hello from owner", "as_user": True}, ctx
-        )
-        assert "sent a DM to <@U123456789> as your profile (owner)." in res_dm_user
-        owner_client.chat_postMessage.assert_called_once()
-        user_client.chat_postMessage.assert_not_called()
-        _, kwargs_dm = owner_client.chat_postMessage.call_args
-        assert kwargs_dm["text"].endswith("_Sent by <@U_BOT>_")
-        assert kwargs_dm["blocks"][-1]["type"] == "context"
-        assert "Sent by <@U_BOT>" in kwargs_dm["blocks"][-1]["elements"][0]["text"]
-
-        # 3. post_message default (as bot)
-        res_post_bot = await box.execute(
-            "post_message", {"channel": "C123456789", "text": "bot announcement"}, ctx
-        )
-        assert "posted to <#C123456789>" in res_post_bot
-        assert "as Bot app" in res_post_bot
-
-        # 4. post_message as_user=True (owner profile + muted signature)
-        res_post_user = await box.execute(
-            "post_message", {"channel": "C123456789", "text": "owner announcement", "as_user": True}, ctx
-        )
-        assert "posted to <#C123456789>" in res_post_user
-        assert "as your profile (owner)" in res_post_user
-        _, kwargs_post = owner_client.chat_postMessage.call_args
-        assert "_Sent by <@U_BOT>_" in kwargs_post["text"]
-        assert kwargs_post["thread_ts"] is None
-
-        # 5. Boi's user token alone cannot post as the owner
-        ctx_no_owner = ToolContext(
+    def make_ctx(*, native: bool) -> ToolContext:
+        return ToolContext(
             db=MagicMock(),
             settings=settings,
             client=bot_client,
@@ -1060,9 +1021,84 @@ def test_send_dm_and_post_message_as_user():
             is_owner=True,
             is_admin=True,
             bot_client=bot_client,
+            owner_client=owner_client if native else None,
         )
-        err = await box.execute("post_message", {"channel": "C123456789", "text": "hi", "as_user": True}, ctx_no_owner)
-        assert "SLACK_OWNER_TOKEN" in err
+
+    async def run():
+        _display_cache.clear()
+        ctx = make_ctx(native=False)
+
+        # 1. send_dm default (as bot)
+        res_dm_bot = await box.execute("send_dm", {"user": "U123456789", "text": "hello from bot"}, ctx)
+        assert "sent a DM to <@U123456789> as the bot app." in res_dm_bot
+        bot_client.chat_postMessage.assert_called_once()
+        _, kwargs = bot_client.chat_postMessage.call_args
+        assert "username" not in kwargs and "icon_url" not in kwargs
+        user_client.chat_postMessage.assert_not_called()
+        owner_client.chat_postMessage.assert_not_called()
+
+        # 2. send_dm as_user=True without an owner token: bot app wears the
+        #    owner's name + avatar via chat:write.customize.
+        bot_client.chat_postMessage.reset_mock()
+        res_dm_user = await box.execute(
+            "send_dm", {"user": "U123456789", "text": "hello from owner", "as_user": True}, ctx
+        )
+        assert "your name and avatar" in res_dm_user
+        bot_client.chat_postMessage.assert_called_once()
+        _, kwargs_dm = bot_client.chat_postMessage.call_args
+        assert kwargs_dm["username"] == "Maaren"
+        assert kwargs_dm["icon_url"] == "https://example.com/owner.png"
+        assert kwargs_dm["text"].endswith("_Sent by <@U_BOT>_")
+        assert kwargs_dm["blocks"][-1]["type"] == "context"
+        assert "Sent by <@U_BOT>" in kwargs_dm["blocks"][-1]["elements"][0]["text"]
+        owner_client.chat_postMessage.assert_not_called()
+
+        # 3. post_message default (as bot)
+        bot_client.chat_postMessage.reset_mock()
+        res_post_bot = await box.execute(
+            "post_message", {"channel": "C123456789", "text": "bot announcement"}, ctx
+        )
+        assert "posted to <#C123456789>" in res_post_bot
+        assert "as the bot app" in res_post_bot
+        _, kwargs_bot_post = bot_client.chat_postMessage.call_args
+        assert "username" not in kwargs_bot_post
+
+        # 4. post_message as_user=True without an owner token (customized bot post)
+        bot_client.chat_postMessage.reset_mock()
+        res_post_user = await box.execute(
+            "post_message", {"channel": "C123456789", "text": "owner announcement", "as_user": True}, ctx
+        )
+        assert "posted to <#C123456789>" in res_post_user
+        assert "your name and avatar" in res_post_user
+        _, kwargs_post = bot_client.chat_postMessage.call_args
+        assert kwargs_post["username"] == "Maaren"
+        assert "_Sent by <@U_BOT>_" in kwargs_post["text"]
+        assert kwargs_post["thread_ts"] is None
+
+        # 5. with the owner's own token, post natively through their profile
+        bot_client.chat_postMessage.reset_mock()
+        native_ctx = make_ctx(native=True)
+        res_native = await box.execute(
+            "post_message", {"channel": "C123456789", "text": "native announcement", "as_user": True},
+            native_ctx,
+        )
+        assert "native post" in res_native
+        owner_client.chat_postMessage.assert_called_once()
+        _, kwargs_native = owner_client.chat_postMessage.call_args
+        assert "username" not in kwargs_native and "icon_url" not in kwargs_native
+        assert "_Sent by <@U_BOT>_" in kwargs_native["text"]
+        bot_client.chat_postMessage.assert_not_called()
+        user_client.chat_postMessage.assert_not_called()
+
+        # 6. profile lookup failure is a clear error, not a silent fallback
+        bot_client.chat_postMessage.reset_mock()
+        _display_cache.clear()
+        bot_client.users_info = AsyncMock(side_effect=RuntimeError("missing_scope"))
+        err = await box.execute(
+            "post_message", {"channel": "C123456789", "text": "hi", "as_user": True}, ctx
+        )
+        assert "chat:write.customize" in err
+        bot_client.chat_postMessage.assert_not_called()
         user_client.chat_postMessage.assert_not_called()
 
     asyncio.run(run())
@@ -1692,7 +1728,7 @@ def test_slack_app_manifest_scopes():
 
     for required in ["chat:write", "files:read", "reactions:write"]:
         assert required in user_scopes
-    for required in ["chat:write", "files:read", "reactions:write"]:
+    for required in ["chat:write", "chat:write.customize", "files:read", "reactions:write"]:
         assert required in bot_scopes
 
 

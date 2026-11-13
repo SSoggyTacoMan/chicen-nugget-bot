@@ -66,7 +66,20 @@ async def post(
     blocks: list[dict[str, Any]] | None = None,
     thread_ts: str | None = None,
     unfurl_links: bool = False,
+    username: str | None = None,
+    icon_url: str | None = None,
 ) -> dict[str, Any] | None:
+    """Post a message.
+
+    ``username`` and ``icon_url`` use Slack's ``chat:write.customize`` scope:
+    the message is still a bot message with the app badge, but it displays the
+    supplied name and avatar instead of the app's own.
+    """
+    extra: dict[str, Any] = {}
+    if username:
+        extra["username"] = username
+    if icon_url:
+        extra["icon_url"] = icon_url
     try:
         response = await client.chat_postMessage(
             channel=channel,
@@ -75,6 +88,7 @@ async def post(
             thread_ts=thread_ts,
             unfurl_links=unfurl_links,
             unfurl_media=unfurl_links,
+            **extra,
         )
         return dict(response.data) if response.data else None
     except Exception as exc:  # noqa: BLE001
@@ -144,6 +158,49 @@ async def user_label(client: AsyncWebClient, user_id: str) -> str:
     profile = user.get("profile") or {}
     name = profile.get("display_name") or user.get("real_name") or user.get("name") or user_id
     return f"{name} (<@{user_id}>)"
+
+
+_display_cache: dict[str, tuple[float, dict[str, str]]] = {}
+_DISPLAY_TTL = 600.0
+
+
+async def user_display(client: AsyncWebClient, user_id: str) -> dict[str, str]:
+    """Name + avatar suitable for ``chat:write.customize``.
+
+    Cached for ten minutes so owner-name posting does not call ``users.info``
+    on every message. Returns an empty dict when the profile cannot be read.
+    """
+    if not user_id:
+        return {}
+    now = time.monotonic()
+    cached = _display_cache.get(user_id)
+    if cached and (now - cached[0]) < _DISPLAY_TTL:
+        return cached[1]
+    user = await user_info(client, user_id)
+    if not user:
+        return {}
+    profile = user.get("profile") or {}
+    name = (
+        profile.get("display_name")
+        or user.get("real_name")
+        or profile.get("real_name")
+        or user.get("name")
+        or ""
+    ).strip()
+    icon = (
+        profile.get("image_192")
+        or profile.get("image_132")
+        or profile.get("image_72")
+        or ""
+    )
+    display: dict[str, str] = {}
+    if name:
+        display["username"] = name
+    if icon:
+        display["icon_url"] = icon
+    if display:
+        _display_cache[user_id] = (now, display)
+    return display
 
 
 async def channel_info(client: AsyncWebClient, channel_id: str) -> dict[str, Any] | None:
