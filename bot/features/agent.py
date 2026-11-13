@@ -36,6 +36,11 @@ _last_ambient: dict[str, float] = {}
 # (channel, thread_ts) -> monotonic time of the last unprompted thread reply, so
 # a busy thread can't turn into a monologue.
 _last_thread: dict[tuple[str, str], float] = {}
+# (channel, thread_ts) -> monotonic time of the last UNSUBSCRIBE gag, so a
+# thread can't turn into a resubscribe loop.
+_last_unsubscribe: dict[tuple[str, str], float] = {}
+_UNSUBSCRIBE_COOLDOWN = 15.0
+_UNSUBSCRIBE_WORDS = {"unsubscribe", "unsub"}
 _names: dict[str, str] = {}
 
 
@@ -54,6 +59,8 @@ async def on_message(event: dict[str, Any], client) -> None:
         await _handle_dm(event, client)
         return
     if channel_type in {"channel", "group"}:
+        if await _handle_unsubscribe(event, client):
+            return
         await _handle_thread_continuation(event, client)
         await _maybe_ambient(event, client)
 
@@ -155,6 +162,36 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
     finally:
         if message_ts:
             await unreact(client, event["channel"], message_ts, "eyes")
+
+
+def _is_unsubscribe(text: str | None) -> bool:
+    cleaned = " ".join((text or "").split()).strip("!.?,;:")
+    return cleaned.lower() in _UNSUBSCRIBE_WORDS
+
+
+async def _handle_unsubscribe(event: dict[str, Any], client) -> bool:
+    """Do the gleeb-glorb bit: a bare UNSUBSCRIBE in a thread gets RESUBSCRIBE."""
+    channel = event.get("channel")
+    thread_ts = event.get("thread_ts")
+    ts = event.get("ts")
+    user_id = event.get("user")
+    if not channel or not thread_ts or not ts or thread_ts == ts or not user_id:
+        return False
+    if not _is_unsubscribe(event.get("text")):
+        return False
+
+    key = (channel, thread_ts)
+    now = time.monotonic()
+    if now - _last_unsubscribe.get(key, 0.0) < _UNSUBSCRIBE_COOLDOWN:
+        return True
+    _last_unsubscribe[key] = now
+    await post(
+        client,
+        channel,
+        f'<@{user_id}> RESUBSCRIBE\n(use "turn off notifications for replies" instead)\nSee how',
+        thread_ts=thread_ts,
+    )
+    return True
 
 
 async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
