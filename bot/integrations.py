@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from bot.api_keys import API_SERVICES, api_key_status
 from bot.config import Settings
 from bot.db import Database
 
@@ -18,6 +19,7 @@ SETUP_INTEGRATIONS: tuple[tuple[str, str], ...] = (
     ("mac", "Mac"),
     ("github", "GitHub"),
     ("email", "Email"),
+    ("apis", "API keys"),
     ("slack", "Slack profile"),
 )
 
@@ -34,6 +36,7 @@ SECRET_CONFIG_KEYS: frozenset[str] = frozenset(
         "slack_owner_token",
         "slack_owner_cookie",
     }
+    | {f"api_token:{name}" for name in API_SERVICES}
 )
 
 SECRET_SETUP_TARGET: dict[str, str] = {
@@ -45,6 +48,7 @@ SECRET_SETUP_TARGET: dict[str, str] = {
     "imap_password": "email",
     "slack_owner_token": "slack",
     "slack_owner_cookie": "slack",
+    **{f"api_token:{name}": "apis" for name in API_SERVICES},
 }
 
 
@@ -189,6 +193,14 @@ def setup_status_text(
     else:
         github_state = "not configured"
 
+    keys = api_key_status(db, settings)
+    connected_apis = [
+        str(API_SERVICES[name]["label"])
+        for name, present in keys.items()
+        if present
+    ]
+    api_state = ", ".join(connected_apis) if connected_apis else "none"
+
     if imap["host"] and imap["user"] and imap["password"]:
         email_state = f"configured for {imap['user']} at {imap['host']}"
     else:
@@ -210,8 +222,9 @@ def setup_status_text(
         )
     else:
         slack_state = (
-            "posting in your name uses your display name + avatar on a bot message "
-            "(app badge visible; add your own user token for a native post)"
+            "posting in your name uses your display name + avatar on a bot message. if "
+            "Slack shows the bot's own name instead, reinstall the app with "
+            "`chat:write.customize` (no personal token needed)"
         )
 
     boi_state = (
@@ -223,6 +236,7 @@ def setup_status_text(
         f"• *Google Workspace*: {google_state}",
         f"• *Mac companion*: {mac_state}",
         f"• *GitHub*: {github_state}",
+        f"• *API keys*: {api_state}",
         f"• *Email (IMAP)*: {email_state}",
         f"• *Boi user account*: {boi_state}",
         f"• *Your Slack profile*: {slack_state}",
@@ -273,8 +287,9 @@ def prompt_integration_lines(
         owner_state = "token stored but not validated (run `/nugget setup slack`)"
     else:
         owner_state = (
-            "your display name + avatar on a bot message (app badge; add your own token "
-            "for a native post)"
+            "your display name + avatar on a bot message. if Slack shows the bot's own "
+            "name instead, reinstall the app with `chat:write.customize`; no personal "
+            "token is needed"
         )
     gh_user = github["username"] or "not set"
     gh_state = (
@@ -286,8 +301,16 @@ def prompt_integration_lines(
             else "not configured (use `/nugget setup github`)"
         )
     )
+    keys = api_key_status(db, settings)
+    connected_apis = [
+        str(API_SERVICES[name]["label"])
+        for name, present in keys.items()
+        if present
+    ]
+    api_state = ", ".join(connected_apis) if connected_apis else "none"
     return (
         f"- GitHub & Hackatime: {gh_state}\n"
+        f"- Extra APIs (generic api_request): {api_state}\n"
         f"- Google Workspace (Calendar, Gmail, Drive): {google_state}\n"
         f"- Mac companion link (volume, apps, clipboard, lock/sleep, shell): {mac_state}\n"
         f"- Email (IMAP): {email_state}\n"
@@ -305,6 +328,7 @@ def setup_panel_blocks(requested: str | None = None) -> list[dict[str, Any]]:
         "mac": ("Mac", "Companion bridge or local macOS"),
         "github": ("GitHub", "Username, token and default repo"),
         "email": ("Email", "IMAP inbox and app password"),
+        "apis": ("API keys", "Vercel, Cloudflare, Notion, Linear, Sentry"),
         "slack": ("Slack profile", "Post in your own name"),
     }
     if requested and requested in labels:

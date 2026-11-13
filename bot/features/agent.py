@@ -25,7 +25,7 @@ from bot.utils.text import (
     display_name,
     format_mrkdwn,
     has_owner_signature,
-    strip_mentions,
+    incoming_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,16 @@ _last_thread: dict[tuple[str, str], float] = {}
 _last_unsubscribe: dict[tuple[str, str], float] = {}
 _UNSUBSCRIBE_COOLDOWN = 15.0
 _UNSUBSCRIBE_WORDS = {"unsubscribe", "unsub"}
+_NAME_ADDRESS = (
+    re.compile(r"^\s*(?:hey|yo|hi|ok|okay|so|alright)?\s*(?:chicen\s+nugget|chicen|nugget)\b", re.I),
+    re.compile(r"\b(?:chicen\s+nugget|chicen)\b", re.I),
+    re.compile(r"\bnugget\s*[,?!:]", re.I),
+)
+_REQUEST_RE = re.compile(
+    r"\b(?:can|could|would|will)\s+you\b|"
+    r"\b(?:help|check|look at|fix|review|explain|thoughts|opinion|advice|debug)\b",
+    re.I,
+)
 _names: dict[str, str] = {}
 
 
@@ -60,6 +70,8 @@ async def on_message(event: dict[str, Any], client) -> None:
         return
     if channel_type in {"channel", "group"}:
         if await _handle_unsubscribe(event, client):
+            return
+        if await _handle_named_mention(event, client):
             return
         await _handle_thread_continuation(event, client)
         await _maybe_ambient(event, client)
@@ -84,7 +96,11 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
     voice_transcripts = await transcribe_slack_audio(
         event, runtime.settings.slack_bot_token, runtime.settings
     )
-    text = strip_mentions(event.get("text") or "").strip()
+    text = incoming_text(
+        event.get("text") or "",
+        bot_user_id=runtime.bot_user_id,
+        assistant_user_id=runtime.user_id or "",
+    )
     if voice_transcripts:
         voice_block = "\n".join(voice_transcripts)
         text = (
@@ -135,9 +151,15 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
         text = "Describe or look at this image."
     retry = user_retry_after(user_id)
     if retry:
-        await post(client, event["channel"], f"slow down a lil, try again in {retry}s :3")
+        await post(
+            client,
+            event["channel"],
+            f"slow down a lil, try again in {retry}s :3",
+            thread_ts=event.get("thread_ts"),
+        )
         return
     message_ts = event.get("ts")
+    reply_thread_ts = event.get("thread_ts") or None
     if message_ts:
         await react(client, event["channel"], message_ts, "eyes")
     conversation = f"dm:{user_id}"
@@ -149,7 +171,7 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
                     user_id=user_id,
                     text=text,
                     channel_id=event.get("channel"),
-                    thread_ts=None,
+                    thread_ts=reply_thread_ts,
                     is_dm=True,
                     trigger="dm",
                     images=images,
@@ -158,7 +180,7 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
                 logger.exception("dm agent turn failed")
                 answer = "something broke on my side. check my logs?"
         for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
-            await post(client, event["channel"], chunk)
+            await post(client, event["channel"], chunk, thread_ts=reply_thread_ts)
     finally:
         if message_ts:
             await unreact(client, event["channel"], message_ts, "eyes")
@@ -167,6 +189,53 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
 def _is_unsubscribe(text: str | None) -> bool:
     cleaned = " ".join((text or "").split()).strip("!.?,;:")
     return cleaned.lower() in _UNSUBSCRIBE_WORDS
+
+
+def _looks_named(text: str) -> bool:
+    """True when a channel message addresses the bot by name instead of @."""
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _NAME_ADDRESS)
+
+
+async def _handle_named_mention(event: dict[str, Any], client) -> bool:
+    """Treat "hey nugget" like a real mention, without requiring the @."""
+    channel = event.get("channel") or ""
+    text = (event.get("text") or "").strip()
+    if not channel or not text or not runtime.settings.ai_allowed(channel):
+        return False
+    if runtime.bot_user_id and f"<@{runtime.bot_user_id}>" in text:
+        return False  # app_mention owns this one
+    if runtime.user_id and f"<@{runtime.user_id}>" in text:
+        return False  # the user gateway owns this one
+    if not _looks_named(text):
+        return False
+
+    images = await fetch_slack_images(event, runtime.settings.slack_bot_token)
+    voice_transcripts = await transcribe_slack_audio(
+        event, runtime.settings.slack_bot_token, runtime.settings
+    )
+    clean_text = incoming_text(
+        text,
+        bot_user_id=runtime.bot_user_id,
+        assistant_user_id=runtime.user_id or "",
+    )
+    if voice_transcripts:
+        voice_block = "\n".join(voice_transcripts)
+        clean_text = (
+            f"{clean_text}\n\n[Voice message]: {voice_block}".strip()
+            if clean_text
+            else f"[Voice message]: {voice_block}"
+        )
+    if not clean_text and images:
+        clean_text = "What is in this image?"
+
+    await _handle_channel(
+        event, client, text=clean_text, trigger="named", images=images
+    )
+    # Recognized as addressed to the bot even if the model chose [NO_REPLY],
+    # so don't let ambient or thread logic answer the same message again.
+    return True
 
 
 async def _handle_unsubscribe(event: dict[str, Any], client) -> bool:
@@ -240,6 +309,10 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
             return
         if not images and len(text.split()) < 3 and "?" not in text:
             return
+        # A statement is not an invitation. "i have 61 hours and can't do shit"
+        # should not turn into an unprompted coaching question.
+        if not images and "?" not in text and not _REQUEST_RE.search(text):
+            return
 
     jev_hint = ""
     if runtime.gate is not None and runtime.settings.ai_gate_enabled:
@@ -264,8 +337,8 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         jev_hint = decision.hint()
 
     cooldown = runtime.settings.ai_thread_cooldown
+    key = (channel, thread_ts)
     if isinstance(cooldown, (int, float)) and cooldown > 0:
-        key = (channel, thread_ts)
         if not explicitly_named and time.monotonic() - _last_thread.get(key, 0.0) < cooldown:
             logger.info("thread followup cooldown in %s (%ss)", channel, cooldown)
             return
@@ -344,7 +417,12 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
     await _handle_channel(
         event,
         client,
-        text=strip_mentions(text) or text,
+        text=incoming_text(
+            text,
+            bot_user_id=runtime.bot_user_id,
+            assistant_user_id=runtime.user_id or "",
+        )
+        or text,
         thread_ts=event.get("ts"),
         trigger="ambient",
         jev=decision.hint(),
@@ -397,7 +475,7 @@ async def _handle_channel(
     conversation = f"ch:{channel}:{root_ts}"
     message_ts = event.get("ts")
 
-    if message_ts and trigger in {"mention", "thread_followup"}:
+    if message_ts and trigger in {"mention", "named", "thread_followup"}:
         await react(client, channel, message_ts, "eyes")
     posted = False
     try:
@@ -429,6 +507,6 @@ async def _handle_channel(
         )
         posted = True
     finally:
-        if message_ts and trigger in {"mention", "thread_followup"}:
+        if message_ts and trigger in {"mention", "named", "thread_followup"}:
             await unreact(client, channel, message_ts, "eyes")
     return posted

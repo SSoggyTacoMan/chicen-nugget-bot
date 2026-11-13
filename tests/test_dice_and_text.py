@@ -1,7 +1,7 @@
 import random
 
 from bot.utils.dice import roll
-from bot.utils.text import chunk_text, extract_id, format_mrkdwn, has_owner_signature
+from bot.utils.text import chunk_text, extract_id, format_mrkdwn, has_owner_signature, incoming_text
 
 
 def test_dice_basic():
@@ -106,3 +106,12 @@ def test_owner_signature_detection():
     assert has_owner_signature("Sent by <@U0BOI0001>")
     assert not has_owner_signature("regular message")
     assert not has_owner_signature("")
+
+
+def test_incoming_text_keeps_mentions_readable():
+    raw = "i have <@U0BOI0001> and <@U0BOT0001>, cc <@U0ALICE>"
+    cleaned = incoming_text(
+        raw, bot_user_id="U0BOT0001", assistant_user_id="U0BOI0001"
+    )
+    assert cleaned == "i have @boi and @nugget, cc <@U0ALICE>"
+    assert "cut off" not in cleaned

@@ -9,6 +9,7 @@ import logging
 import re
 import socket
 import time
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -162,6 +163,61 @@ async def user_label(client: AsyncWebClient, user_id: str) -> str:
 
 _display_cache: dict[str, tuple[float, dict[str, str]]] = {}
 _DISPLAY_TTL = 600.0
+_scope_cache: dict[str, tuple[float, set[str]]] = {}
+_app_id_cache: dict[str, str] = {}
+_TOKEN_INFO_TTL = 60.0
+
+
+async def granted_scopes(client: AsyncWebClient | None) -> set[str] | None:
+    """Scopes actually granted to a token, or None if the check failed.
+
+    Slack silently ignores ``username``/``icon_url`` when the app lacks
+    ``chat:write.customize``. Checking the headers lets us fail honestly instead
+    of claiming a message went out under the owner's name when it didn't.
+    """
+    if client is None:
+        return None
+    key = getattr(client, "token", "") or str(id(client))
+    now = time.monotonic()
+    cached = _scope_cache.get(key)
+    if cached and now - cached[0] < _TOKEN_INFO_TTL:
+        return cached[1]
+    try:
+        response = await client.auth_test()
+        headers = getattr(response, "headers", None)
+        if not isinstance(headers, Mapping):
+            return None
+        raw = headers.get("x-oauth-scopes", "")
+    except Exception as exc:  # noqa: BLE001
+        logger.info("auth_test failed while checking scopes: %s", error_code(exc))
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    scopes = {item.strip() for item in raw.split(",") if item.strip()}
+    _scope_cache[key] = (now, scopes)
+    return scopes
+
+
+async def app_manage_url(client: AsyncWebClient | None) -> str:
+    """Best-effort link to the app's settings page for a reinstall."""
+    if client is None:
+        return "https://api.slack.com/apps"
+    key = getattr(client, "token", "") or str(id(client))
+    if key in _app_id_cache:
+        return _app_id_cache[key]
+    try:
+        auth = await client.auth_test()
+        bot_id = auth.get("bot_id")
+        if bot_id:
+            info = await client.bots_info(bot=bot_id)
+            app_id = ((info.get("bot") or {}).get("app_id")) or ""
+            if app_id:
+                url = f"https://api.slack.com/apps/{app_id}"
+                _app_id_cache[key] = url
+                return url
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("could not resolve app id: %s", error_code(exc))
+    return "https://api.slack.com/apps"
 
 
 async def user_display(client: AsyncWebClient, user_id: str) -> dict[str, str]:

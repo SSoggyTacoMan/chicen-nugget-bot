@@ -54,6 +54,7 @@ def sync_prompt_digest(db: Database, template: str) -> int:
 TRIGGER_TEXT = {
     "dm": "this is a direct message to you.",
     "mention": "you were @mentioned in the latest message.",
+    "named": "someone addressed you by name in a channel message without an @mention.",
     "thread_followup": "someone replied in a thread you are already part of.",
     "ambient": "nobody addressed you. you chose to chime in on the latest message because you thought you could help.",
 }

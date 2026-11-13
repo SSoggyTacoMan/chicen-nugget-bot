@@ -35,6 +35,35 @@ def strip_mentions(text: str) -> str:
     return re.sub(r"<@[^>]+>", "", text or "").strip()
 
 
+def incoming_text(
+    text: str,
+    *,
+    bot_user_id: str = "",
+    assistant_user_id: str = "",
+    bot_name: str = "nugget",
+    assistant_name: str = "boi",
+) -> str:
+    """Keep mentions readable instead of deleting them.
+
+    Slack sends mentions as ``<@U123>``. Stripping every one of them turns
+    "i have @boi and @bot" into "i have and", which makes the model think the
+    message was cut off. Replace our own identities with names, leave other
+    mentions intact so the model can resolve them with lookup_user.
+    """
+    cleaned = text or ""
+    if bot_user_id:
+        cleaned = re.sub(
+            rf"<@{re.escape(bot_user_id)}(?:\|[^>]+)?>", f"@{bot_name}", cleaned
+        )
+    if assistant_user_id:
+        cleaned = re.sub(
+            rf"<@{re.escape(assistant_user_id)}(?:\|[^>]+)?>",
+            f"@{assistant_name}",
+            cleaned,
+        )
+    return cleaned.strip()
+
+
 def has_owner_signature(text: str) -> bool:
     """True for messages we posted through the owner's profile.
 

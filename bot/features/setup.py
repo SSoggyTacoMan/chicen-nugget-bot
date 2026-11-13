@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from bot import integrations
+from bot.api_keys import API_SERVICES, api_token, save_api_token
 from bot.google_oauth import (
     GoogleOAuthError,
     build_auth_url,
@@ -44,6 +45,7 @@ INTEGRATION_NAMES: dict[str, str] = {
     "mac": "Mac companion",
     "github": "GitHub",
     "email": "Email",
+    "apis": "API keys",
     "slack": "your Slack profile",
 }
 
@@ -56,6 +58,7 @@ def register(app) -> None:
     app.view("setup_google_code")(on_google_code_submit)
     app.view("setup_github")(on_github_submit)
     app.view("setup_email")(on_email_submit)
+    app.view("setup_apis")(on_apis_submit)
     app.view("setup_mac")(on_mac_submit)
     app.view("setup_slack")(on_slack_submit)
 
@@ -597,6 +600,25 @@ def _integration_modal(integration: str) -> dict[str, Any] | None:
             ],
             submit="Save email",
         )
+    if integration == "apis":
+        return _modal(
+            "setup_apis",
+            "API keys",
+            [
+                _note(
+                    "optional tokens for the generic `api_request` tool. leave a field "
+                    "blank to keep it, or enter `-` to clear it. tokens are stored in "
+                    "SQLite and never echoed back."
+                ),
+                _input("vercel", "Vercel token", placeholder="vercel_...", max_length=500),
+                _input("cloudflare", "Cloudflare API token", placeholder="cloudflare token", max_length=500),
+                _input("notion", "Notion integration token", placeholder="secret_...", max_length=500),
+                _input("linear", "Linear API key", placeholder="lin_api_...", max_length=500),
+                _input("sentry", "Sentry auth token", placeholder="sntrys_...", max_length=500),
+                _input("resend", "Resend API key", placeholder="re_...", max_length=500),
+            ],
+            submit="Save API keys",
+        )
     if integration == "mac":
         mac = integrations.mac_config(runtime.db, runtime.settings)
         return _modal(
@@ -630,23 +652,24 @@ def _integration_modal(integration: str) -> dict[str, Any] | None:
             "Your Slack profile",
             [
                 _note(
-                    "posting in your name works out of the box. the bot app posts with your "
-                    "*display name and profile picture* (Slack `chat:write.customize`), so it "
-                    "looks like you and still carries the small `APP` badge plus a "
+                    "posting in your name needs *no personal token*. the bot app posts with "
+                    "your *display name and profile picture* (Slack `chat:write.customize`), "
+                    "so it looks like you and still carries the small `APP` badge plus a "
                     "`Sent by` line.\n"
-                    "optional: add *your own* user token for a fully native post with no app "
-                    "badge. `xoxp-...`, or `xoxc-...` plus the `d` cookie from your Slack web "
-                    "session. it is validated against your owner id before it is saved."
+                    "if Slack shows the bot's own name/avatar instead, the app needs a "
+                    "reinstall so the scope takes effect. the fields below are advanced and "
+                    "optional: add *your own* user token only if you want a fully native "
+                    "post with no app badge."
                 ),
                 _input(
                     "token",
-                    "Optional: your own user token",
+                    "Advanced: native posting token (optional)",
                     placeholder="xoxp-... or xoxc-... (blank keeps current, '-' clears)",
                     max_length=500,
                 ),
                 _input(
                     "cookie",
-                    "Optional: Slack d cookie (only for xoxc)",
+                    "Advanced: Slack d cookie (only for xoxc)",
                     placeholder="leave blank to keep the current cookie",
                     max_length=1000,
                 ),
@@ -718,6 +741,36 @@ async def on_email_submit(ack, body, view, client) -> None:
         await _dm(client, user_id or "", "email needs a host, address, and app password.")
 
 
+async def on_apis_submit(ack, body, view, client) -> None:
+    await ack()
+    user_id = (body.get("user") or {}).get("id")
+    if not _is_admin(user_id):
+        return
+    values = _values(view)
+    saved: list[str] = []
+    cleared: list[str] = []
+    for service, preset in API_SERVICES.items():
+        raw = values.get(service, "")
+        if not raw:
+            continue
+        merged = _merge(raw, api_token(runtime.db, runtime.settings, service))
+        save_api_token(runtime.db, service, merged)
+        if merged:
+            saved.append(str(preset["label"]))
+        else:
+            cleared.append(str(preset["label"]))
+    if cleared:
+        await _dm(client, user_id or "", f"cleared API keys: {', '.join(cleared)}.")
+    elif saved:
+        await _dm(
+            client,
+            user_id or "",
+            f"saved API keys: {', '.join(saved)}. ask me to call the API when you need it.",
+        )
+    else:
+        await _dm(client, user_id or "", "no API key changes.")
+
+
 async def on_mac_submit(ack, body, view, client) -> None:
     await ack()
     user_id = (body.get("user") or {}).get("id")
@@ -787,7 +840,7 @@ async def on_slack_submit(ack, body, view, client) -> None:
 # ------------------------------------------------------------------ disconnect
 async def _disconnect(client, command: dict[str, Any], integration: str) -> None:
     if not integration:
-        await _say(client, command, "usage: `/nugget setup disconnect google|mac|github|email|slack`")
+        await _say(client, command, "usage: `/nugget setup disconnect google|mac|github|email|apis|slack`")
         return
     if integration == "all":
         targets = list(INTEGRATION_NAMES)
@@ -798,7 +851,11 @@ async def _disconnect(client, command: dict[str, Any], integration: str) -> None
         return
 
     for name in targets:
-        clear_integration(runtime.db, name)
+        if name == "apis":
+            for service in API_SERVICES:
+                save_api_token(runtime.db, service, "")
+        else:
+            clear_integration(runtime.db, name)
         if name == "slack":
             deactivate_owner_posting()
     await _say(

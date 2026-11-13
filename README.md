@@ -10,8 +10,10 @@ Both run in one Python process over Socket Mode. No public URL, no web server, n
 
 ## what you get
 
-- mentions, DMs, thread follow-ups and optional ambient replies, with tool calling and per-user memory
+- mentions, name calls ("hey nugget"), DMs, thread follow-ups and optional ambient replies, with tool calling and per-user memory
+- workspace search (messages and files) plus channel join, leave, create and member tools
 - a second Slack identity for personal assistant work
+- optional API tokens for Vercel, Cloudflare, Notion, Linear, Sentry, Resend, OpenAI and Anthropic
 - posting in the owner's name, either as a customized bot message or from their real account
 - jev, a small classifier that decides whether an unaddressed message actually deserves a reply
 - AI images, charts and PowerPoint decks uploaded straight into the conversation
@@ -52,7 +54,7 @@ Two modes:
 - **default:** the bot app posts with the owner's display name and profile picture using Slack's `chat:write.customize` scope. it looks like them, keeps the small `APP` badge, and needs no extra credentials. same trick `hackclub/pixl` uses for dashboard ticket replies.
 - **native (optional):** if the owner adds their own user token with `/nugget setup slack` (or `SLACK_OWNER_TOKEN` / `SLACK_OWNER_COOKIE`), the same call posts from their real profile with no app badge.
 
-The default mode needs `chat:write`, `chat:write.customize` and `users:read` on the bot app. add those at api.slack.com/apps and reinstall the app. native mode is validated against `OWNER_USER_ID` on save and on startup. if the token belongs to someone else, native mode turns off and the default keeps working.
+The default mode needs `chat:write`, `chat:write.customize` and `users:read` on the bot app. if Slack still shows the bot's own name and avatar, the app was not reinstalled after the scope was added. reinstall it in the app settings; no personal token is needed. native mode is validated against `OWNER_USER_ID` on save and on startup. if the token belongs to someone else, native mode turns off and the default keeps working.
 
 Boi's token can never post natively as the owner. Slack doesn't let one account post as another.
 
@@ -120,6 +122,7 @@ You shouldn't need to SSH into the VPS to connect personal stuff. Run `/nugget s
 | Mac companion | `/nugget setup mac` |
 | GitHub | `/nugget setup github` |
 | Email (IMAP) | `/nugget setup email` |
+| API keys | `/nugget setup apis` |
 | Your Slack profile | `/nugget setup slack` |
 | Status | `/nugget setup status` |
 | Remove credentials | `/nugget setup disconnect <name>` |
@@ -146,6 +149,12 @@ Run `scripts/mac_companion.py` on the Mac, expose it with a Cloudflare Tunnel or
 ### github and email
 
 A GitHub token is optional for public reads. With one you get notifications and a higher rate limit. IMAP works with Gmail and Fastmail app passwords. Use an app password, not your account password.
+
+### api keys
+
+`/nugget setup apis` stores optional tokens for Vercel, Cloudflare, Notion, Linear, Sentry, Resend, OpenAI and Anthropic. Boi can then call them with the generic `api_request` tool: it knows the base URL and auth header for each service, and you give it the path and body from the real API docs. Tokens live in SQLite and are never echoed back. Environment fallbacks are `VERCEL_TOKEN`, `CLOUDFLARE_API_TOKEN`, `NOTION_TOKEN`, `LINEAR_API_KEY`, `SENTRY_AUTH_TOKEN`, `RESEND_API_KEY`, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
+
+This is the general path for "give it another API". A dedicated MCP client is not wired yet, so for now the supported services are the presets above plus the built-in Google, GitHub, email and Mac integrations.
 
 ## runtime settings
 
@@ -200,8 +209,8 @@ The fallback model kicks in when the primary errors or times out. Conversation h
 |---|---|
 | web and research | `search_web`, `fetch_url`, `http_status`, `hacker_news`, `ocr_document` |
 | code and dev | `inspect_code`, `clone_repo`, `sandbox`, `run_code`, `github_info`, `hackatime_stats`, `system_diagnostics` |
-| slack | `search_slack`, `fetch_slack_message`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `send_dm`, `post_message`, `slack_status`, `slack_dnd`, `slack_react`, `slack_activity` |
-| personal operator | `google_calendar`, `gmail`, `google_drive`, `mac_control`, `check_emails`, `daily_briefing`, `hackatime_stats` |
+| slack | `search_slack`, `fetch_slack_message`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `manage_channel`, `send_dm`, `post_message`, `slack_status`, `slack_dnd`, `slack_react`, `slack_activity` |
+| personal operator | `google_calendar`, `gmail`, `google_drive`, `mac_control`, `check_emails`, `daily_briefing`, `hackatime_stats`, `api_request` |
 | setup | `integration_setup` |
 | workspace | `flaron`, `pending_access_requests`, `get_stats`, `bot_config` |
 | personal | `remember`, `recall`, `manage_tasks`, `remind`, `list_reminders`, `cancel_reminder` |
@@ -209,6 +218,8 @@ The fallback model kicks in when the primary errors or times out. Conversation h
 | misc | `get_weather`, `public_holidays`, `roll_dice`, `dog_fact`, `taco_recipe`, `urban_dict`, `nugget_fact` |
 
 Owner and admin checks run in code against the real Slack sender. The prompt can't grant permissions on its own.
+
+`search_slack` uses the connected user session for real workspace search, including files, and falls back to the bot's local conversation history when that session is unavailable. `manage_channel` lists, inspects, joins, leaves, creates and lists members of channels as either the bot or Boi.
 
 `flaron` also looks up workspace emojis, which is handy when you want a custom one to actually render.
 
@@ -341,7 +352,7 @@ Everything lives under `/nugget` so it never collides with another app.
 | `/nugget forget` | wipe stored AI memory | DM / admin |
 | `/nugget pinggroup [join\|leave]` | manage the ping group | anyone |
 | `/nugget config` | view or change runtime settings | admin |
-| `/nugget setup` | connect Google, Mac, GitHub, email or your Slack profile | admin |
+| `/nugget setup` | connect Google, Mac, GitHub, email, API keys or your Slack profile | admin |
 | `/nugget whois @user` | user lookup | anyone |
 
 ### reminder syntax
@@ -447,6 +458,14 @@ AI:
 | `IMAGINE_MODEL` | `google/gemini-3.1-flash-image` | image model. empty disables `/imagine` and `generate_image` |
 | `IMAGINE_FALLBACK_MODEL` | `google/gemini-2.5-flash-image` | image fallback |
 | `AI_IMAGE_COST_USD` | `0.04` | per-image budget charge |
+| `VERCEL_TOKEN` | none | optional api_request fallback |
+| `CLOUDFLARE_API_TOKEN` | none | optional api_request fallback |
+| `NOTION_TOKEN` | none | optional api_request fallback |
+| `LINEAR_API_KEY` | none | optional api_request fallback |
+| `SENTRY_AUTH_TOKEN` | none | optional api_request fallback |
+| `RESEND_API_KEY` | none | optional api_request fallback |
+| `OPENAI_API_KEY` | none | optional api_request fallback |
+| `ANTHROPIC_API_KEY` | none | optional api_request fallback |
 | `WEATHER_DEFAULT_LOCATION` | none | default weather location |
 | `TAVILY_API_KEY` | none | optional search backend |
 | `MAX_REMINDERS` | `200` | active reminder cap |
@@ -477,7 +496,7 @@ Secrets never enter the repo. `.env`, `data/` and `logs/` are gitignored.
 |---|---|---|
 | `invalid_auth` on start | stale bot token | reinstall the app and update `SLACK_BOT_TOKEN` |
 | `not_authed` or `missing_scope` | scope or install missing | update scopes and reinstall |
-| posting in your name fails | `chat:write.customize` or `users:read` missing | add both scopes and reinstall |
+| posting in your name fails | `chat:write.customize` scope was added but the app was not reinstalled | reinstall the app. no personal token is needed |
 | bot ignores mentions | channel not in `AI_CHANNELS`, or the bot was never invited | check `/nugget id` |
 | bot replies to everything | gate disabled or thresholds too low | set `AI_GATE_ENABLED=true` and raise `AI_GATE_MIN_CONFIDENCE` |
 | bot is silent in threads | `thread_followups` off, or the cooldown is active | enable it and lower `AI_THREAD_COOLDOWN` |
@@ -511,6 +530,7 @@ bot/
   app.py                   startup, Bolt wiring, task lifecycle, user gateway
   config.py                Settings, env parsing, allowlists
   runtime.py               shared state: db, agent, gate, clients, locks
+  api_keys.py              optional API token presets for api_request
   db.py                    SQLite schema, history, kv store, reminders
   handlers.py              socket mode event registration
   slack_api.py             post, react and upload helpers, retries, member checks
