@@ -104,6 +104,10 @@ class Settings:
     ai_ambient_channels: frozenset[str]
     ai_ambient_cooldown: int
     ai_thread_cooldown: int
+    sandbox_dir: Path
+    sandbox_max_workspaces: int
+    sandbox_exec_timeout: int
+    sandbox_max_exec_timeout: int
     imagine_model: str | None
     imagine_fallback_model: str | None
     image_user_ids: frozenset[str]
@@ -255,6 +259,13 @@ def load_settings() -> Settings:
     if recap_time and not _valid_hhmm(recap_time):
         recap_time = None
 
+    data_dir = _path("DATA_DIR", "data")
+    sandbox_dir = (
+        _path("SANDBOX_DIR", "")
+        if _str("SANDBOX_DIR")
+        else data_dir / "sandboxes"
+    )
+
     return Settings(
         slack_bot_token=_str("SLACK_BOT_TOKEN"),
         slack_app_token=_str("SLACK_APP_TOKEN"),
@@ -266,7 +277,7 @@ def load_settings() -> Settings:
         owner_user_id=owner,
         admin_user_ids=frozenset(admins),
         timezone=_str("TIMEZONE", "UTC") or "UTC",
-        data_dir=_path("DATA_DIR", "data"),
+        data_dir=data_dir,
         log_dir=_path("LOG_DIR", "logs"),
         ai_api_key=_str("AI_API_KEY") or None,
         ai_base_url=_str("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
@@ -296,6 +307,10 @@ def load_settings() -> Settings:
         ai_ambient_channels=frozenset(_list("AI_AMBIENT_CHANNELS")),
         ai_ambient_cooldown=max(0, _int("AI_AMBIENT_COOLDOWN", 120)),
         ai_thread_cooldown=max(0, _int("AI_THREAD_COOLDOWN", 120)),
+        sandbox_dir=sandbox_dir,
+        sandbox_max_workspaces=max(1, _int("SANDBOX_MAX_WORKSPACES", 20)),
+        sandbox_exec_timeout=max(5, _int("SANDBOX_EXEC_TIMEOUT", 120)),
+        sandbox_max_exec_timeout=max(5, _int("SANDBOX_MAX_EXEC_TIMEOUT", 600)),
         imagine_model=_str("IMAGINE_MODEL", "google/gemini-3.1-flash-image") or None,
         imagine_fallback_model=_str("IMAGINE_FALLBACK_MODEL", "google/gemini-2.5-flash-image") or None,
         image_user_ids=frozenset(_list("IMAGE_ALLOWED_USER_IDS")),

@@ -199,7 +199,7 @@ The fallback model kicks in when the primary errors or times out. Conversation h
 | group | tools |
 |---|---|
 | web and research | `search_web`, `fetch_url`, `http_status`, `hacker_news`, `ocr_document` |
-| code and dev | `run_code`, `github_info`, `hackatime_stats`, `system_diagnostics` |
+| code and dev | `inspect_code`, `clone_repo`, `sandbox`, `run_code`, `github_info`, `hackatime_stats`, `system_diagnostics` |
 | slack | `search_slack`, `fetch_slack_message`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `send_dm`, `post_message`, `slack_status`, `slack_dnd`, `slack_react`, `slack_activity` |
 | personal operator | `google_calendar`, `gmail`, `google_drive`, `mac_control`, `check_emails`, `daily_briefing`, `hackatime_stats` |
 | setup | `integration_setup` |
@@ -209,6 +209,8 @@ The fallback model kicks in when the primary errors or times out. Conversation h
 | misc | `get_weather`, `public_holidays`, `roll_dice`, `dog_fact`, `taco_recipe`, `urban_dict`, `nugget_fact` |
 
 Owner and admin checks run in code against the real Slack sender. The prompt can't grant permissions on its own.
+
+`clone_repo` is a one-shot peek: it clones, lets the model list, read, or search, then deletes the checkout. `sandbox` is the longer-lived option. It creates a named workspace under `SANDBOX_DIR`, optionally clones a repo into it, and keeps it around so Boi can run commands, read files, and search across turns. Owner/admin only, DM only, and you delete it when the work is done. It is a workspace boundary, not a security boundary: commands run as the same OS user as the bot.
 
 `flaron` also looks up workspace emojis, which is handy when you want a custom one to actually render.
 
@@ -402,6 +404,10 @@ AI:
 | `AI_AMBIENT_CHANNELS` | none | channels for unprompted replies. `*` means all |
 | `AI_AMBIENT_COOLDOWN` | `120` | minimum seconds between ambient replies per channel |
 | `AI_THREAD_COOLDOWN` | `120` | minimum seconds between unprompted thread replies |
+| `SANDBOX_DIR` | `<DATA_DIR>/sandboxes` | root for persistent sandbox workspaces |
+| `SANDBOX_MAX_WORKSPACES` | `20` | maximum sandboxes kept at once |
+| `SANDBOX_EXEC_TIMEOUT` | `120` | default seconds before a sandbox command is killed |
+| `SANDBOX_MAX_EXEC_TIMEOUT` | `600` | hard cap for a sandbox command, even if the model asks for longer |
 | `IMAGINE_MODEL` | `google/gemini-3.1-flash-image` | image model. empty disables `/imagine` and `generate_image` |
 | `IMAGINE_FALLBACK_MODEL` | `google/gemini-2.5-flash-image` | image fallback |
 | `AI_IMAGE_COST_USD` | `0.04` | per-image budget charge |

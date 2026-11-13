@@ -114,6 +114,7 @@ def test_toolbox_has_expanded_tools():
     assert "manage_tasks" in names
     assert "inspect_code" in names
     assert "clone_repo" in names
+    assert "sandbox" in names
 
 
 def test_owner_only_tools_guard():
@@ -778,6 +779,198 @@ def test_clone_repo_tool(tmp_path):
         assert len(created_dirs) == 4
         for d in created_dirs:
             assert not d.exists()
+
+    asyncio.run(run())
+
+
+def _sandbox_ctx(tmp_path, **overrides):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.tools import ToolContext
+
+    settings = SimpleNamespace(
+        data_dir=tmp_path,
+        sandbox_dir=tmp_path / "sandboxes",
+        sandbox_max_workspaces=5,
+        sandbox_exec_timeout=20,
+        sandbox_max_exec_timeout=60,
+    )
+    for key, value in overrides.pop("settings", {}).items():
+        setattr(settings, key, value)
+    defaults = dict(
+        db=MagicMock(),
+        settings=settings,
+        client=AsyncMock(),
+        user_client=None,
+        bot_user_id="U_BOT",
+        user_id="U_OWNER",
+        channel_id="D1",
+        thread_ts=None,
+        is_dm=True,
+        is_owner=True,
+        is_admin=True,
+    )
+    defaults.update(overrides)
+    return ToolContext(**defaults)
+
+
+def test_sandbox_create_exec_files_delete(tmp_path):
+    import asyncio
+    import json
+
+    from bot.ai.tools import Toolbox
+
+    box = Toolbox(_sandbox_ctx(tmp_path).settings)
+    ctx = _sandbox_ctx(tmp_path)
+
+    async def run():
+        created = await box.execute("sandbox", {"action": "create", "name": "Demo Repo"}, ctx)
+        assert "demo-repo" in created
+
+        ran = await box.execute(
+            "sandbox",
+            {"action": "exec", "name": "demo-repo", "command": "printf 'hello\\n' > note.txt && echo built"},
+            ctx,
+        )
+        payload = json.loads(ran)
+        assert payload["exit_code"] == 0
+        assert "built" in payload["stdout"]
+
+        read = await box.execute("sandbox", {"action": "read", "name": "demo-repo", "path": "note.txt"}, ctx)
+        assert "1: hello" in read
+
+        listed = await box.execute("sandbox", {"action": "list_files", "name": "demo-repo"}, ctx)
+        assert "note.txt" in listed
+
+        found = await box.execute("sandbox", {"action": "search", "name": "demo-repo", "pattern": "hello"}, ctx)
+        assert "note.txt:1: hello" in found
+
+        info = await box.execute("sandbox", {"action": "info", "name": "demo-repo"}, ctx)
+        assert json.loads(info)["sandbox"] == "demo-repo"
+
+        all_boxes = json.loads(await box.execute("sandbox", {"action": "list"}, ctx))
+        assert [item["name"] for item in all_boxes["sandboxes"]] == ["demo-repo"]
+
+        deleted = await box.execute("sandbox", {"action": "delete", "name": "demo-repo"}, ctx)
+        assert json.loads(deleted)["deleted"] == "demo-repo"
+        assert not (tmp_path / "sandboxes" / "demo-repo").exists()
+        after = json.loads(await box.execute("sandbox", {"action": "list"}, ctx))
+        assert after["sandboxes"] == []
+
+    asyncio.run(run())
+
+
+def test_sandbox_rejects_escape_non_owner_and_non_dm(tmp_path):
+    import asyncio
+
+    from bot.ai.tools import Toolbox
+
+    box = Toolbox(_sandbox_ctx(tmp_path).settings)
+
+    async def run():
+        ctx = _sandbox_ctx(tmp_path)
+        await box.execute("sandbox", {"action": "create", "name": "box"}, ctx)
+
+        escaped = await box.execute(
+            "sandbox", {"action": "read", "name": "box", "path": "../outside"}, ctx
+        )
+        assert "escapes the sandbox" in escaped
+
+        bad_name = await box.execute(
+            "sandbox", {"action": "create", "name": "../evil"}, ctx
+        )
+        assert "evil" not in bad_name or "error" in bad_name
+
+        channel_ctx = _sandbox_ctx(tmp_path, channel_id="C1", is_dm=False)
+        denied_dm = await box.execute("sandbox", {"action": "list"}, channel_ctx)
+        assert "direct messages" in denied_dm
+
+        stranger_ctx = _sandbox_ctx(tmp_path, user_id="U_RANDO", is_owner=False, is_admin=False)
+        denied_owner = await box.execute("sandbox", {"action": "list"}, stranger_ctx)
+        assert "owner/admin" in denied_owner
+
+    asyncio.run(run())
+
+
+def test_sandbox_clone_persists(tmp_path):
+    import asyncio
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.ai.tools import Toolbox
+
+    box = Toolbox(_sandbox_ctx(tmp_path).settings)
+    ctx = _sandbox_ctx(tmp_path)
+
+    async def fake_subprocess_exec(*cmd, **kwargs):
+        dest = Path(cmd[-1])
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "README.md").write_text("# Demo\nhello from repo\n", encoding="utf-8")
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    async def run():
+        with patch("bot.ai.tools.asyncio.create_subprocess_exec", side_effect=fake_subprocess_exec):
+            created = await box.execute(
+                "sandbox", {"action": "create", "repo_url": "owner/demo"}, ctx
+            )
+        assert "demo" in created
+
+        # Still there after the clone call returned, unlike clone_repo.
+        listed = await box.execute("sandbox", {"action": "list_files", "name": "demo"}, ctx)
+        assert "README.md" in listed
+        read = await box.execute("sandbox", {"action": "read", "name": "demo", "path": "README.md"}, ctx)
+        assert "hello from repo" in read
+
+        await box.execute("sandbox", {"action": "delete", "name": "demo"}, ctx)
+        assert not (tmp_path / "sandboxes" / "demo").exists()
+
+    asyncio.run(run())
+
+
+def test_sandbox_clone_failure_cleans_up(tmp_path):
+    import asyncio
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.ai.tools import Toolbox
+
+    box = Toolbox(_sandbox_ctx(tmp_path).settings)
+    ctx = _sandbox_ctx(tmp_path)
+
+    async def failing_clone(*cmd, **kwargs):
+        proc = MagicMock()
+        proc.returncode = 128
+        proc.communicate = AsyncMock(return_value=(b"", b"fatal: not found"))
+        return proc
+
+    async def run():
+        with patch("bot.ai.tools.asyncio.create_subprocess_exec", side_effect=failing_clone):
+            result = await box.execute(
+                "sandbox", {"action": "create", "name": "broken", "repo_url": "owner/nope"}, ctx
+            )
+        assert "clone failed" in result
+        assert not (tmp_path / "sandboxes" / "broken").exists()
+
+    asyncio.run(run())
+
+
+def test_sandbox_max_workspaces(tmp_path):
+    import asyncio
+
+    from bot.ai.tools import Toolbox
+
+    box = Toolbox(_sandbox_ctx(tmp_path).settings)
+    ctx = _sandbox_ctx(tmp_path, settings={"sandbox_max_workspaces": 1})
+
+    async def run():
+        first = await box.execute("sandbox", {"action": "create", "name": "one"}, ctx)
+        assert "one" in first
+        second = await box.execute("sandbox", {"action": "create", "name": "two"}, ctx)
+        assert "too many sandboxes" in second
 
     asyncio.run(run())
 
