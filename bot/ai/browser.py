@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,9 +80,14 @@ class BrowserManager:
             return
         self.root.mkdir(parents=True, exist_ok=True)
         self._playwright = await async_playwright().start()
+        args = ["--disable-dev-shm-usage"]
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            # Chromium refuses to start as root without this. The bot is
+            # single-tenant and already runs as that OS user.
+            args.append("--no-sandbox")
         try:
             self._browser = await self._playwright.chromium.launch(
-                headless=self.headless
+                headless=self.headless, args=args
             )
         except Exception as exc:
             try:
