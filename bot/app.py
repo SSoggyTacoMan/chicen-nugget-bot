@@ -236,6 +236,11 @@ async def run() -> None:
             gateway_task.cancel()
             with suppress(asyncio.CancelledError):
                 await gateway_task
+        if runtime.agent is not None:
+            browser = getattr(runtime.agent.toolbox, "_browser_manager", None)
+            if browser is not None:
+                with suppress(Exception):
+                    await browser.shutdown()
         await scheduler.stop()
 
 

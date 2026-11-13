@@ -115,6 +115,7 @@ jobs:
               \$PY -m venv .venv
               .venv/bin/pip install -q --upgrade pip
               .venv/bin/pip install -q -r requirements.txt
+              .venv/bin/playwright install chromium >/dev/null 2>&1 || true
               systemctl restart $SERVICE_NAME
               sleep 3
               systemctl --no-pager --full status $SERVICE_NAME | head -15

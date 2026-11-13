@@ -256,6 +256,7 @@ class UserGateway:
         if has_owner_signature(text):
             return
         is_dm = channel.startswith("D")
+        is_mpim = (event.get("channel_type") or "") == "mpim"
         is_mention = bool(self.user_id and f"<@{self.user_id}>" in text)
         thread_ts = event.get("thread_ts")
         root_ts = thread_ts or event.get("ts")
@@ -278,9 +279,8 @@ class UserGateway:
             )
             if not allowed:
                 return
-        else:
-            if not settings.ai_allowed(channel):
-                return
+        elif not is_mpim and not settings.ai_allowed(channel):
+            return
 
         if runtime.agent is None or not settings.ai_enabled:
             return
@@ -319,8 +319,13 @@ class UserGateway:
         if not clean_text and not images:
             return
 
-        trigger = "dm" if is_dm else "mention"
-        conv_key = f"user_dm:{sender_id}" if is_dm else f"user_ch:{channel}:{root_ts}"
+        trigger = "dm" if is_dm else ("mpim_mention" if is_mpim else "mention")
+        if is_dm:
+            conv_key = f"user_dm:{sender_id}"
+        elif is_mpim:
+            conv_key = f"user_mpim:{channel}"
+        else:
+            conv_key = f"user_ch:{channel}:{root_ts}"
         try:
             async with (
                 runtime.lock(conv_key),
@@ -333,6 +338,7 @@ class UserGateway:
                     channel_id=channel,
                     thread_ts=reply_thread_ts,
                     is_dm=is_dm,
+                    is_mpim=is_mpim,
                     trigger=trigger,
                     jev="",
                     images=images,

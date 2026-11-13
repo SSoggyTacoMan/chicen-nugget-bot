@@ -117,6 +117,7 @@ def test_toolbox_has_expanded_tools():
     assert "sandbox" in names
     assert "manage_channel" in names
     assert "api_request" in names
+    assert "browser" in names
 
 
 def test_owner_only_tools_guard():
@@ -1122,6 +1123,61 @@ def test_named_mention_uses_agent_without_at():
         asyncio.run(run())
     finally:
         runtime.settings, runtime.bot_user_id, runtime.user_id = old_settings, old_bot, old_user
+
+
+def test_bot_mpim_mentions_and_thread_followups(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.db import Database
+    from bot.features.agent import _handle_mpim, on_app_mention, on_message
+    from bot.runtime import runtime
+
+    db = Database(str(tmp_path / "mpim.db"))
+    db.init()
+    db.mark_thread("G1", "1.0", owner="bot")
+    old_db, old_settings = runtime.db, runtime.settings
+    old_bot, old_user = runtime.bot_user_id, runtime.user_id
+    runtime.db = db
+    runtime.settings = MagicMock()
+    runtime.settings.ai_allowed.return_value = False  # MPIMs bypass AI_CHANNELS
+    runtime.settings.slack_bot_token = "xoxb-test"
+    runtime.bot_user_id = "UBOT"
+    runtime.user_id = "UBOI"
+    client = AsyncMock()
+
+    async def run():
+        event = {
+            "channel": "G1",
+            "channel_type": "mpim",
+            "user": "U1",
+            "text": "<@UBOT> what's up",
+            "ts": "1.1",
+        }
+        with patch("bot.features.agent._handle_channel", AsyncMock(return_value=True)) as mock_handle, \
+             patch("bot.features.agent.fetch_slack_images", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.transcribe_slack_audio", AsyncMock(return_value=[])):
+            await on_app_mention(event, client)
+        mock_handle.assert_called_once()
+        assert mock_handle.call_args[1]["trigger"] == "mpim_mention"
+
+        with patch("bot.features.agent._handle_mpim", AsyncMock()) as mock_mpim:
+            await on_message({**event, "text": "just chatter"}, client)
+        mock_mpim.assert_called_once()
+
+        with patch("bot.features.agent._handle_thread_continuation", AsyncMock()) as mock_thread:
+            await _handle_mpim({**event, "thread_ts": "1.0", "text": "follow up"}, client)
+        mock_thread.assert_called_once()
+
+        with patch("bot.features.agent._handle_thread_continuation", AsyncMock()) as mock_thread:
+            await _handle_mpim({**event, "text": "no thread followup"}, client)
+        mock_thread.assert_not_called()
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.db, runtime.settings = old_db, old_settings
+        runtime.bot_user_id, runtime.user_id = old_bot, old_user
 
 
 def test_bot_dm_threads_stay_in_thread():

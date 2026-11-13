@@ -54,6 +54,7 @@ def sync_prompt_digest(db: Database, template: str) -> int:
 TRIGGER_TEXT = {
     "dm": "this is a direct message to you.",
     "mention": "you were @mentioned in the latest message.",
+    "mpim_mention": "you were @mentioned in a group DM.",
     "named": "someone addressed you by name in a channel message without an @mention.",
     "thread_followup": "someone replied in a thread you are already part of.",
     "ambient": "nobody addressed you. you chose to chime in on the latest message because you thought you could help.",
@@ -98,6 +99,7 @@ class Agent:
         channel_id: str | None,
         thread_ts: str | None,
         is_dm: bool,
+        is_mpim: bool = False,
         trigger: str = "mention",
         jev: str = "",
         images: list[str] | None = None,
@@ -124,7 +126,9 @@ class Agent:
         bot_model, bot_fallback, assistant_model, assistant_fallback = self._model_settings()
         history = self.db.history(conversation, self.settings.ai_history_limit)
         role = "owner" if user_id == self.settings.owner_user_id else "guest"
-        location = await self._location(channel_id, is_dm, client=active_client)
+        location = await self._location(
+            channel_id, is_dm, is_mpim=is_mpim, client=active_client
+        )
         memory = (
             get_user_memory_prompt(self.db, self.settings, user_id)
             if (role == "owner" or self.settings.is_admin(user_id))
@@ -392,9 +396,18 @@ class Agent:
             completion_tokens=completion_tokens,
         )
 
-    async def _location(self, channel_id: str | None, is_dm: bool, client: AsyncWebClient | None = None) -> str:
+    async def _location(
+        self,
+        channel_id: str | None,
+        is_dm: bool,
+        *,
+        is_mpim: bool = False,
+        client: AsyncWebClient | None = None,
+    ) -> str:
         if is_dm:
             return "a direct message"
+        if is_mpim:
+            return "a group DM"
         if not channel_id:
             return "a slack channel"
         info = await channel_info(client or self.client, channel_id)

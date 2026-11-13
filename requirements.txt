@@ -6,3 +6,4 @@ openai>=1.60,<2
 httpx>=0.28,<1
 matplotlib>=3.8,<4
 python-pptx>=1.0,<2
+playwright>=1.50,<2
