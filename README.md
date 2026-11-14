@@ -164,6 +164,13 @@ if tts is off, check `TTS_MODEL`, `AI_API_KEY` and `TTS_VOICE`.
 
 `/nugget setup welcome` edits the public welcome, welcome DM, watched channels, ping group id and prompt. placeholders are `{user}`, `{channel}`, `{bot}` and `{name}`.
 
+options:
+
+- auto-add new members to the ping group
+- put a join/leave ping-group button in the public welcome or a thread reply
+- send a welcome DM with a leave button when they were auto-added, or join/skip when they weren't
+- per-channel welcome and DM overrides
+
 per-channel overrides are optional: pick a channel and set a custom public message or DM. the channel also has to be in the watched list.
 
 use `/nugget pinggroup panel` to post a permanent join/leave panel in a channel. the buttons work for everyone and reply privately.

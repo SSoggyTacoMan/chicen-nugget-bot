@@ -830,7 +830,11 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
             key
             for key, enabled in (
                 ("welcome_public", cfg.public),
+                ("welcome_dm_enabled", cfg.dm_enabled),
                 ("welcome_dm_once", cfg.dm_once),
+                ("welcome_ping_auto_add", cfg.auto_add),
+                ("welcome_ping_button", cfg.ping_button),
+                ("welcome_thread_reply", cfg.thread_reply),
                 ("usergroup_prompt", cfg.prompt),
                 ("usergroup_prompt_once", cfg.prompt_once),
             )
@@ -865,6 +869,13 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                     max_length=1500,
                 ),
                 _input(
+                    "welcome_thread_text",
+                    "Thread reply text",
+                    placeholder="hey {user} :wave:",
+                    initial=cfg.thread_text,
+                    max_length=800,
+                ),
+                _input(
                     "welcome_ping",
                     "Welcome ping line",
                     placeholder="optional, e.g. <@S0123> or a usergroup mention",
@@ -890,7 +901,11 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                     "Toggles",
                     [
                         ("welcome_public", "send public welcome"),
+                        ("welcome_dm_enabled", "send welcome DM"),
                         ("welcome_dm_once", "DM only on first join"),
+                        ("welcome_ping_auto_add", "auto-add to ping group"),
+                        ("welcome_ping_button", "join/leave button in welcome"),
+                        ("welcome_thread_reply", "post a thread reply"),
                         ("usergroup_prompt", "ask new members to join the ping group"),
                         ("usergroup_prompt_once", "only ask once"),
                     ],
@@ -1396,6 +1411,7 @@ async def on_welcome_submit(ack, body, view, client) -> None:
     for key in (
         "welcome_message",
         "welcome_dm",
+        "welcome_thread_text",
         "welcome_ping",
         "usergroup_id",
         "usergroup_prompt_text",
@@ -1407,7 +1423,11 @@ async def on_welcome_submit(ack, body, view, client) -> None:
     checked = _checked(view, "welcome_toggles")
     for key in (
         "welcome_public",
+        "welcome_dm_enabled",
         "welcome_dm_once",
+        "welcome_ping_auto_add",
+        "welcome_ping_button",
+        "welcome_thread_reply",
         "usergroup_prompt",
         "usergroup_prompt_once",
     ):

@@ -32,13 +32,36 @@ class WelcomeConfig:
     public: bool
     message: str
     dm: str
+    dm_enabled: bool
     dm_once: bool
+    thread_reply: bool
+    thread_text: str
     ping: str
+    auto_add: bool
+    ping_button: bool
     watched: tuple[str, ...]
     usergroup_id: str | None
     prompt: bool
     prompt_text: str
     prompt_once: bool
+
+
+LEGACY_WELCOME_DM = (
+    "hey {user}! welcome to {channel} :wave: i'm {bot}, the resident bot. "
+    "glad you're here!"
+)
+NEW_WELCOME_DM = (
+    "hey {user} :wave: i'm {bot}. if you need anything in {channel}, just ping me. "
+    "want ping-group updates or access? use the buttons below."
+)
+LEGACY_PROMPT = (
+    "want me to add you to the *ping group*? you'll get pinged when something "
+    "good happens — no spam, promise."
+)
+NEW_PROMPT = (
+    "want in on the ping group? it's low-volume: event pings and good stuff, "
+    "and you can leave any time."
+)
 
 
 def _kv(key: str) -> str | None:
@@ -61,16 +84,27 @@ def _kv_csv(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
 
 def welcome_config() -> WelcomeConfig:
     settings = runtime.settings
+    dm_template = _kv("welcome_dm") or settings.welcome_dm
+    if dm_template.strip() == LEGACY_WELCOME_DM:
+        dm_template = NEW_WELCOME_DM
+    prompt_text = _kv("usergroup_prompt_text") or settings.usergroup_prompt_text
+    if prompt_text.strip() == LEGACY_PROMPT:
+        prompt_text = NEW_PROMPT
     return WelcomeConfig(
         public=_kv_bool("welcome_public", settings.welcome_public),
         message=_kv("welcome_message") or settings.welcome_message,
-        dm=_kv("welcome_dm") or settings.welcome_dm,
+        dm=dm_template,
+        dm_enabled=_kv_bool("welcome_dm_enabled", bool(dm_template.strip())),
         dm_once=_kv_bool("welcome_dm_once", settings.welcome_dm_once),
+        thread_reply=_kv_bool("welcome_thread_reply", settings.welcome_thread_reply),
+        thread_text=_kv("welcome_thread_text") or settings.welcome_thread_text,
         ping=_kv("welcome_ping") or settings.welcome_ping,
+        auto_add=_kv_bool("welcome_ping_auto_add", settings.welcome_ping_auto_add),
+        ping_button=_kv_bool("welcome_ping_button", settings.welcome_ping_button),
         watched=_kv_csv("watched_channel_ids", tuple(settings.watched_channel_ids)),
         usergroup_id=_kv("usergroup_id") or settings.usergroup_id,
         prompt=_kv_bool("usergroup_prompt", settings.usergroup_prompt),
-        prompt_text=_kv("usergroup_prompt_text") or settings.usergroup_prompt_text,
+        prompt_text=prompt_text,
         prompt_once=_kv_bool("usergroup_prompt_once", settings.usergroup_prompt_once),
     )
 
@@ -114,6 +148,24 @@ def _watches(channel_id: str | None, watched: tuple[str, ...]) -> bool:
     return "*" in watched or channel_id in watched
 
 
+def _ping_button(group: str, member: bool, *, panel: bool) -> dict[str, Any]:
+    if member:
+        action_id = PANEL_LEAVE_ACTION if panel else LEAVE_ACTION
+        text = ":wave: leave ping group"
+    else:
+        action_id = PANEL_JOIN_ACTION if panel else JOIN_ACTION
+        text = ":bell: join ping group"
+    element: dict[str, Any] = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": text, "emoji": True},
+        "action_id": action_id,
+        "value": group,
+    }
+    if not member:
+        element["style"] = "primary"
+    return {"type": "actions", "elements": [element]}
+
+
 async def on_member_joined(event: dict[str, Any], client) -> None:
     if runtime.db and runtime.db.kv_get("config:welcomer") == "false":
         return
@@ -132,14 +184,26 @@ async def on_member_joined(event: dict[str, Any], client) -> None:
     member = runtime.db.member(user_id) or {}
     join_count = member.get("joins", 1)
 
+    member_status: bool | None = None
+    auto_added = False
     group_note = ""
-    should_prompt = _should_prompt(user_id, cfg)
-    if cfg.usergroup_id and runtime.user_client is not None and not cfg.prompt:
-        result = await ensure_usergroup_member(runtime.user_client, cfg.usergroup_id, user_id)
-        if result == "added":
-            group_note = " and added to the ping group"
-        elif result == "failed":
-            group_note = " (couldn't add to the ping group)"
+    if cfg.usergroup_id and runtime.user_client is not None:
+        if cfg.auto_add:
+            result = await ensure_usergroup_member(
+                runtime.user_client, cfg.usergroup_id, user_id
+            )
+            if result in {"added", "already"}:
+                member_status = True
+                auto_added = result == "added"
+                group_note = " and added to the ping group"
+                runtime.db.kv_set(PROMPT_KV.format(user_id), "joined")
+            else:
+                member_status = False
+                group_note = " (couldn't add to the ping group)"
+        else:
+            members = await usergroup_members(runtime.user_client, cfg.usergroup_id)
+            if members is not None:
+                member_status = user_id in members
 
     await _log(
         f"<@{user_id}> joined <#{channel}> "
@@ -158,9 +222,44 @@ async def on_member_joined(event: dict[str, Any], client) -> None:
         )
         if cfg.ping:
             text = f"{text}\n\n{cfg.ping}"
-        await post(client, channel, text)
+        button = None
+        if cfg.ping_button and cfg.usergroup_id and member_status is not None:
+            button = _ping_button(cfg.usergroup_id, member_status, panel=True)
+        blocks = None
+        if button is not None and not cfg.thread_reply:
+            blocks = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+                button,
+            ]
+        result = await post(client, channel, text, blocks=blocks)
+        if cfg.thread_reply and result and result.get("ts"):
+            thread_text = render(
+                cfg.thread_text,
+                user=f"<@{user_id}>",
+                channel=f"<#{channel}>",
+                bot=settings.bot_name,
+                name=name,
+            ).strip()
+            if thread_text or button is not None:
+                await post(
+                    client,
+                    channel,
+                    thread_text or " ",
+                    blocks=[button] if button is not None else None,
+                    thread_ts=str(result["ts"]),
+                )
 
-    await _send_welcome_dm(client, user_id, name, channel, should_prompt, cfg)
+    should_prompt = _should_prompt(user_id, cfg) and member_status is not True
+    await _send_welcome_dm(
+        client,
+        user_id,
+        name,
+        channel,
+        should_prompt,
+        cfg,
+        member_status=member_status,
+        auto_added=auto_added,
+    )
 
 
 async def on_member_left(event: dict[str, Any], client) -> None:
@@ -178,7 +277,7 @@ async def on_member_left(event: dict[str, Any], client) -> None:
     if (
         cfg.usergroup_id
         and runtime.user_client is not None
-        and not cfg.prompt
+        and (cfg.auto_add or not cfg.prompt)
     ):
         result = await ensure_usergroup_not_member(runtime.user_client, cfg.usergroup_id, user_id)
         if result == "removed":
@@ -208,13 +307,17 @@ async def _send_welcome_dm(
     channel: str | None,
     prompt: bool,
     cfg: WelcomeConfig,
+    *,
+    member_status: bool | None = None,
+    auto_added: bool = False,
 ) -> None:
     settings = runtime.settings
     dm_template = dm_for(channel, cfg)
-    want_welcome = bool(dm_template.strip()) and not (
+    want_welcome = cfg.dm_enabled and bool(dm_template.strip()) and not (
         cfg.dm_once and runtime.db.was_welcomed(user_id)
     )
-    if not want_welcome and not prompt:
+    auto_note = cfg.dm_enabled and member_status is True and auto_added
+    if not want_welcome and not prompt and not auto_note:
         return
 
     values = dict(
@@ -228,12 +331,16 @@ async def _send_welcome_dm(
         parts.append(render(dm_template, **values))
     if prompt:
         parts.append(render(cfg.prompt_text, **values))
+    if auto_note:
+        parts.append("i added you to the ping group. tap leave if you don't want pings.")
     text = "\n\n".join(part for part in parts if part.strip())
     if not text:
         return
 
     blocks: list[dict[str, Any]] = []
-    if prompt and cfg.usergroup_id:
+    if cfg.usergroup_id and member_status is True:
+        blocks.append(_ping_button(cfg.usergroup_id, True, panel=False))
+    elif prompt and cfg.usergroup_id:
         blocks.append(
             {
                 "type": "actions",

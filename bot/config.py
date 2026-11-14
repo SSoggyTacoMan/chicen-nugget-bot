@@ -177,7 +177,11 @@ class Settings:
     welcome_message: str
     welcome_dm: str
     welcome_dm_once: bool
+    welcome_thread_reply: bool
+    welcome_thread_text: str
     welcome_ping: str
+    welcome_ping_auto_add: bool
+    welcome_ping_button: bool
     logs_channel_id: str | None
     usergroup_id: str | None
     usergroup_prompt: bool
@@ -459,17 +463,23 @@ def load_settings() -> Settings:
         ),
         welcome_dm=_str(
             "WELCOME_DM",
-            "hey {user}! welcome to {channel} :blob-wave: i'm {bot}. "
-            "if you ever need anything in here, just ping me.",
+            "hey {user} :wave: i'm {bot}. if you need anything in {channel}, "
+            "just ping me. want ping-group updates or access? use the buttons below.",
         ),
         welcome_dm_once=_bool("WELCOME_DM_ONCE", True),
+        welcome_thread_reply=_bool("WELCOME_THREAD_REPLY", False),
+        welcome_thread_text=_str(
+            "WELCOME_THREAD_TEXT", "hey {user} :wave:"
+        ),
         welcome_ping=_str("WELCOME_PING"),
+        welcome_ping_auto_add=_bool("WELCOME_PING_AUTO_ADD", False),
+        welcome_ping_button=_bool("WELCOME_PING_BUTTON", True),
         logs_channel_id=_str("LOGS_CHANNEL_ID") or None,
         usergroup_id=_str("USERGROUP_ID") or None,
         usergroup_prompt=_bool("USERGROUP_PROMPT", True),
         usergroup_prompt_text=_str(
             "USERGROUP_PROMPT_TEXT",
-            "want me to add you to the ping group? you'll get pinged about the good stuff.",
+            "want in on the ping group? it's low-volume: event pings and good stuff, and you can leave any time.",
         ),
         usergroup_prompt_once=_bool("USERGROUP_PROMPT_ONCE", True),
         access_channel_id=_str("ACCESS_CHANNEL_ID") or None,
