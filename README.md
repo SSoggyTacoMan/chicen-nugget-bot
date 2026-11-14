@@ -20,7 +20,11 @@ they share one sqlite database, one toolbox and one memory. socket mode only, so
 - separate bot, boi and code models, with fallbacks and runtime switching
 - posting in the owner's name, either as a customized bot message or from their real account
 - jev, a small classifier that decides whether an unaddressed message deserves a reply
-- images, charts, powerpoint decks, welcomer, access requests, recaps, reminders and polls
+- images, charts, powerpoint decks, recaps and polls
+- custom welcome messages with per-channel overrides, thread replies and ping-group join/leave buttons
+- timers, alarms, reminders, tasks and durable notes for boi and the bot
+- post-huddle summaries from slack ai notes
+- ordered 9router fallback models when hack club ai quota runs out
 - a message starting with `# ` is ignored, always. manual mute switch
 
 ## how it fits
@@ -48,6 +52,7 @@ you can split the credentials: `SLACK_USER_TOKEN` (ideally `xoxp`) handles api c
 - reconnects: slack sends a `reconnect_url` frame, and the gateway falls back to `client.getWebSocketURL` with exponential backoff.
 - presence: it asks slack for `auto` presence. slack still marks human accounts away after about ten minutes.
 - isolation: workspace admin actions stay on the bot app. a stolen user session can't approve access or change settings.
+- boi has the same toolbox as the bot: reminders, timers, alarms, tasks, notes, calendar, email, weather, files and code.
 
 treat `xoxc` and `xoxd` like passwords. they grant full access to the account, including private channels. to rotate them, sign out and back in, then update the env.
 
@@ -145,7 +150,7 @@ run `/nugget setup`, or ask the bot to open the setup panel. secrets go into sla
 
 settings land in sqlite (`data/bot.db`) and override env values. env stays as a fallback for fresh deploys and ci.
 
-the panel also has AI & behavior, voice, images, fallback ai, watchers, storage and auto-join. those write runtime settings instead of requiring an env edit.
+the panel also has AI & behavior, voice, images, welcome, fallback ai, watchers, storage and auto-join. those write runtime settings instead of requiring an env edit.
 
 ### voice
 
@@ -174,6 +179,12 @@ options:
 per-channel overrides are optional: pick a channel and set a custom public message or DM. the channel also has to be in the watched list.
 
 use `/nugget pinggroup panel` to post a permanent join/leave panel in a channel. the buttons work for everyone and reply privately.
+
+### tier 2 access
+
+`/nugget access` opens the request modal. requests go to `ADMIN_CHANNEL_ID` (or the access panel channel), and admins get approve/deny buttons. the cooldown is a **seven-day minimum** between requests. `/nugget pending` lists open requests.
+
+the `manage_channel` tool can `kick` or `remove` a member from a channel when the owner/admin asks. it won't kick the owner, the bot, or the person asking.
 
 ### images
 
@@ -427,17 +438,22 @@ a bot that replies to everything is noise. jev is a typed classifier, not anothe
 decision:
 
 ```text
-reply = not spam
-        and (aimed_at_bot or (worth_replying and recipient != someone_else))
+ambient: reply = not spam
+        and (aimed_at_bot
+             or (assist and worth_replying and recipient != someone_else))
+
+assist = kind is help/feedback, or a question that needs live data/tools
 ```
 
-a message aimed at another person never triggers an agent turn unless the bot is also addressed. `needs_tools` becomes a hint so the model fetches data instead of guessing.
+a message aimed at another person never triggers an agent turn unless the bot is also addressed. short follow-ups in a thread where the bot spoke last bypass the gate. `needs_tools` becomes a hint so the model fetches data instead of guessing.
+
+the prompt also gives the model a public-channel veto: it can return `[NO_REPLY]` for messages that were not for it or would overshare. non-admin public replies containing sandbox, token, host, `.env`, sqlite or model details are suppressed before posting.
 
 mentions and dms skip the gate. errors and timeouts fail closed. `AI_AMBIENT_CHANNELS=*` turns ambient replies on everywhere the bot is a member.
 
 ## spend limits
 
-every completion is priced and recorded: chat, jev, images and token-billed tools. hack club ai also enforces an account-wide daily allowance.
+every completion is priced and recorded: chat, jev, images, transcription, tts and token-billed tools. hack club ai also enforces an account-wide daily allowance.
 
 three limits work together: per-user rate limit, workspace rate limit and a per-user daily cap. `/nugget budget` shows your spend, the workspace total and the top users for the day.
 
