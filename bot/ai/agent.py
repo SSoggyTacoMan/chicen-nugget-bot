@@ -234,6 +234,7 @@ class Agent:
         imagine_model = (
             image_settings.imagine_config(self.settings, self.db).model or "none"
         )
+        fast_model = self._fast_model() or "none"
         history = self.db.history(conversation, self.settings.ai_history_limit)
         role = "owner" if user_id == self.settings.owner_user_id else "guest"
         location = await self._location(
@@ -271,6 +272,7 @@ class Agent:
             .replace("{ai_model}", bot_model)
             .replace("{ai_fallback_model}", bot_fallback or "none")
             .replace("{ai_assistant_model}", assistant_model)
+            .replace("{ai_assistant_fast_model}", fast_model)
             .replace("{ai_assistant_fallback_model}", assistant_fallback or "none")
             .replace(
                 "{ai_code_model}",

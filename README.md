@@ -125,6 +125,15 @@ python main.py
 
 a healthy start logs `online as bot user ...`. if boi is configured you also get `user token active as ...`.
 
+### 4b. docker
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+the compose file mounts `data/` and `logs/`, so sqlite and logs survive restarts. the image already installs chromium for the browser tools.
+
 ### 5. invite the bot
 
 invite it to the welcome, logs and panel channels, plus the private tier-2 channel. slack only lets an app add members to a private channel it's already in.
@@ -290,7 +299,7 @@ mcp servers aren't wired yet. for now it's these presets plus the built-in googl
 | boi chat | `anthropic/claude-sonnet-5.5` | `openai/gpt-6.1-sol` |
 | code turns | `anthropic/claude-sonnet-5.5` | `openai/gpt-6.1-sol` |
 
-short/simple Boi messages use the quick model; anything that needs tools, code or a longer answer goes to the main Boi model. `AI_CODE_MODEL` is set by default. a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
+short/simple Boi messages use the quick model (`AI_ASSISTANT_FAST_MODEL`, default `anthropic/claude-haiku-5.5`); anything that needs tools, code or a longer answer goes to the main Boi model. set it empty to disable the fast path. `AI_CODE_MODEL` is set by default. a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
 
 ### quota fallback
 
@@ -484,6 +493,7 @@ everything lives under `/nugget`. `/nugget help` is the full list.
 | `/nugget reminder <when> <text>` | create a reminder | anyone |
 | `/nugget timer <duration> [label]` | countdown timer | anyone |
 | `/nugget alarm daily <HH:MM> [label]` | daily alarm | anyone |
+| `/nugget pinggroup [join|leave|panel]` | manage or post the ping-group panel | anyone / admin |
 | `/nugget poll "q" "a" "b"` | live button poll | anyone |
 | `/nugget ask <question>` | one-shot ai answer | ai channels |
 | `/nugget summarize [n]` | ai catch-up for this channel | ai channels |
