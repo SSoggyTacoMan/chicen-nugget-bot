@@ -55,6 +55,11 @@ async def run() -> None:
     runtime.bot_id = auth.get("bot_id") or ""
 
     for channel_id in settings.auto_join_channels:
+        if channel_id == "*" or channel_id[:1] not in {"C", "G"}:
+            logger.warning(
+                "auto-join expects channel ids, not %r; skipping", channel_id
+            )
+            continue
         try:
             status = await ensure_public_member(app.client, channel_id)
             logger.info("auto-join %s: %s", channel_id, status)

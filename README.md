@@ -50,7 +50,7 @@ you can split the credentials: `SLACK_USER_TOKEN` (ideally `xoxp`) handles api c
 
 treat `xoxc` and `xoxd` like passwords. they grant full access to the account, including private channels. to rotate them, sign out and back in, then update the env.
 
-`AUTO_JOIN_CHANNELS` joins public channel ids on startup. `CHAT_CHUNK_DELAY_SECONDS` and `CHAT_CHUNK_MAX` control paragraph splitting. `QUIET_HOURS` and `PROACTIVE_DAILY_CAP` gate ambient replies.
+`AUTO_JOIN_CHANNELS` joins only the public channel ids you list, on startup. leave it empty and it joins nothing. no wildcard. `CHAT_CHUNK_DELAY_SECONDS` and `CHAT_CHUNK_MAX` control paragraph splitting. `QUIET_HOURS` and `PROACTIVE_DAILY_CAP` gate ambient replies.
 
 ### posting in the owner's name
 
