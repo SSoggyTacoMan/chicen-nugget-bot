@@ -162,8 +162,11 @@ async def run() -> None:
                 else "",
             )
             logger.info(
-                "code model %s; tts %s with voice %s",
+                "code model %s%s; tts %s with voice %s",
                 settings.ai_code_model or "same as chat",
+                f" (fallback {settings.ai_code_fallback_model})"
+                if settings.ai_code_fallback_model
+                else "",
                 settings.tts_model or "off",
                 settings.tts_voice,
             )

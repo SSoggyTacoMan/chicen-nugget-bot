@@ -353,15 +353,15 @@ def load_settings() -> Settings:
         ai_assistant_model=_str("AI_ASSISTANT_MODEL", "anthropic/claude-sonnet-5.5")
         or "anthropic/claude-sonnet-5.5",
         ai_assistant_fallback_model=_str(
-            "AI_ASSISTANT_FALLBACK_MODEL", "anthropic/claude-sonnet-5"
+            "AI_ASSISTANT_FALLBACK_MODEL", "openai/gpt-5.5"
         )
-        or "anthropic/claude-sonnet-5",
+        or "openai/gpt-5.5",
         ai_code_model=_str("AI_CODE_MODEL", "anthropic/claude-sonnet-5.5")
         or "anthropic/claude-sonnet-5.5",
         ai_code_fallback_model=_str(
-            "AI_CODE_FALLBACK_MODEL", "anthropic/claude-sonnet-5"
+            "AI_CODE_FALLBACK_MODEL", "openai/gpt-5.5"
         )
-        or "anthropic/claude-sonnet-5",
+        or "openai/gpt-5.5",
         ai_embedding_model=_str("AI_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b") or None,
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),
         ai_history_limit=_int("AI_HISTORY_LIMIT", 24),
