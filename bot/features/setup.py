@@ -8,6 +8,7 @@ Secrets are collected in Slack modals instead of chat messages or `.env` edits.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import time
 from typing import Any
@@ -36,7 +37,7 @@ from bot.owner_posting import (
     validate_owner_token,
 )
 from bot.runtime import runtime
-from bot.slack_api import error_code, post, post_ephemeral
+from bot.slack_api import all_channels, error_code, post, post_ephemeral
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ INTEGRATION_NAMES: dict[str, str] = {
     "apis": "API keys",
     "slack": "your Slack profile",
 }
-CONFIG_NAMES = {"ai", "voice", "images", "fallback", "watchers", "storage", "channels"}
+CONFIG_NAMES = {"ai", "voice", "images", "welcome", "fallback", "watchers", "storage", "channels"}
 
 
 def register(app) -> None:
@@ -63,6 +64,7 @@ def register(app) -> None:
     app.view("setup_ai")(on_ai_submit)
     app.view("setup_voice")(on_voice_submit)
     app.view("setup_images")(on_images_submit)
+    app.view("setup_welcome")(on_welcome_submit)
     app.view("setup_fallback_ai")(on_fallback_ai_submit)
     app.view("setup_watchers")(on_watchers_submit)
     app.view("setup_storage")(on_storage_submit)
@@ -248,6 +250,26 @@ def _note(text: str) -> dict[str, Any]:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
+async def _resolve_channel(client, raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    match = re.match(r"<#([CG][A-Z0-9]+)(?:\|[^>]+)?>", text)
+    if match:
+        return match.group(1)
+    if re.match(r"^[CG][A-Z0-9]{5,}$", text):
+        return text
+    name = text.lstrip("#").lower()
+    try:
+        channels = await all_channels(client)
+    except Exception:  # noqa: BLE001
+        return ""
+    for channel in channels:
+        if channel.get("id") == text or (channel.get("name") or "").lower() == name:
+            return str(channel.get("id") or "")
+    return ""
+
+
 async def _open_modal(client, trigger_id: str | None, view: dict[str, Any]) -> bool:
     if not trigger_id:
         return False
@@ -386,6 +408,7 @@ def _usage() -> str:
         "• `/nugget setup ai` - models and behavior toggles\n"
         "• `/nugget setup voice` - qwen3 tts voice, language and style\n"
         "• `/nugget setup images` - nano banana model, fallback and budget cost\n"
+        "• `/nugget setup welcome` - welcome messages, watched channels and ping group\n"
         "• `/nugget setup fallback` - 9router key and model for empty HCAI quota\n"
         "• `/nugget setup watchers` - CI, notifications, email, URLs\n"
         "• `/nugget setup storage` - retention and cleanup\n"
@@ -424,7 +447,7 @@ async def on_setup_open(ack, body, client) -> None:
                 await _dm(client, user_id or "", f"couldn't send the auth link: {message}")
             return
         view = _google_credentials_modal()
-    elif integration in {"ai", "voice", "images", "fallback", "watchers", "storage", "channels"}:
+    elif integration in {"ai", "voice", "images", "welcome", "fallback", "watchers", "storage", "channels"}:
         view = _config_modal(integration)
     else:
         view = _integration_modal(integration)
@@ -798,6 +821,104 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                 ),
             ],
             submit="Save images",
+        )
+    if integration == "welcome":
+        from bot.features.welcomer import welcome_config
+
+        cfg = welcome_config()
+        selected = {
+            key
+            for key, enabled in (
+                ("welcome_public", cfg.public),
+                ("welcome_dm_once", cfg.dm_once),
+                ("usergroup_prompt", cfg.prompt),
+                ("usergroup_prompt_once", cfg.prompt_once),
+            )
+            if enabled
+        }
+        return _modal(
+            "setup_welcome",
+            "Welcome & ping group",
+            [
+                _note(
+                    "placeholders: `{user}`, `{channel}`, `{bot}`, `{name}`. watched channels can be ids or #names; use `*` for every channel the bot is in. a per-channel override only fires when that channel is also watched."
+                ),
+                _input(
+                    "watched_channel_ids",
+                    "Watched channels",
+                    placeholder="C0123ABCD,C0456EFGH or *",
+                    initial=",".join(cfg.watched),
+                    max_length=1500,
+                ),
+                _input(
+                    "welcome_message",
+                    "Public welcome",
+                    initial=cfg.message,
+                    multiline=True,
+                    max_length=1500,
+                ),
+                _input(
+                    "welcome_dm",
+                    "Welcome DM",
+                    initial=cfg.dm,
+                    multiline=True,
+                    max_length=1500,
+                ),
+                _input(
+                    "welcome_ping",
+                    "Welcome ping line",
+                    placeholder="optional, e.g. <@S0123> or a usergroup mention",
+                    initial=cfg.ping,
+                    max_length=200,
+                ),
+                _input(
+                    "usergroup_id",
+                    "Ping group id",
+                    placeholder="S0123ABCD",
+                    initial=cfg.usergroup_id or "",
+                    max_length=40,
+                ),
+                _input(
+                    "usergroup_prompt_text",
+                    "Ping group prompt",
+                    initial=cfg.prompt_text,
+                    multiline=True,
+                    max_length=800,
+                ),
+                _checkboxes(
+                    "welcome_toggles",
+                    "Toggles",
+                    [
+                        ("welcome_public", "send public welcome"),
+                        ("welcome_dm_once", "DM only on first join"),
+                        ("usergroup_prompt", "ask new members to join the ping group"),
+                        ("usergroup_prompt_once", "only ask once"),
+                    ],
+                    selected,
+                ),
+                _note(
+                    "*per-channel override* - optional. useful for #doggy-taco-fellas."
+                ),
+                _input(
+                    "welcome_override_channel",
+                    "Channel",
+                    placeholder="#doggy-taco-fellas or C0123ABCD",
+                    max_length=100,
+                ),
+                _input(
+                    "welcome_override_message",
+                    "Override public welcome",
+                    multiline=True,
+                    max_length=1500,
+                ),
+                _input(
+                    "welcome_override_dm",
+                    "Override welcome DM",
+                    multiline=True,
+                    max_length=1500,
+                ),
+            ],
+            submit="Save welcome",
         )
     if integration == "fallback":
         from bot.ai.providers import parse_models
@@ -1242,6 +1363,78 @@ async def on_images_submit(ack, body, view, client) -> None:
     except ValueError:
         pass
     await _dm(client, user_id or "", "saved image settings.")
+
+
+async def on_welcome_submit(ack, body, view, client) -> None:
+    await ack()
+    user_id = (body.get("user") or {}).get("id")
+    if not _is_admin(user_id):
+        return
+    values = _values(view)
+    warnings: list[str] = []
+
+    raw_watched = values.get("watched_channel_ids", "")
+    if raw_watched.strip() == "-":
+        _set("watched_channel_ids", "")
+    elif raw_watched:
+        resolved: list[str] = []
+        for part in re.split(r"[,\s]+", raw_watched):
+            part = part.strip()
+            if not part:
+                continue
+            if part == "*":
+                resolved.append("*")
+                continue
+            channel_id = await _resolve_channel(client, part)
+            if channel_id:
+                resolved.append(channel_id)
+            else:
+                warnings.append(f"couldn't resolve `{part}`")
+        if resolved:
+            _set("watched_channel_ids", ",".join(dict.fromkeys(resolved)))
+
+    for key in (
+        "welcome_message",
+        "welcome_dm",
+        "welcome_ping",
+        "usergroup_id",
+        "usergroup_prompt_text",
+    ):
+        raw = values.get(key, "")
+        if raw:
+            _set(key, "" if raw.strip() == "-" else raw.strip())
+
+    checked = _checked(view, "welcome_toggles")
+    for key in (
+        "welcome_public",
+        "welcome_dm_once",
+        "usergroup_prompt",
+        "usergroup_prompt_once",
+    ):
+        _set(key, "true" if key in checked else "false")
+
+    raw_channel = values.get("welcome_override_channel", "")
+    if raw_channel:
+        channel_id = await _resolve_channel(client, raw_channel)
+        if channel_id:
+            overrides = (
+                ("welcome_override_message", "welcome_message"),
+                ("welcome_override_dm", "welcome_dm"),
+            )
+            for field, key in overrides:
+                raw = values.get(field, "")
+                if raw:
+                    _set(
+                        f"{key}:{channel_id}",
+                        "" if raw.strip() == "-" else raw.strip(),
+                    )
+        else:
+            warnings.append(f"couldn't resolve channel `{raw_channel}`")
+
+    text = "saved welcome settings."
+    if warnings:
+        text += " " + "; ".join(warnings) + "."
+    await _dm(client, user_id or "", text)
 
 
 async def on_fallback_ai_submit(ack, body, view, client) -> None:

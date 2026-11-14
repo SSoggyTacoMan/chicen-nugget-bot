@@ -1596,6 +1596,7 @@ class Toolbox:
                             "ai",
                             "voice",
                             "images",
+                            "welcome",
                             "fallback",
                             "watchers",
                             "storage",
@@ -5141,6 +5142,12 @@ class Toolbox:
             "watched": "watched_channel_ids",
             "watched_channels": "watched_channel_ids",
             "welcomer_channels": "watched_channel_ids",
+            "welcome": "welcome_message",
+            "welcome_text": "welcome_message",
+            "greeting": "welcome_message",
+            "ping_group": "usergroup_id",
+            "pinggroup": "usergroup_id",
+            "ping_prompt": "usergroup_prompt_text",
             "access": "tier2",
             "tier2_channel": "access_channel_id",
             "access_channel": "access_channel_id",
@@ -5184,6 +5191,11 @@ class Toolbox:
             "daily_digest",
             "welcomer",
             "watched_channel_ids",
+            "welcome_message",
+            "welcome_dm",
+            "welcome_ping",
+            "usergroup_id",
+            "usergroup_prompt_text",
             "tier2",
             "access_channel_id",
             "admin_channel_id",
@@ -5785,7 +5797,7 @@ class Toolbox:
         if integration and integration not in integrations.SETUP_AREAS:
             areas = ", ".join(name for name, _ in integrations.SETUP_INTEGRATIONS)
             return _error(
-                f"integration must be {areas}, ai, voice, images, fallback, watchers, storage, channels, or all"
+                f"integration must be {areas}, ai, voice, images, welcome, fallback, watchers, storage, channels, or all"
             )
         blocks = integrations.setup_panel_blocks(integration or None)
         result = await post(

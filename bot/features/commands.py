@@ -51,6 +51,7 @@ HELP = """*{bot}: everything lives under `/nugget`*
 • `/nugget access` - request tier 2 access
 • `/nugget pending` - admin: list pending requests
 • `/nugget accesspanel` - admin: post/update the access panel
+• `/nugget pinggroup [join|leave|panel]` - manage the ping group
 
 *setup*
 • `/nugget setup` - connect Google, Mac, GitHub, email, or your Slack profile
@@ -527,6 +528,12 @@ async def cmd_config(ack, command, client) -> None:
         "watched": "watched_channel_ids",
         "watched_channels": "watched_channel_ids",
         "welcomer_channels": "watched_channel_ids",
+        "welcome": "welcome_message",
+        "welcome_text": "welcome_message",
+        "greeting": "welcome_message",
+        "ping_group": "usergroup_id",
+        "pinggroup": "usergroup_id",
+        "ping_prompt": "usergroup_prompt_text",
         "access": "tier2",
         "tier2_channel": "access_channel_id",
         "access_channel": "access_channel_id",
@@ -570,6 +577,11 @@ async def cmd_config(ack, command, client) -> None:
         "personal_updates",
         "welcomer",
         "watched_channel_ids",
+        "welcome_message",
+        "welcome_dm",
+        "welcome_ping",
+        "usergroup_id",
+        "usergroup_prompt_text",
         "tier2",
         "access_channel_id",
         "admin_channel_id",

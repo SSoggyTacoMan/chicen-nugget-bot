@@ -134,6 +134,7 @@ run `/nugget setup`, or ask the bot to open the setup panel. secrets go into sla
 | ai and behavior | `/nugget setup ai` |
 | voice | `/nugget setup voice` |
 | images | `/nugget setup images` |
+| welcome & ping group | `/nugget setup welcome` |
 | fallback ai | `/nugget setup fallback` |
 | watchers | `/nugget setup watchers` |
 | storage | `/nugget setup storage` |
@@ -158,6 +159,14 @@ outgoing voice uses qwen3 tts through hack club ai's replicate proxy:
 - clips post as playable audio files. slack's public api does not expose native voice-note bubbles for apps.
 
 if tts is off, check `TTS_MODEL`, `AI_API_KEY` and `TTS_VOICE`.
+
+### welcome & ping group
+
+`/nugget setup welcome` edits the public welcome, welcome DM, watched channels, ping group id and prompt. placeholders are `{user}`, `{channel}`, `{bot}` and `{name}`.
+
+per-channel overrides are optional: pick a channel and set a custom public message or DM. the channel also has to be in the watched list.
+
+use `/nugget pinggroup panel` to post a permanent join/leave panel in a channel. the buttons work for everyone and reply privately.
 
 ### images
 

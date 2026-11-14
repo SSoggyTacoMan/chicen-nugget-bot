@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from bot.runtime import runtime
@@ -22,6 +23,72 @@ PROMPT_KV = "usergroup_prompt:{}"
 JOIN_ACTION = "usergroup_join"
 LEAVE_ACTION = "usergroup_leave"
 SKIP_ACTION = "usergroup_skip"
+PANEL_JOIN_ACTION = "usergroup_panel_join"
+PANEL_LEAVE_ACTION = "usergroup_panel_leave"
+
+
+@dataclass(frozen=True)
+class WelcomeConfig:
+    public: bool
+    message: str
+    dm: str
+    dm_once: bool
+    ping: str
+    watched: tuple[str, ...]
+    usergroup_id: str | None
+    prompt: bool
+    prompt_text: str
+    prompt_once: bool
+
+
+def _kv(key: str) -> str | None:
+    return runtime.db.kv_get(f"config:{key}") if runtime.db else None
+
+
+def _kv_bool(key: str, default: bool) -> bool:
+    raw = _kv(key)
+    if raw is None:
+        return default
+    return str(raw).lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _kv_csv(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = _kv(key)
+    if raw is None:
+        return default
+    return tuple(item.strip() for item in str(raw).split(",") if item.strip())
+
+
+def welcome_config() -> WelcomeConfig:
+    settings = runtime.settings
+    return WelcomeConfig(
+        public=_kv_bool("welcome_public", settings.welcome_public),
+        message=_kv("welcome_message") or settings.welcome_message,
+        dm=_kv("welcome_dm") or settings.welcome_dm,
+        dm_once=_kv_bool("welcome_dm_once", settings.welcome_dm_once),
+        ping=_kv("welcome_ping") or settings.welcome_ping,
+        watched=_kv_csv("watched_channel_ids", tuple(settings.watched_channel_ids)),
+        usergroup_id=_kv("usergroup_id") or settings.usergroup_id,
+        prompt=_kv_bool("usergroup_prompt", settings.usergroup_prompt),
+        prompt_text=_kv("usergroup_prompt_text") or settings.usergroup_prompt_text,
+        prompt_once=_kv_bool("usergroup_prompt_once", settings.usergroup_prompt_once),
+    )
+
+
+def message_for(channel: str | None, cfg: WelcomeConfig) -> str:
+    if channel:
+        override = _kv(f"welcome_message:{channel}")
+        if override:
+            return override
+    return cfg.message
+
+
+def dm_for(channel: str | None, cfg: WelcomeConfig) -> str:
+    if channel:
+        override = _kv(f"welcome_dm:{channel}")
+        if override:
+            return override
+    return cfg.dm
 
 
 def render(template: str, **values: str) -> str:
@@ -37,27 +104,24 @@ def register(app) -> None:
     app.action(JOIN_ACTION)(on_usergroup_join)
     app.action(LEAVE_ACTION)(on_usergroup_leave)
     app.action(SKIP_ACTION)(on_usergroup_skip)
+    app.action(PANEL_JOIN_ACTION)(on_panel_join)
+    app.action(PANEL_LEAVE_ACTION)(on_panel_leave)
 
 
-def _watches(channel_id: str | None) -> bool:
-    """Watched channels come from runtime config first, then WATCHED_CHANNEL_IDS."""
+def _watches(channel_id: str | None, watched: tuple[str, ...]) -> bool:
     if not channel_id:
         return False
-    if runtime.db:
-        raw = runtime.db.kv_get("config:watched_channel_ids")
-        if raw is not None:
-            watched = {item.strip() for item in raw.split(",") if item.strip()}
-            return "*" in watched or channel_id in watched
-    return runtime.settings.watches(channel_id)
+    return "*" in watched or channel_id in watched
 
 
 async def on_member_joined(event: dict[str, Any], client) -> None:
     if runtime.db and runtime.db.kv_get("config:welcomer") == "false":
         return
     settings = runtime.settings
+    cfg = welcome_config()
     channel = event.get("channel")
     user_id = event.get("user")
-    if not user_id or not _watches(channel):
+    if not user_id or not _watches(channel, cfg.watched):
         return
     if event.get("user_type") == "bot" or user_id == runtime.bot_user_id:
         return
@@ -69,9 +133,9 @@ async def on_member_joined(event: dict[str, Any], client) -> None:
     join_count = member.get("joins", 1)
 
     group_note = ""
-    should_prompt = _should_prompt(user_id)
-    if settings.usergroup_id and runtime.user_client is not None and not settings.usergroup_prompt:
-        result = await ensure_usergroup_member(runtime.user_client, settings.usergroup_id, user_id)
+    should_prompt = _should_prompt(user_id, cfg)
+    if cfg.usergroup_id and runtime.user_client is not None and not cfg.prompt:
+        result = await ensure_usergroup_member(runtime.user_client, cfg.usergroup_id, user_id)
         if result == "added":
             group_note = " and added to the ping group"
         elif result == "failed":
@@ -83,26 +147,27 @@ async def on_member_joined(event: dict[str, Any], client) -> None:
         client,
     )
 
-    if settings.welcome_public and settings.welcome_message.strip():
+    message = message_for(channel, cfg)
+    if cfg.public and message.strip():
         text = render(
-            settings.welcome_message,
+            message,
             user=f"<@{user_id}>",
             channel=f"<#{channel}>",
             bot=settings.bot_name,
             name=name,
         )
-        if settings.welcome_ping:
-            text = f"{text}\n\n{settings.welcome_ping}"
+        if cfg.ping:
+            text = f"{text}\n\n{cfg.ping}"
         await post(client, channel, text)
 
-    await _send_welcome_dm(client, user_id, name, channel, should_prompt)
+    await _send_welcome_dm(client, user_id, name, channel, should_prompt, cfg)
 
 
 async def on_member_left(event: dict[str, Any], client) -> None:
-    settings = runtime.settings
+    cfg = welcome_config()
     channel = event.get("channel")
     user_id = event.get("user")
-    if not user_id or not _watches(channel):
+    if not user_id or not _watches(channel, cfg.watched):
         return
     if event.get("user_type") == "bot" or user_id == runtime.bot_user_id:
         return
@@ -111,11 +176,11 @@ async def on_member_left(event: dict[str, Any], client) -> None:
 
     group_note = ""
     if (
-        settings.usergroup_id
+        cfg.usergroup_id
         and runtime.user_client is not None
-        and not settings.usergroup_prompt
+        and not cfg.prompt
     ):
-        result = await ensure_usergroup_not_member(runtime.user_client, settings.usergroup_id, user_id)
+        result = await ensure_usergroup_not_member(runtime.user_client, cfg.usergroup_id, user_id)
         if result == "removed":
             group_note = " and removed from the ping group"
         elif result == "failed":
@@ -125,24 +190,29 @@ async def on_member_left(event: dict[str, Any], client) -> None:
 
 
 # --------------------------------------------------------------- welcome dm
-def _should_prompt(user_id: str) -> bool:
-    settings = runtime.settings
-    if not settings.usergroup_id or not settings.usergroup_prompt:
+def _should_prompt(user_id: str, cfg: WelcomeConfig) -> bool:
+    if not cfg.usergroup_id or not cfg.prompt:
         return False
     if runtime.user_client is None:
         logger.info("usergroup prompt skipped: no user token with usergroups:write")
         return False
-    if settings.usergroup_prompt_once and runtime.db.kv_get(PROMPT_KV.format(user_id)):
+    if cfg.prompt_once and runtime.db.kv_get(PROMPT_KV.format(user_id)):
         return False
     return True
 
 
 async def _send_welcome_dm(
-    client, user_id: str, name: str, channel: str | None, prompt: bool
+    client,
+    user_id: str,
+    name: str,
+    channel: str | None,
+    prompt: bool,
+    cfg: WelcomeConfig,
 ) -> None:
     settings = runtime.settings
-    want_welcome = bool(settings.welcome_dm.strip()) and not (
-        settings.welcome_dm_once and runtime.db.was_welcomed(user_id)
+    dm_template = dm_for(channel, cfg)
+    want_welcome = bool(dm_template.strip()) and not (
+        cfg.dm_once and runtime.db.was_welcomed(user_id)
     )
     if not want_welcome and not prompt:
         return
@@ -155,15 +225,15 @@ async def _send_welcome_dm(
     )
     parts: list[str] = []
     if want_welcome:
-        parts.append(render(settings.welcome_dm, **values))
+        parts.append(render(dm_template, **values))
     if prompt:
-        parts.append(render(settings.usergroup_prompt_text, **values))
+        parts.append(render(cfg.prompt_text, **values))
     text = "\n\n".join(part for part in parts if part.strip())
     if not text:
         return
 
     blocks: list[dict[str, Any]] = []
-    if prompt and settings.usergroup_id:
+    if prompt and cfg.usergroup_id:
         blocks.append(
             {
                 "type": "actions",
@@ -173,13 +243,13 @@ async def _send_welcome_dm(
                         "text": {"type": "plain_text", "text": ":bell: add me", "emoji": True},
                         "style": "primary",
                         "action_id": JOIN_ACTION,
-                        "value": settings.usergroup_id,
+                        "value": cfg.usergroup_id,
                     },
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "no thanks"},
                         "action_id": SKIP_ACTION,
-                        "value": settings.usergroup_id,
+                        "value": cfg.usergroup_id,
                     },
                 ],
             }
@@ -211,9 +281,9 @@ async def _send_welcome_dm(
 # ------------------------------------------------------------------ actions
 async def on_usergroup_join(ack, body, action, client, respond) -> None:
     await ack()
-    settings = runtime.settings
+    cfg = welcome_config()
     user_id = (body.get("user") or {}).get("id")
-    group = (action.get("value") or settings.usergroup_id or "").strip()
+    group = (action.get("value") or cfg.usergroup_id or "").strip()
     if not user_id or not group:
         return
     if runtime.user_client is None:
@@ -231,9 +301,9 @@ async def on_usergroup_join(ack, body, action, client, respond) -> None:
 
 async def on_usergroup_leave(ack, body, action, client, respond) -> None:
     await ack()
-    settings = runtime.settings
+    cfg = welcome_config()
     user_id = (body.get("user") or {}).get("id")
-    group = (action.get("value") or settings.usergroup_id or "").strip()
+    group = (action.get("value") or cfg.usergroup_id or "").strip()
     if not user_id or not group:
         return
     if runtime.user_client is None:
@@ -254,26 +324,77 @@ async def on_usergroup_skip(ack, body, client, respond) -> None:
         client,
         body,
         respond,
-        "no worries - not added. you can join any time with `/pinggroup`.",
+        "no worries - not added. you can join any time with `/nugget pinggroup`.",
     )
 
 
-async def _finish(client, body: dict[str, Any] | None, respond, text: str) -> None:
+async def on_panel_join(ack, body, action, client, respond) -> None:
+    await ack()
+    cfg = welcome_config()
+    user_id = (body.get("user") or {}).get("id")
+    group = (action.get("value") or cfg.usergroup_id or "").strip()
+    if not user_id or not group:
+        return
+    if runtime.user_client is None:
+        await _finish(
+            client,
+            body,
+            respond,
+            "i can't manage the ping group right now - i need a user token with `usergroups:write`.",
+            replace=False,
+        )
+        return
+    result = await ensure_usergroup_member(runtime.user_client, group, user_id)
+    runtime.db.kv_set(
+        PROMPT_KV.format(user_id),
+        "joined" if result in {"added", "already"} else "asked",
+    )
+    await _finish(client, body, respond, join_text(result), replace=False)
+
+
+async def on_panel_leave(ack, body, action, client, respond) -> None:
+    await ack()
+    cfg = welcome_config()
+    user_id = (body.get("user") or {}).get("id")
+    group = (action.get("value") or cfg.usergroup_id or "").strip()
+    if not user_id or not group:
+        return
+    if runtime.user_client is None:
+        await _finish(
+            client,
+            body,
+            respond,
+            "i can't manage the ping group right now - i need a user token with `usergroups:write`.",
+            replace=False,
+        )
+        return
+    result = await ensure_usergroup_not_member(runtime.user_client, group, user_id)
+    await _finish(client, body, respond, leave_text(result), replace=False)
+
+
+async def _finish(
+    client,
+    body: dict[str, Any] | None,
+    respond,
+    text: str,
+    *,
+    replace: bool = True,
+) -> None:
     channel = ((body or {}).get("channel") or {}).get("id")
     ts = ((body or {}).get("message") or {}).get("ts")
-    if client is not None and channel and ts:
+    if replace and client is not None and channel and ts:
         if await update(client, channel, ts, text):
             return
     if respond is not None:
         try:
-            await respond(text=text, replace_original=True)
+            await respond(text=text, replace_original=replace)
         except Exception:  # noqa: BLE001 - best effort
             logger.info("could not replace the original message")
 
 
 def join_text(result: str) -> str:
     if result == "added":
-        return ":bell: you're in the ping group. welcome aboard!"
+        return ":bell: you're in the ping group. use `/nugget pinggroup leave` if you want out."
     if result == "already":
         return ":bell: you're already in the ping group."
     return (
@@ -296,7 +417,7 @@ async def cmd_pinggroup(ack, command, client) -> None:
     settings = runtime.settings
     channel = command["channel_id"]
     user_id = command["user_id"]
-    group = settings.usergroup_id
+    group = welcome_config().usergroup_id
     if not group:
         await post_ephemeral(client, channel, user_id, "no ping group is configured yet.")
         return
@@ -310,6 +431,46 @@ async def cmd_pinggroup(ack, command, client) -> None:
         return
 
     arg = (command.get("text") or "").strip().lower()
+    if arg == "panel":
+        if not runtime.settings.is_admin(user_id):
+            await post_ephemeral(
+                client, channel, user_id, "only admins can post the ping group panel."
+            )
+            return
+        await post(
+            client,
+            channel,
+            "*ping group* :bell:\nwant pings for events and the good stuff? join or leave below.",
+            blocks=[
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": ":bell: join the ping group",
+                                "emoji": True,
+                            },
+                            "style": "primary",
+                            "action_id": PANEL_JOIN_ACTION,
+                            "value": group,
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": ":wave: leave",
+                                "emoji": True,
+                            },
+                            "action_id": PANEL_LEAVE_ACTION,
+                            "value": group,
+                        },
+                    ],
+                }
+            ],
+        )
+        return
     if arg in {"join", "add", "in"}:
         result = await ensure_usergroup_member(runtime.user_client, group, user_id)
         await post_ephemeral(client, channel, user_id, join_text(result))

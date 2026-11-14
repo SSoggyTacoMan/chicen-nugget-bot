@@ -434,7 +434,7 @@ def test_setup_panel_has_advanced_areas():
         if block.get("type") == "actions"
         for element in block.get("elements") or []
     }
-    assert {"ai", "voice", "images", "fallback", "watchers", "storage", "channels"} <= values
+    assert {"ai", "voice", "images", "welcome", "fallback", "watchers", "storage", "channels"} <= values
 
 
 def test_secret_config_writes_are_blocked(tmp_path):
@@ -504,6 +504,16 @@ def _setup_settings(**overrides):
         ai_router_base_url="https://router.ssoggy.me/v1",
         ai_router_models=("kgw/kilo-auto/free",),
         ai_router_api_key=None,
+        welcome_public=True,
+        welcome_message="welcome {user} to {channel}",
+        welcome_dm="hey {user}",
+        welcome_dm_once=True,
+        welcome_ping="",
+        watched_channel_ids=("C1",),
+        usergroup_id="S123",
+        usergroup_prompt=True,
+        usergroup_prompt_text="join the ping group?",
+        usergroup_prompt_once=True,
         is_admin=lambda user_id: user_id == "U_OWNER",
     )
     for key, value in overrides.items():
@@ -538,11 +548,12 @@ def test_advanced_config_modals_reflect_overrides(tmp_path, monkeypatch):
 
     modals = {
         name: setup._config_modal(name)
-        for name in ("ai", "voice", "images", "fallback", "watchers", "storage", "channels")
+        for name in ("ai", "voice", "images", "welcome", "fallback", "watchers", "storage", "channels")
     }
     assert modals["ai"]["callback_id"] == "setup_ai"
     assert modals["voice"]["callback_id"] == "setup_voice"
     assert modals["images"]["callback_id"] == "setup_images"
+    assert modals["welcome"]["callback_id"] == "setup_welcome"
     assert modals["fallback"]["callback_id"] == "setup_fallback_ai"
     assert modals["watchers"]["callback_id"] == "setup_watchers"
     assert modals["storage"]["callback_id"] == "setup_storage"
@@ -630,6 +641,20 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
             },
             client,
         )
+        await setup.on_welcome_submit(
+            AsyncMock(),
+            body,
+            _modal_view(
+                {
+                    "watched_channel_ids": "C0123ABCD",
+                    "welcome_message": "welcome {user}",
+                    "welcome_override_channel": "C0123ABCD",
+                    "welcome_override_message": "special welcome",
+                },
+                {"welcome_toggles": ["welcome_public"]},
+            ),
+            client,
+        )
         await setup.on_fallback_ai_submit(
             AsyncMock(),
             body,
@@ -699,6 +724,13 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
     assert db.kv_get("config:ai_router_base_url") == "https://router.example/v1"
     assert db.kv_get("config:ai_router_models") == "kgw/kilo-auto/free,backup/model"
     assert db.kv_get("config:ai_router_api_key") == "test-router-key"
+    assert db.kv_get("config:watched_channel_ids") == "C0123ABCD"
+    assert db.kv_get("config:welcome_message") == "welcome {user}"
+    assert db.kv_get("config:welcome_public") == "true"
+    assert (
+        db.kv_get("config:welcome_message:C0123ABCD")
+        == "special welcome"
+    )
     assert db.kv_get("config:watch_email") == "true"
     assert db.kv_get("config:watch_github_ci") == "false"
     assert db.kv_get("config:watch_urls") == "https://status.example.com"
