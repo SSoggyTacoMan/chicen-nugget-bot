@@ -486,7 +486,7 @@ def test_fetch_slack_images_from_text_urls():
 
 def test_cmd_config(tmp_path):
     import asyncio
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from bot.db import Database
     from bot.features.commands import cmd_config
@@ -495,6 +495,10 @@ def test_cmd_config(tmp_path):
     db = Database(str(tmp_path / "cmd_cfg.db"))
     db.init()
     runtime.db = db
+    old_settings = runtime.settings
+    runtime.settings = MagicMock()
+    runtime.settings.owner_user_id = "U_ADMIN"
+    runtime.settings.is_admin.side_effect = lambda uid: uid == "U_ADMIN"
 
     captured = []
 
@@ -531,6 +535,7 @@ def test_cmd_config(tmp_path):
             assert db.kv_get("config:recaps:C12345678") == "false"
 
     asyncio.run(run())
+    runtime.settings = old_settings
 
 
 def test_thread_continuation_image_handling(tmp_path):
@@ -539,13 +544,20 @@ def test_thread_continuation_image_handling(tmp_path):
 
     from bot.ai.gate import GateDecision
     from bot.db import Database
-    from bot.features.agent import _handle_thread_continuation
+    from bot.features.agent import _handle_thread_continuation, _last_thread
     from bot.runtime import runtime
 
     db = Database(str(tmp_path / "thread_test.db"))
     db.init()
     db.mark_thread("C_TEST", "100.000")
     runtime.db = db
+    old_settings = runtime.settings
+    runtime.settings = MagicMock()
+    runtime.settings.ai_allowed.return_value = True
+    runtime.settings.ai_thread_cooldown = 0
+    runtime.settings.ai_gate_enabled = True
+    runtime.settings.bot_name = "Chicen Nugget Bot"
+    _last_thread.clear()
 
     client = AsyncMock()
     # Mock gate
@@ -596,6 +608,7 @@ def test_thread_continuation_image_handling(tmp_path):
         asyncio.run(run())
     finally:
         runtime.gate = old_gate
+        runtime.settings = old_settings
 
 
 def test_security_hardening(tmp_path):
@@ -2283,7 +2296,8 @@ def test_personal_operator_tools(tmp_path):
                 proc.communicate = AsyncMock(return_value=(b"ok", b""))
             return proc
 
-        with patch("bot.ai.tools.asyncio.create_subprocess_exec", side_effect=fake_subproc):
+        with patch("bot.ai.tools.sys.platform", "darwin"), \
+             patch("bot.ai.tools.asyncio.create_subprocess_exec", side_effect=fake_subproc):
             mac_front = await box.execute("mac_control", {"action": "frontmost"}, ctx_owner)
             assert mac_front == "Slack"
 
