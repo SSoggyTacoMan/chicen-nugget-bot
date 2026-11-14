@@ -43,7 +43,7 @@ def _settings(tmp_path):
         transcribe_fallback_model="audio-backup",
         ai_router_base_url="https://router.example/v1",
         ai_router_api_key="fallback-key",
-        ai_router_model="kgw/kilo-auto/free",
+        ai_router_models=("kgw/kilo-auto/free",),
         data_dir=tmp_path,
         repo_url="https://github.com/repo",
         is_admin=lambda user_id: user_id == "U_OWNER",
@@ -75,7 +75,7 @@ def _agent(tmp_path):
     provider = FallbackProvider(
         base_url="https://router.example/v1",
         api_key="fallback-key",
-        model="kgw/kilo-auto/free",
+        models=("kgw/kilo-auto/free",),
     )
     agent._fallback = lambda: (fallback_client, provider)
     return agent, db, fallback_client
@@ -159,10 +159,37 @@ def test_fallback_provider_prefers_db_over_env(tmp_path):
     assert provider.model == "kgw/kilo-auto/free"
 
     db.kv_set("config:ai_router_api_key", "db-key")
-    db.kv_set("config:ai_router_model", "db-model")
+    db.kv_set("config:ai_router_models", "db-model,db-backup")
     db.kv_set("config:ai_router_base_url", "https://db.example/v1")
     provider = fallback_provider(settings, db)
     assert provider is not None
     assert provider.api_key == "db-key"
+    assert provider.models == ("db-model", "db-backup")
     assert provider.model == "db-model"
     assert provider.base_url == "https://db.example/v1"
+
+
+def test_chat_tries_9router_models_in_order(tmp_path):
+    agent, _, fallback_client = _agent(tmp_path)
+    fallback_client.chat.completions.create = AsyncMock(
+        side_effect=[Exception("first unavailable"), _response("second answer")]
+    )
+    from bot.ai.providers import FallbackProvider
+
+    provider = FallbackProvider(
+        base_url="https://router.example/v1",
+        api_key="fallback-key",
+        models=("first/model", "second/model"),
+    )
+    agent._fallback = lambda: (fallback_client, provider)
+
+    async def run():
+        response, used = await agent._chat(
+            [{"role": "user", "content": "hello"}], tools=False
+        )
+        assert response.choices[0].message.content == "second answer"
+        assert used == "fallback"
+
+    asyncio.run(run())
+    calls = fallback_client.chat.completions.create.call_args_list
+    assert [call.kwargs["model"] for call in calls] == ["first/model", "second/model"]

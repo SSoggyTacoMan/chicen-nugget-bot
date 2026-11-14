@@ -800,12 +800,20 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
             submit="Save images",
         )
     if integration == "fallback":
+        from bot.ai.providers import parse_models
+
+        models_raw = _current("ai_router_models") or _current("ai_router_model")
+        initial_models = (
+            "\n".join(parse_models(models_raw))
+            if models_raw
+            else "\n".join(settings.ai_router_models)
+        )
         return _modal(
             "setup_fallback_ai",
             "Fallback AI",
             [
                 _note(
-                    "used only when hack club ai returns a quota/payment error. 9router is text-only here; voice, images and memory search still need HCAI quota. get the key from your 9router config."
+                    "used only when hack club ai returns a quota/payment error. models are tried top to bottom. 9router is text-only here; voice, images and memory search still need HCAI quota."
                 ),
                 _input(
                     "ai_router_base_url",
@@ -814,10 +822,12 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                     max_length=300,
                 ),
                 _input(
-                    "ai_router_model",
-                    "Fallback model",
-                    initial=_current("ai_router_model", settings.ai_router_model),
-                    max_length=200,
+                    "ai_router_models",
+                    "Fallback models (in order)",
+                    placeholder="kgw/kilo-auto/free\nother/model\nbackup/model",
+                    initial=initial_models,
+                    multiline=True,
+                    max_length=1000,
                 ),
                 _input(
                     "ai_router_api_key",
@@ -1240,10 +1250,20 @@ async def on_fallback_ai_submit(ack, body, view, client) -> None:
     if not _is_admin(user_id):
         return
     values = _values(view)
-    for key in ("ai_router_base_url", "ai_router_model"):
-        raw = values.get(key, "")
-        if raw:
-            _set(key, "" if raw.strip() == "-" else raw.strip())
+    raw_base = values.get("ai_router_base_url", "")
+    if raw_base:
+        _set("ai_router_base_url", "" if raw_base.strip() == "-" else raw_base.strip())
+    raw_models = values.get("ai_router_models", "")
+    if raw_models:
+        if raw_models.strip() == "-":
+            _set("ai_router_models", "")
+        else:
+            from bot.ai.providers import parse_models
+
+            models = parse_models(raw_models)
+            if models:
+                _set("ai_router_models", ",".join(models))
+        _set("ai_router_model", "")
     api_key = values.get("ai_router_api_key", "")
     if api_key:
         _set("ai_router_api_key", "" if api_key.strip() == "-" else api_key.strip())

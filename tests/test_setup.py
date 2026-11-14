@@ -502,7 +502,7 @@ def _setup_settings(**overrides):
         imagine_fallback_model="google/gemini-2.5-flash-image",
         ai_image_cost_usd=0.04,
         ai_router_base_url="https://router.ssoggy.me/v1",
-        ai_router_model="kgw/kilo-auto/free",
+        ai_router_models=("kgw/kilo-auto/free",),
         ai_router_api_key=None,
         is_admin=lambda user_id: user_id == "U_OWNER",
     )
@@ -636,7 +636,7 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
             _modal_view(
                 {
                     "ai_router_base_url": "https://router.example/v1",
-                    "ai_router_model": "kgw/kilo-auto/free",
+                    "ai_router_models": "kgw/kilo-auto/free\nbackup/model",
                     "ai_router_api_key": "test-router-key",
                 }
             ),
@@ -697,7 +697,7 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
     )
     assert db.kv_get("config:imagine_cost_usd") == "0.06"
     assert db.kv_get("config:ai_router_base_url") == "https://router.example/v1"
-    assert db.kv_get("config:ai_router_model") == "kgw/kilo-auto/free"
+    assert db.kv_get("config:ai_router_models") == "kgw/kilo-auto/free,backup/model"
     assert db.kv_get("config:ai_router_api_key") == "test-router-key"
     assert db.kv_get("config:watch_email") == "true"
     assert db.kv_get("config:watch_github_ci") == "false"

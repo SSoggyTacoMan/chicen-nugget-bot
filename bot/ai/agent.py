@@ -138,7 +138,7 @@ class Agent:
             max_retries=1,
         )
         self._fallback_client: AsyncOpenAI | None = None
-        self._fallback_sig: tuple[str, str, str] | None = None
+        self._fallback_sig: tuple[str, str] | None = None
         self.toolbox = Toolbox(settings, db)
         self.memory = MemoryIndex(settings, self.llm)
         self._embedding_tasks: set[asyncio.Task] = set()
@@ -486,7 +486,7 @@ class Agent:
         provider = fallback_provider(self.settings, self.db)
         if provider is None:
             return None
-        signature = (provider.base_url, provider.api_key, provider.model)
+        signature = (provider.base_url, provider.api_key)
         if self._fallback_client is None or self._fallback_sig != signature:
             self._fallback_client = AsyncOpenAI(
                 api_key=provider.api_key,
@@ -513,9 +513,10 @@ class Agent:
         if self.db.kv_get(key):
             return
         self.db.kv_set(key, "1")
+        models = ", ".join(f"`{model}`" for model in provider.models)
         text = (
             "hack club ai quota is empty for today. "
-            f"i'm on the 9router fallback (`{provider.model}`), so replies may be slower "
+            f"i'm on the 9router fallback ({models}), so replies may be slower "
             "and tool use is off. it resets at 00:00 UTC. voice, images and memory "
             "search need HCAI quota."
         )
@@ -556,7 +557,7 @@ class Agent:
         else:
             quota_error = RuntimeError("hack club ai quota is empty")
         if fallback is not None:
-            providers.append(("fallback", fallback[0], [fallback[1].model]))
+            providers.append(("fallback", fallback[0], list(fallback[1].models)))
         if not providers:
             raise QuotaExhausted(
                 "hack club ai quota is empty", "no fallback key configured"

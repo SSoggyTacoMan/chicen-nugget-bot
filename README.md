@@ -249,7 +249,7 @@ mcp servers aren't wired yet. for now it's these presets plus the built-in googl
 
 ### quota fallback
 
-when hack club ai returns a quota or payment error, the bot marks the UTC day as empty, DMs the owner once, and switches to the 9router fallback (`AI_ROUTER_MODEL`, default `kgw/kilo-auto/free`). the fallback is text-only with tools disabled, so voice, images and memory search still need HCAI quota. it resets at 00:00 UTC.
+when hack club ai returns a quota or payment error, the bot marks the UTC day as empty, DMs the owner once, and switches to the 9router fallback. fallback models are tried in order; set them with `/nugget setup fallback` or `AI_ROUTER_MODELS` (comma-separated, default `kgw/kilo-auto/free`). the fallback is text-only with tools disabled, so voice, images and memory search still need HCAI quota. it resets at 00:00 UTC.
 
 set the 9router key with `/nugget setup fallback` or `AI_ROUTER_API_KEY`. the key is stored in SQLite, never in chat or git.
 

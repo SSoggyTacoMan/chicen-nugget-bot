@@ -89,7 +89,8 @@ async def cmd_doctor(ack, command, client) -> None:
 
         router = fallback_provider(settings, runtime.db)
         if router:
-            lines.append(f"{ok} fallback ai: `{router.model}` at `{router.base_url}`")
+            models = ", ".join(f"`{model}`" for model in router.models)
+            lines.append(f"{ok} fallback ai: {models} at `{router.base_url}`")
         else:
             lines.append(f"{warn} fallback ai: not configured")
         if runtime.db and runtime.db.kv_get(f"quota:hcai:{utc_day()}"):

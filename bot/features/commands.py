@@ -460,13 +460,17 @@ async def cmd_budget(ack, command, client) -> None:
         f"• models: `{settings.ai_model}` → `{settings.ai_fallback_model or 'no fallback'}`",
     ]
     router = fallback_provider(settings, runtime.db)
+    router_models = (
+        ", ".join(f"`{model}`" for model in router.models)
+        if router
+        else "not configured"
+    )
     if runtime.db.kv_get(f"quota:hcai:{utc_day()}"):
         lines.append(
-            f"• hacai quota: *empty today* · 9router fallback "
-            f"`{router.model if router else 'not configured'}`"
+            f"• hacai quota: *empty today* · 9router fallback {router_models}"
         )
     elif router:
-        lines.append(f"• 9router fallback: `{router.model}` ready")
+        lines.append(f"• 9router fallback: {router_models} ready")
     else:
         lines.append("• 9router fallback: not configured (`/nugget setup fallback`)")
 

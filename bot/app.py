@@ -188,7 +188,11 @@ async def run() -> None:
             router = fallback_provider(settings, db)
             logger.info(
                 "9router fallback %s",
-                f"{router.model} at {router.base_url}" if router else "off (no key)",
+                (
+                    f"{', '.join(router.models)} at {router.base_url}"
+                    if router
+                    else "off (no key)"
+                ),
             )
             status = runtime.budget.status()
             global_stop = (

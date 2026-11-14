@@ -112,7 +112,7 @@ class Settings:
     transcribe_fallback_model: str | None
     ai_router_base_url: str
     ai_router_api_key: str | None
-    ai_router_model: str
+    ai_router_models: tuple[str, ...]
     ai_max_tokens: int
     ai_history_limit: int
     ai_channels: frozenset[str]
@@ -247,7 +247,7 @@ class Settings:
         return bool(
             self.ai_router_api_key
             and self.ai_router_base_url
-            and self.ai_router_model
+            and self.ai_router_models
         )
 
     @property
@@ -342,6 +342,10 @@ def load_settings() -> Settings:
         else data_dir / "browser"
     )
     quiet_start, quiet_end = _quiet_hours("QUIET_HOURS")
+    router_models = _list("AI_ROUTER_MODELS")
+    if not router_models:
+        legacy = _str("AI_ROUTER_MODEL")
+        router_models = (legacy,) if legacy else ("kgw/kilo-auto/free",)
 
     return Settings(
         slack_bot_token=_str("SLACK_BOT_TOKEN"),
@@ -387,8 +391,7 @@ def load_settings() -> Settings:
         )
         or "https://router.ssoggy.me/v1",
         ai_router_api_key=_str("AI_ROUTER_API_KEY") or None,
-        ai_router_model=_str("AI_ROUTER_MODEL", "kgw/kilo-auto/free")
-        or "kgw/kilo-auto/free",
+        ai_router_models=router_models,
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),
         ai_history_limit=_int("AI_HISTORY_LIMIT", 24),
         ai_channels=frozenset(_list("AI_CHANNELS", ("*",))),
