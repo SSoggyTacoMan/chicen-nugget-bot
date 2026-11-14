@@ -749,6 +749,19 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                     initial=str(cfg.max_chars),
                     max_length=4,
                 ),
+                _input(
+                    "transcribe_model",
+                    "Transcription model",
+                    initial=_current("transcribe_model", settings.transcribe_model),
+                ),
+                _input(
+                    "transcribe_fallback_model",
+                    "Transcription fallback",
+                    initial=_current(
+                        "transcribe_fallback_model",
+                        settings.transcribe_fallback_model or "",
+                    ),
+                ),
             ],
             submit="Save voice",
         )
@@ -1159,6 +1172,10 @@ async def on_voice_submit(ack, body, view, client) -> None:
     raw_chars = values.get("tts_max_chars", "")
     if raw_chars.isdigit():
         _set("tts_max_chars", str(max(50, min(1500, int(raw_chars)))))
+    for key in ("transcribe_model", "transcribe_fallback_model"):
+        raw = values.get(key, "")
+        if raw:
+            _set(key, "" if raw.strip() == "-" else raw.strip())
     await _dm(client, user_id or "", "saved voice settings.")
 
 

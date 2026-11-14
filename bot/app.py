@@ -177,6 +177,13 @@ async def run() -> None:
                 image_cfg.model or "off",
                 f" (fallback {image_cfg.fallback})" if image_cfg.fallback else "",
             )
+            logger.info(
+                "transcription model %s%s",
+                settings.transcribe_model or "off",
+                f" (fallback {settings.transcribe_fallback_model})"
+                if settings.transcribe_fallback_model
+                else "",
+            )
             status = runtime.budget.status()
             global_stop = (
                 f"${settings.ai_daily_budget_usd:.2f}/day"

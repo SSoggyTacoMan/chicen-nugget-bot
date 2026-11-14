@@ -490,6 +490,8 @@ def _setup_settings(**overrides):
         tts_style=None,
         tts_max_chars=500,
         tts_cost_per_1k_chars=0.02,
+        transcribe_model="openai/gpt-audio",
+        transcribe_fallback_model="google/gemini-2.5-flash",
         imagine_model="google/gemini-3.1-flash-image",
         imagine_fallback_model="google/gemini-2.5-flash-image",
         ai_image_cost_usd=0.04,
@@ -583,6 +585,10 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
                         },
                         "tts_style": {"value": {"value": "speak slowly"}},
                         "tts_max_chars": {"value": {"value": "20"}},
+                        "transcribe_model": {"value": {"value": "openai/gpt-audio"}},
+                        "transcribe_fallback_model": {
+                            "value": {"value": "google/gemini-2.5-flash"}
+                        },
                     }
                 }
             },
@@ -657,6 +663,11 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
     assert db.kv_get("config:tts_language") == "French"
     assert db.kv_get("config:tts_style") == "speak slowly"
     assert db.kv_get("config:tts_max_chars") == "50"
+    assert db.kv_get("config:transcribe_model") == "openai/gpt-audio"
+    assert (
+        db.kv_get("config:transcribe_fallback_model")
+        == "google/gemini-2.5-flash"
+    )
     assert db.kv_get("config:imagine_model") == "google/gemini-nano-banana-2.1"
     assert (
         db.kv_get("config:imagine_fallback_model")

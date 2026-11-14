@@ -2597,3 +2597,80 @@ def test_transcribe_slack_audio_falls_back_to_chat_audio():
         assert result == ["fallback transcript"]
 
     asyncio.run(run())
+
+
+def test_transcribe_slack_audio_uses_gpt_audio_on_hackclub():
+    import asyncio
+    from unittest.mock import MagicMock, patch
+
+    import httpx
+
+    from bot.slack_api import transcribe_slack_audio
+
+    settings = MagicMock()
+    settings.ai_api_key = "test-api-key"
+    settings.ai_base_url = "https://ai.hackclub.com/proxy/v1"
+    settings.ai_model = "bot-model"
+    settings.transcribe_model = "openai/gpt-audio"
+    settings.transcribe_fallback_model = "google/gemini-2.5-flash"
+    event = {
+        "files": [
+            {
+                "name": "voice.wav",
+                "mimetype": "audio/wav",
+                "filetype": "wav",
+                "url_private_download": "https://slack.com/files/voice.wav",
+                "size": 1024,
+            }
+        ]
+    }
+    seen: list[str] = []
+
+    async def fake_audio_http_get(self, url, *args, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.content = b"RIFFfakeaudiobytes"
+        return resp
+
+    async def fake_audio_http_post(self, url, *args, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        if url.endswith("/audio/transcriptions"):
+            raise AssertionError("hack club should skip whisper")
+        seen.append(kwargs["json"]["model"])
+        resp.status_code = 200
+        resp.json.return_value = {
+            "choices": [{"message": {"content": "gpt audio transcript"}}]
+        }
+        return resp
+
+    async def run():
+        with (
+            patch.object(httpx.AsyncClient, "get", new=fake_audio_http_get),
+            patch.object(httpx.AsyncClient, "post", new=fake_audio_http_post),
+        ):
+            result = await transcribe_slack_audio(event, "xoxb-token", settings)
+        assert result == ["gpt audio transcript"]
+
+    asyncio.run(run())
+    assert seen == ["openai/gpt-audio"]
+
+
+def test_transcription_cost_is_recorded(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from bot import slack_api
+    from bot.runtime import runtime
+
+    budget = MagicMock()
+    monkeypatch.setattr(runtime, "budget", budget)
+    slack_api._record_transcription_cost(
+        "openai/gpt-audio",
+        {"user": "U123"},
+        {"cost_details": {"upstream_inference_cost": 0.0036}},
+    )
+    budget.record.assert_called_once_with(
+        kind="transcription",
+        model="openai/gpt-audio",
+        user_id="U123",
+        cost_usd=0.0036,
+    )

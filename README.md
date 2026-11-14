@@ -147,13 +147,13 @@ the panel also has AI & behavior, voice, images, watchers, storage and auto-join
 
 ### voice
 
-incoming slack voice messages are transcribed automatically when you DM the bot, mention it, or reply in a thread. it uses `whisper-1` and falls back to a multimodal model, so make sure the app has `files:read` and is reinstalled after manifest changes.
+incoming slack voice messages are transcribed automatically when you DM the bot, mention it, or reply in a thread. it uses `openai/gpt-audio` first, then `google/gemini-2.5-flash`. whisper is only tried on non-hack-club endpoints because the proxy doesn't expose `/audio/transcriptions`. make sure the app has `files:read` and is reinstalled after manifest changes.
 
 outgoing voice uses qwen3 tts through hack club ai's replicate proxy:
 
 - `/nugget speak <text>` generates a clip and posts it.
 - asking the bot to "say it out loud" or "send a voice message" uses the `speak` tool.
-- `/nugget setup voice` changes the preset voice, language, style and character cap.
+- `/nugget setup voice` changes the preset voice, language, style, character cap and transcription models.
 - clips post as playable audio files. slack's public api does not expose native voice-note bubbles for apps.
 
 if tts is off, check `TTS_MODEL`, `AI_API_KEY` and `TTS_VOICE`.

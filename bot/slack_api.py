@@ -509,6 +509,31 @@ def _slack_file_transcript(f: dict[str, Any]) -> str:
     return ""
 
 
+def _record_transcription_cost(
+    model: str, event: dict[str, Any], usage: dict[str, Any]
+) -> None:
+    """Attribute the provider's reported transcription cost to the sender."""
+    details = usage.get("cost_details") or {}
+    try:
+        cost = float(details.get("upstream_inference_cost") or usage.get("cost") or 0)
+    except (TypeError, ValueError):
+        cost = 0.0
+    if cost <= 0:
+        return
+    from bot.runtime import runtime
+
+    if runtime.budget is None:
+        return
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    user_id = str(event.get("user") or message.get("user") or "")
+    runtime.budget.record(
+        kind="transcription",
+        model=model,
+        user_id=user_id,
+        cost_usd=cost,
+    )
+
+
 async def transcribe_slack_audio(
     event: dict[str, Any],
     token: str,
@@ -570,26 +595,37 @@ async def transcribe_slack_audio(
             ai_headers = {"Authorization": f"Bearer {api_key}"}
 
             text = ""
-            # 1. Standard OpenAI /audio/transcriptions endpoint
-            try:
-                tr_resp = await http.post(
-                    f"{base_url}/audio/transcriptions",
-                    headers=ai_headers,
-                    files={"file": (name, audio_bytes, mimetype)},
-                    data={"model": "whisper-1"},
-                )
-                if tr_resp.status_code == 200:
-                    text = str(tr_resp.json().get("text") or "").strip()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("whisper transcription attempt failed: %s", exc)
+            # 1. Dedicated transcription endpoint. Hack Club AI does not expose
+            # /audio/transcriptions, so skip the guaranteed 404 there.
+            if "hackclub.com" not in base_url.lower():
+                try:
+                    tr_resp = await http.post(
+                        f"{base_url}/audio/transcriptions",
+                        headers=ai_headers,
+                        files={"file": (name, audio_bytes, mimetype)},
+                        data={"model": "whisper-1"},
+                    )
+                    if tr_resp.status_code == 200:
+                        text = str(tr_resp.json().get("text") or "").strip()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("whisper transcription attempt failed: %s", exc)
 
-            # 2. Fallback to multimodal chat/completions input_audio
+            # 2. Fallback to multimodal chat/completions input_audio. GPT Audio
+            # is the most accurate model on HCAI; Gemini is the cheaper backup.
             if not text:
                 b64 = base64.b64encode(audio_bytes).decode("ascii")
                 fmt = ftype if ftype in {"wav", "mp3", "ogg", "m4a", "webm", "flac", "aac"} else "mp3"
-                for model_id in ("google/gemini-2.5-flash", getattr(settings, "ai_model", "")):
-                    if not model_id:
-                        continue
+                candidates = [
+                    getattr(settings, "transcribe_model", None),
+                    getattr(settings, "transcribe_fallback_model", None),
+                    "google/gemini-2.5-flash",
+                    getattr(settings, "ai_model", None),
+                ]
+                models: list[str] = []
+                for candidate in candidates:
+                    if isinstance(candidate, str) and candidate.strip() and candidate not in models:
+                        models.append(candidate.strip())
+                for model_id in models:
                     try:
                         chat_resp = await http.post(
                             f"{base_url}/chat/completions",
@@ -615,10 +651,19 @@ async def transcribe_slack_audio(
                             },
                         )
                         if chat_resp.status_code == 200:
-                            choices = chat_resp.json().get("choices") or []
+                            data = chat_resp.json()
+                            choices = data.get("choices") or []
                             if choices:
-                                text = str((choices[0].get("message") or {}).get("content") or "").strip()
+                                text = str(
+                                    (choices[0].get("message") or {}).get("content")
+                                    or ""
+                                ).strip()
                                 if text:
+                                    _record_transcription_cost(
+                                        model_id,
+                                        event,
+                                        data.get("usage") or {},
+                                    )
                                     break
                     except Exception as exc:  # noqa: BLE001
                         logger.debug("chat audio transcription fallback failed (%s): %s", model_id, exc)

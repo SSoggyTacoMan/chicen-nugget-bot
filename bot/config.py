@@ -108,6 +108,8 @@ class Settings:
     ai_code_model: str | None
     ai_code_fallback_model: str | None
     ai_embedding_model: str | None
+    transcribe_model: str
+    transcribe_fallback_model: str | None
     ai_max_tokens: int
     ai_history_limit: int
     ai_channels: frozenset[str]
@@ -363,6 +365,12 @@ def load_settings() -> Settings:
         )
         or "openai/gpt-5.5",
         ai_embedding_model=_str("AI_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b") or None,
+        transcribe_model=_str("TRANSCRIBE_MODEL", "openai/gpt-audio")
+        or "openai/gpt-audio",
+        transcribe_fallback_model=_str(
+            "TRANSCRIBE_FALLBACK_MODEL", "google/gemini-2.5-flash"
+        )
+        or "google/gemini-2.5-flash",
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),
         ai_history_limit=_int("AI_HISTORY_LIMIT", 24),
         ai_channels=frozenset(_list("AI_CHANNELS", ("*",))),
