@@ -167,6 +167,45 @@ def test_github_write_pushes_sandbox_branch(tmp_path):
     asyncio.run(run())
 
 
+def test_github_write_push_guard_rejects_secrets_and_large_files(tmp_path):
+    from types import SimpleNamespace
+
+    from bot.ai.sandbox import ExecResult
+
+    class FakeManager:
+        def get(self, name):
+            return SimpleNamespace(path=tmp_path, repo="owner/repo")
+
+        def write(self, *args, **kwargs):
+            pass
+
+        async def exec(self, name, command, **kwargs):
+            if command.startswith("git status"):
+                return ExecResult(0, "?? .env\n M app.py\n", "", False, ".")
+            return ExecResult(0, "", "", False, ".")
+
+    box = Toolbox(MagicMock())
+    ctx = _ctx()
+    ctx.db.kv_get.return_value = ""
+    box._sandbox = MagicMock(return_value=FakeManager())
+
+    async def run():
+        result = await box.execute(
+            "github_write",
+            {
+                "action": "push_branch",
+                "sandbox": "box",
+                "branch": "boi/fix",
+                "confirm": True,
+            },
+            ctx,
+        )
+        assert "refusing to push" in result
+        assert ".env" in result
+
+    asyncio.run(run())
+
+
 def test_github_write_requires_dm_and_token():
     box = Toolbox(MagicMock())
     channel_ctx = _ctx(is_dm=False)

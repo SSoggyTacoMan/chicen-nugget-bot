@@ -6,7 +6,7 @@ import asyncio
 import logging
 from datetime import datetime
 
-from bot.features import recaps
+from bot.features import recaps, watchers
 from bot.features.stats import build_digest
 from bot.reminders import create_reminder, dm_target
 from bot.runtime import runtime
@@ -44,6 +44,7 @@ async def _loop() -> None:
     while True:
         try:
             await _tick()
+            await watchers.tick()
         except asyncio.CancelledError:
             raise
         except Exception:

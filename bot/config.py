@@ -107,6 +107,7 @@ class Settings:
     ai_assistant_fallback_model: str | None
     ai_code_model: str | None
     ai_code_fallback_model: str | None
+    ai_embedding_model: str | None
     ai_max_tokens: int
     ai_history_limit: int
     ai_channels: frozenset[str]
@@ -142,6 +143,8 @@ class Settings:
     browser_max_sessions: int
     browser_idle_timeout: int
     browser_dir: Path
+    github_watch: bool
+    github_watch_interval: int
     imagine_model: str | None
     imagine_fallback_model: str | None
     image_user_ids: frozenset[str]
@@ -332,6 +335,7 @@ def load_settings() -> Settings:
         ) or None,
         ai_code_model=_str("AI_CODE_MODEL") or None,
         ai_code_fallback_model=_str("AI_CODE_FALLBACK_MODEL") or None,
+        ai_embedding_model=_str("AI_EMBEDDING_MODEL", "qwen3-embedding-8b") or None,
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),
         ai_history_limit=_int("AI_HISTORY_LIMIT", 24),
         ai_channels=frozenset(_list("AI_CHANNELS", ("*",))),
@@ -367,6 +371,8 @@ def load_settings() -> Settings:
         browser_max_sessions=max(1, _int("BROWSER_MAX_SESSIONS", 2)),
         browser_idle_timeout=max(60, _int("BROWSER_IDLE_TIMEOUT", 900)),
         browser_dir=browser_dir,
+        github_watch=_bool("WATCH_GITHUB_CI", False),
+        github_watch_interval=max(60, _int("WATCH_GITHUB_CI_INTERVAL", 120)),
         imagine_model=_str("IMAGINE_MODEL", "google/gemini-3.1-flash-image") or None,
         imagine_fallback_model=_str("IMAGINE_FALLBACK_MODEL", "google/gemini-2.5-flash-image") or None,
         image_user_ids=frozenset(_list("IMAGE_ALLOWED_USER_IDS")),

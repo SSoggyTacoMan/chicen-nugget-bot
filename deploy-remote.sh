@@ -33,6 +33,7 @@ ssh "${SSH_OPTS[@]}" "${REMOTE}" "cd ${REMOTE_DIR} && \
   .venv/bin/pip install -q --upgrade pip && \
   .venv/bin/pip install -q -r requirements.txt && \
   (.venv/bin/playwright install chromium >/dev/null 2>&1 || true) && \
+  if [ -f data/bot.db ]; then cp data/bot.db data/bot.db.bak.$(date +%s); ls -1t data/bot.db.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f; fi && \
   echo DEPS_OK && \$PY --version"
 
 echo "==> configuring systemd service"

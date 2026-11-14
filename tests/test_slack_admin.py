@@ -300,6 +300,26 @@ def test_toolbox_hides_unconnected_integrations():
         assert present in names
 
 
+def test_doctor_rejects_non_admins():
+    from bot.features.doctor import cmd_doctor
+    from bot.runtime import runtime
+
+    old_settings = runtime.settings
+    runtime.settings = MagicMock()
+    runtime.settings.is_admin.return_value = False
+    client = AsyncMock()
+
+    async def run():
+        with patch("bot.features.doctor.post_ephemeral", AsyncMock()) as mock_post:
+            await cmd_doctor(AsyncMock(), {"channel_id": "C1", "user_id": "U1"}, client)
+        assert "admin only" in mock_post.call_args[0][3]
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.settings = old_settings
+
+
 def test_owner_posting_checks_granted_customize_scope():
     from bot import slack_api
 

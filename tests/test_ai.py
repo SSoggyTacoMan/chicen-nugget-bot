@@ -119,6 +119,7 @@ def test_toolbox_has_expanded_tools():
     assert "manage_channel" in names
     assert "api_request" in names
     assert "browser" in names
+    assert "search_memory" in names
 
 
 def test_owner_only_tools_guard():

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import struct
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -72,6 +73,21 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conversation, id);
+
+CREATE TABLE IF NOT EXISTS memory_vectors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL,
+    conversation TEXT NOT NULL,
+    role TEXT NOT NULL,
+    user_id TEXT,
+    text TEXT NOT NULL,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (message_id, model)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_model ON memory_vectors (model, id);
 
 CREATE TABLE IF NOT EXISTS notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,6 +250,10 @@ class Database:
     def kv_get(self, key: str) -> str | None:
         row = self._one("SELECT value FROM kv WHERE key = ?", (key,))
         return row["value"] if row else None
+
+    def integrity_check(self) -> str:
+        row = self._one("PRAGMA integrity_check")
+        return str((row or {}).get("integrity_check") or "unknown")
 
     def kv_set(self, key: str, value: str) -> None:
         self._write(
@@ -439,8 +459,8 @@ class Database:
         )
 
     # --------------------------------------------------------------- messages
-    def add_message(self, conversation: str, role: str, user_id: str | None, text: str) -> None:
-        self._write(
+    def add_message(self, conversation: str, role: str, user_id: str | None, text: str) -> int:
+        return self._write(
             "INSERT INTO messages (conversation, role, user_id, text, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (conversation, role, user_id, text, iso()),
@@ -464,16 +484,110 @@ class Database:
         )
 
     def clear_history(self, conversation: str) -> int:
-        return self._execute("DELETE FROM messages WHERE conversation = ?", (conversation,))
+        self._execute(
+            "DELETE FROM memory_vectors WHERE conversation = ?", (conversation,)
+        )
+        return self._execute(
+            "DELETE FROM messages WHERE conversation = ?", (conversation,)
+        )
 
     def clear_history_prefix(self, prefix: str) -> int:
+        self._execute(
+            "DELETE FROM memory_vectors WHERE conversation LIKE ?",
+            (prefix + "%",),
+        )
         return self._execute(
             "DELETE FROM messages WHERE conversation LIKE ?",
             (prefix + "%",),
         )
 
     def clear_all_history(self) -> int:
+        self._execute("DELETE FROM memory_vectors")
         return self._execute("DELETE FROM messages")
+
+    def add_memory_vector(
+        self,
+        message_id: int,
+        conversation: str,
+        role: str,
+        user_id: str | None,
+        text: str,
+        model: str,
+        vector: list[float],
+    ) -> int:
+        if not vector:
+            return 0
+        blob = struct.pack(f"{len(vector)}f", *[float(value) for value in vector])
+        return self._write(
+            "INSERT OR IGNORE INTO memory_vectors "
+            "(message_id, conversation, role, user_id, text, model, dimensions, vector, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                message_id,
+                conversation,
+                role,
+                user_id,
+                text,
+                model,
+                len(vector),
+                sqlite3.Binary(blob),
+                iso(),
+            ),
+        )
+
+    def search_memory_vectors(
+        self, model: str, vector: list[float], limit: int = 8
+    ) -> list[dict[str, Any]]:
+        if not vector:
+            return []
+        rows = self._all(
+            "SELECT message_id, conversation, role, user_id, text, dimensions, vector, created_at "
+            "FROM memory_vectors WHERE model = ? ORDER BY id DESC LIMIT 5000",
+            (model,),
+        )
+        query_norm = sum(value * value for value in vector) ** 0.5
+        if query_norm <= 0:
+            return []
+        scored: list[dict[str, Any]] = []
+        for row in rows:
+            dimensions = int(row.get("dimensions") or 0)
+            if dimensions != len(vector):
+                continue
+            raw = row.get("vector")
+            if not isinstance(raw, (bytes, bytearray)):
+                continue
+            try:
+                stored = struct.unpack(f"{dimensions}f", raw)
+            except struct.error:
+                continue
+            norm = sum(value * value for value in stored) ** 0.5
+            if norm <= 0:
+                continue
+            dot = sum(a * b for a, b in zip(vector, stored))
+            scored.append(
+                {
+                    "message_id": row.get("message_id"),
+                    "conversation": row.get("conversation"),
+                    "role": row.get("role"),
+                    "user_id": row.get("user_id"),
+                    "text": row.get("text"),
+                    "created_at": row.get("created_at"),
+                    "score": dot / (query_norm * norm),
+                }
+            )
+        scored.sort(key=lambda item: item["score"], reverse=True)
+        return scored[: max(1, limit)]
+
+    def messages_without_vectors(
+        self, model: str, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        return self._all(
+            "SELECT m.id, m.conversation, m.role, m.user_id, m.text, m.created_at "
+            "FROM messages m LEFT JOIN memory_vectors v "
+            "ON v.message_id = m.id AND v.model = ? "
+            "WHERE v.id IS NULL ORDER BY m.id DESC LIMIT ?",
+            (model, max(1, limit)),
+        )
 
     # ------------------------------------------------------------------ notes
     def add_note(self, user_id: str, text: str) -> int:

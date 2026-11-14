@@ -79,6 +79,7 @@ HELP = """*{bot}: everything lives under `/nugget`*
 
 *developer & admin*
 • `/nugget sysinfo` - admin: host diagnostics (RAM, CPU, disk, commit)
+• `/nugget doctor` - admin: scopes, boi, ai, browser, sandbox, github, sqlite
 • `/nugget config` - view or change runtime settings (recaps, tier2, admin_channel, welcomer, etc.)
 • `/nugget stats` - admin workspace stats
 • `/nugget digest` - admin: daily digest now

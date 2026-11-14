@@ -31,6 +31,8 @@ MAX_UPLOAD_BYTES = 20_000_000
 MAX_LIST_ENTRIES = 200
 MAX_SEARCH_MATCHES = 60
 MAX_COMMAND_CHARS = 8_000
+JOB_TTL_SECONDS = 7 * 24 * 60 * 60
+MAX_JOB_LOG_BYTES = 2_000_000
 
 # Noise that makes repo search useless. `.git` is always skipped.
 SKIP_DIRS = {
@@ -173,7 +175,7 @@ class SandboxManager:
         self._ensure()
         infos: list[SandboxInfo] = []
         for entry in self.root.iterdir():
-            if entry.name == ".meta" or entry.is_symlink() or not entry.is_dir():
+            if entry.name in {".meta", ".jobs"} or entry.is_symlink() or not entry.is_dir():
                 continue
             try:
                 resolved = entry.resolve()
@@ -219,6 +221,7 @@ class SandboxManager:
         if path.is_symlink():
             raise SandboxError("refusing to delete a symlinked sandbox")
         shutil.rmtree(path)
+        self._delete_jobs(name)
         try:
             self._meta_path(name).unlink()
         except OSError:
@@ -340,6 +343,72 @@ class SandboxManager:
             raise SandboxError("invalid job id")
         return self._jobs_root() / f"{job_id}.json"
 
+    def _job_files(self, job_id: str) -> list[Path]:
+        jobs = self._jobs_root()
+        return [
+            jobs / f"{job_id}.json",
+            jobs / f"{job_id}.log",
+            jobs / f"{job_id}.exit",
+            jobs / f"{job_id}.sh",
+        ]
+
+    def _cleanup_jobs(self) -> None:
+        jobs = self._jobs_root()
+        cutoff = time.time() - JOB_TTL_SECONDS
+        for path in jobs.glob("*.json"):
+            meta: dict[str, Any] = {}
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    meta = loaded
+                started = float(meta.get("started") or 0)
+            except (OSError, ValueError):
+                started = 0
+            if started >= cutoff:
+                continue
+            pid = int(meta.get("pid") or 0)
+            if pid > 0:
+                try:
+                    os.kill(pid, 0)
+                    continue
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    continue
+            for item in self._job_files(path.stem):
+                try:
+                    item.unlink()
+                except OSError:
+                    pass
+
+    def _trim_job_log(self, log: Path) -> None:
+        try:
+            if log.stat().st_size <= MAX_JOB_LOG_BYTES:
+                return
+            with log.open("rb+") as handle:
+                handle.seek(-MAX_JOB_LOG_BYTES, 2)
+                tail = handle.read()
+                handle.seek(0)
+                handle.truncate()
+                handle.write(tail)
+        except OSError:
+            pass
+
+    def _delete_jobs(self, sandbox: str) -> None:
+        jobs = self._jobs_root()
+        for path in jobs.glob("*.json"):
+            try:
+                meta = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(meta, dict) or meta.get("sandbox") != sandbox:
+                continue
+            for item in self._job_files(path.stem):
+                try:
+                    item.unlink()
+                except OSError:
+                    pass
+
     async def start_job(
         self,
         name: str,
@@ -361,6 +430,7 @@ class SandboxManager:
                 raise SandboxError(f"cwd is not a directory: {cwd}")
         timeout_s = max(5, min(int(timeout or self.exec_timeout), self.max_exec_timeout))
 
+        self._cleanup_jobs()
         jobs = self._jobs_root()
         job_id = uuid.uuid4().hex[:12]
         script = jobs / f"{job_id}.sh"
@@ -462,6 +532,7 @@ class SandboxManager:
                 running = True
         tail = ""
         if log.is_file():
+            self._trim_job_log(log)
             with log.open("rb") as handle:
                 handle.seek(max(0, log.stat().st_size - 4000))
                 tail = handle.read().decode("utf-8", errors="replace").strip()
@@ -475,20 +546,39 @@ class SandboxManager:
         }
 
     def list_jobs(self, name: str | None = None) -> list[dict[str, Any]]:
+        self._cleanup_jobs()
         jobs: list[dict[str, Any]] = []
         for path in self._jobs_root().glob("*.json"):
             try:
                 meta = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
+            if not isinstance(meta, dict):
+                continue
             if name and meta.get("sandbox") != name:
                 continue
+            job_id = meta.get("job_id") or path.stem
+            exit_file = self._jobs_root() / f"{job_id}.exit"
+            pid = int(meta.get("pid") or 0)
+            if exit_file.is_file():
+                status = "done"
+            elif pid > 0:
+                try:
+                    os.kill(pid, 0)
+                    status = "running"
+                except ProcessLookupError:
+                    status = "orphaned"
+                except PermissionError:
+                    status = "running"
+            else:
+                status = "stopped"
             jobs.append(
                 {
-                    "job_id": meta.get("job_id") or path.stem,
+                    "job_id": job_id,
                     "sandbox": meta.get("sandbox"),
                     "command": (meta.get("command") or "")[:200],
                     "started": meta.get("started"),
+                    "status": status,
                 }
             )
         jobs.sort(key=lambda item: float(item.get("started") or 0), reverse=True)

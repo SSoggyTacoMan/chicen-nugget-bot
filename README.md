@@ -14,6 +14,7 @@ they share one sqlite database, one toolbox and one memory. socket mode only, so
 - reaction shortcuts and message shortcuts for research, explain and thread summaries
 - persistent code sandboxes with file edits, background jobs, uploads and branch push
 - github reads and writes: prs, issues, comments, reviews, close/reopen, merge and push
+- optional GitHub Actions watcher that DMs you when a run fails
 - headless chromium for pages that need javascript, clicking or forms
 - optional api tokens for vercel, cloudflare, notion, linear, sentry, resend, openai and anthropic
 - separate bot, boi and code models, with fallbacks and runtime switching
@@ -169,6 +170,8 @@ for writes, use a fine-grained token with **contents: write**, **pull requests: 
 
 `close`, `merge` and `push_branch` require `confirm=true` and an explicit request from the owner. push blocks `main`/`master`, never force-pushes, and sends the token through `git askpass` so it doesn't land in `.git/config` or logs.
 
+set `WATCH_GITHUB_CI=true` and the scheduler will DM you when a new Actions run fails in the configured repo. quiet hours and `PROACTIVE_DAILY_CAP` apply.
+
 ### email
 
 imap works with gmail and fastmail app passwords. use an app password, not your account password.
@@ -191,6 +194,12 @@ mcp servers aren't wired yet. for now it's these presets plus the built-in googl
 
 `AI_CODE_MODEL` is optional. when set, a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
 
+semantic memory uses `AI_EMBEDDING_MODEL` (default `qwen3-embedding-8b`). new turns are embedded in the background, and `search_memory` searches by meaning. to index old history once:
+
+```bash
+.venv/bin/python scripts/backfill_memory.py 1000
+```
+
 change them at runtime:
 
 ```text
@@ -209,7 +218,7 @@ change them at runtime:
 | personal | `google_calendar`, `gmail`, `google_drive`, `mac_control`, `check_emails`, `daily_briefing`, `api_request` |
 | setup | `integration_setup` |
 | workspace | `flaron`, `pending_access_requests`, `get_stats`, `bot_config` |
-| memory | `remember`, `recall`, `forget`, `manage_tasks`, `remind`, `list_reminders`, `cancel_reminder` |
+| memory | `remember`, `recall`, `forget`, `search_memory`, `manage_tasks`, `remind`, `list_reminders`, `cancel_reminder` |
 | media | `generate_image`, `make_chart`, `make_deck` |
 | misc | `get_weather`, `public_holidays`, `roll_dice`, `dog_fact`, `taco_recipe`, `urban_dict`, `nugget_fact` |
 
@@ -251,6 +260,7 @@ when the change is ready and github is connected:
 
 ```text
 boi: sandbox diff name=widget
+boi: github_write action=push_branch sandbox=widget branch=boi/fix-login preview=true
 boi: github_write action=push_branch sandbox=widget branch=boi/fix-login message="fix login redirect" confirm=true open_pr=true title="Fix login redirect"
 ```
 
@@ -354,6 +364,7 @@ everything lives under `/nugget`. `/nugget help` is the full list.
 | `/nugget summarize [n]` | ai catch-up for this channel | ai channels |
 | `/nugget imagine <prompt>` | generate an image | admin |
 | `/nugget config` | runtime settings | admin |
+| `/nugget doctor` | scopes, tokens, sqlite, browser, github, sandbox | admin |
 | `/nugget setup` | connect integrations | admin |
 
 reminder syntax:
@@ -406,8 +417,8 @@ editing `.env` directly on the server is temporary. the next deploy rewrites it 
 
 ## data and security
 
-- storage: one sqlite file at `data/bot.db`. conversation history, notes, reminders, polls, access requests, runtime settings and a key/value store.
-- retention: history is per conversation and trimmed to `AI_HISTORY_LIMIT` turns. `/nugget forget` wipes stored ai memory. delete `data/bot.db` to reset everything.
+- storage: one sqlite file at `data/bot.db`. conversation history, notes, reminders, polls, access requests, runtime settings, semantic memory vectors and a key/value store.
+- retention: history is per conversation and trimmed to `AI_HISTORY_LIMIT` turns. `/nugget forget` wipes stored ai memory, including semantic vectors. delete `data/bot.db` to reset everything.
 - logs: stdout plus rotating files in `logs/`. tool arguments and reply text can show up in debug logs.
 - secrets: tokens go through slack modals. never paste a token into chat. if you do, rotate it.
 - prompt injection: web pages, files and slack messages are untrusted data, never instructions.

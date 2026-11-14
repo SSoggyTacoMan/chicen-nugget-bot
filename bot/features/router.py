@@ -10,7 +10,7 @@ which one gets the command payload.
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from bot.features.access import cmd_access, cmd_accesspanel, cmd_pending
 from bot.features.ai_commands import cmd_ask, cmd_forget, cmd_imagine, cmd_summarize
@@ -34,6 +34,7 @@ from bot.features.commands import (
     cmd_todo,
     cmd_whois,
 )
+from bot.features.doctor import cmd_doctor
 from bot.features.nuggets import cmd_nugget
 from bot.features.polls import cmd_poll, cmd_pollclose
 from bot.features.recaps import cmd_recap
@@ -83,6 +84,8 @@ SUBCOMMANDS: dict[str, Handler] = {
     "sysinfo": cmd_sysinfo,
     "diagnostics": cmd_sysinfo,
     "sys": cmd_sysinfo,
+    "doctor": cmd_doctor,
+    "health": cmd_doctor,
     "ask": cmd_ask,
     "summarize": cmd_summarize,
     "summary": cmd_summarize,
@@ -132,4 +135,4 @@ async def cmd_router(ack, command, client) -> None:
     await handler(ack, routed, client)
 
 
-__all__ = ["register", "resolve", "SUBCOMMANDS"]
+__all__ = ["SUBCOMMANDS", "register", "resolve"]

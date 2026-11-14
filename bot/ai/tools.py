@@ -11,6 +11,7 @@ import base64
 import email
 import email.header
 from email.message import EmailMessage
+import fnmatch
 import html
 import imaplib
 import io
@@ -79,6 +80,21 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_RESULT = 7000
 MAX_API_BODY_BYTES = 1_000_000
 MAX_API_RESPONSE_BYTES = 5_000_000
+MAX_PUSH_FILES = 100
+MAX_PUSH_FILE_BYTES = 5_000_000
+SECRET_FILE_PATTERNS = (
+    ".env",
+    ".env.*",
+    "*.env",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "id_rsa*",
+    "id_ed25519*",
+    "credentials*",
+    "secrets*",
+)
 WEATHER_CODES = {
     0: "clear",
     1: "mainly clear",
@@ -690,6 +706,21 @@ class Toolbox:
                 [],
             ),
             tool(
+                "search_memory",
+                "Semantic search over stored conversation turns. Use this to recall decisions or details older than the current history. Owner/admin only.",
+                {
+                    "query": {
+                        "type": "string",
+                        "description": "What to remember or search for.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max matches, 1-20. Default 8.",
+                    },
+                },
+                ["query"],
+            ),
+            tool(
                 "forget",
                 "Delete a stored memory, note, or rule by id, query, or topic. Owner/admin only.",
                 {
@@ -1077,6 +1108,10 @@ class Toolbox:
                     "open_pr": {
                         "type": "boolean",
                         "description": "For push_branch: open a PR after pushing. Default false.",
+                    },
+                    "preview": {
+                        "type": "boolean",
+                        "description": "For push_branch: return status and diff stat without committing or pushing.",
                     },
                     "repo": {
                         "type": "string",
@@ -1506,6 +1541,8 @@ class Toolbox:
             hidden.add("browser")
         if not getattr(settings, "imagine_model", None):
             hidden.add("generate_image")
+        if not isinstance(getattr(settings, "ai_embedding_model", None), str) or not settings.ai_embedding_model:
+            hidden.add("search_memory")
         if not (
             getattr(settings, "slack_user_token", None)
             or getattr(settings, "slack_web_token", None)
@@ -2304,6 +2341,37 @@ class Toolbox:
         ):
             return "nothing found in memory."
         return _json(payload)
+
+    async def _tool_search_memory(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can search semantic memory")
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return _error("query is required")
+        if runtime.agent is None or not runtime.agent.memory.enabled:
+            return _error(
+                "semantic memory is off. set AI_EMBEDDING_MODEL and restart."
+            )
+        try:
+            limit = max(1, min(20, int(args.get("limit") or 8)))
+        except (TypeError, ValueError):
+            limit = 8
+        results = await runtime.agent.memory.search(ctx.db, query, limit)
+        if not results:
+            return "nothing matching that in semantic memory."
+        return _json(
+            [
+                {
+                    "conversation": item.get("conversation"),
+                    "role": item.get("role"),
+                    "user": item.get("user_id"),
+                    "text": (item.get("text") or "")[:800],
+                    "at": item.get("created_at"),
+                    "score": round(float(item.get("score") or 0), 4),
+                }
+                for item in results
+            ]
+        )
 
     async def _tool_forget(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
@@ -3922,10 +3990,6 @@ class Toolbox:
         repo: str,
         token: str,
     ) -> str:
-        if not bool(args.get("confirm", False)):
-            return _error(
-                "pushing a branch needs confirm=true and an explicit owner request"
-            )
         sandbox_name = str(args.get("sandbox") or "").strip()
         branch = str(args.get("branch") or "").strip()
         if not sandbox_name:
@@ -3956,6 +4020,44 @@ class Toolbox:
             return _error(f"sandbox {sandbox_name!r} is not a git repository")
         if not status.stdout.strip():
             return _error(f"no changes to commit in sandbox {sandbox_name!r}")
+
+        paths: list[str] = []
+        for line in status.stdout.splitlines():
+            path = line[3:].strip()
+            if " -> " in path:
+                path = path.rsplit(" -> ", 1)[1].strip()
+            path = path.strip('"')
+            if path:
+                paths.append(path)
+        bad: list[str] = []
+        for path in paths:
+            lowered = path.lower()
+            if any(fnmatch.fnmatch(lowered, pattern) for pattern in SECRET_FILE_PATTERNS):
+                bad.append(f"{path} (secret-looking)")
+                continue
+            full = info.path / path
+            try:
+                if full.is_file() and full.stat().st_size > MAX_PUSH_FILE_BYTES:
+                    bad.append(f"{path} (over {MAX_PUSH_FILE_BYTES} bytes)")
+            except OSError:
+                bad.append(f"{path} (could not stat)")
+        if len(paths) > MAX_PUSH_FILES:
+            bad.append(f"too many files ({len(paths)} > {MAX_PUSH_FILES})")
+        if bad:
+            return _error("refusing to push: " + ", ".join(bad[:8]))
+
+        diff = await manager.exec(sandbox_name, "git diff --stat", timeout=30)
+        preview = {
+            "sandbox": sandbox_name,
+            "repo": repo,
+            "branch": branch,
+            "files": paths[:MAX_PUSH_FILES],
+            "status": status.stdout[:6000],
+            "diff_stat": diff.stdout[:3000],
+            "hint": "call again with confirm=true to commit, push and optionally open the PR",
+        }
+        if bool(args.get("preview", False)) or not bool(args.get("confirm", False)):
+            return _json(preview)
 
         commit = await manager.exec(
             sandbox_name,

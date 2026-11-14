@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from bot import integrations
 from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens
+from bot.ai.memory import MemoryIndex
 from bot.ai.tools import Toolbox, ToolContext, format_now, get_user_memory_prompt
 from bot.config import Settings
 from bot.db import Database
@@ -34,6 +37,12 @@ CODE_TOOLS = {
     "inspect_code",
     "clone_repo",
 }
+CODE_HINT_RE = re.compile(
+    r"\b(?:pr|pull\s+request|merge|commit|branch|repo(?:sitory)?|sandbox|"
+    r"patch|diff|review|deploy|build|test(?:s|ing)?|debug|fix|refactor|"
+    r"typescript|python|javascript|docker|github)\b",
+    re.IGNORECASE,
+)
 
 
 def sync_prompt_digest(db: Database, template: str) -> int:
@@ -98,8 +107,34 @@ class Agent:
             max_retries=1,
         )
         self.toolbox = Toolbox(settings, db)
+        self.memory = MemoryIndex(settings, self.llm)
+        self._embedding_tasks: set[asyncio.Task] = set()
         self.system_template = PROMPT_PATH.read_text(encoding="utf-8")
         sync_prompt_digest(self.db, self.system_template)
+
+    def _remember(
+        self,
+        *,
+        message_id: int,
+        conversation: str,
+        role: str,
+        user_id: str | None,
+        text: str,
+    ) -> None:
+        if not self.memory.enabled or not message_id:
+            return
+        task = asyncio.create_task(
+            self.memory.remember(
+                self.db,
+                message_id=message_id,
+                conversation=conversation,
+                role=role,
+                user_id=user_id,
+                text=text,
+            )
+        )
+        self._embedding_tasks.add(task)
+        task.add_done_callback(self._embedding_tasks.discard)
 
     async def reply(
         self,
@@ -194,10 +229,24 @@ class Agent:
                 user_content.append({"type": "image_url", "image_url": {"url": img}})
             messages.append({"role": "user", "content": user_content})
             stored_text = text if not images else f"{text} [image attached]".strip()
-            self.db.add_message(conversation, "user", user_id, stored_text)
+            message_id = self.db.add_message(conversation, "user", user_id, stored_text)
+            self._remember(
+                message_id=message_id,
+                conversation=conversation,
+                role="user",
+                user_id=user_id,
+                text=stored_text,
+            )
         else:
             messages.append({"role": "user", "content": text[: self.settings.ai_max_context_chars]})
-            self.db.add_message(conversation, "user", user_id, text)
+            message_id = self.db.add_message(conversation, "user", user_id, text)
+            self._remember(
+                message_id=message_id,
+                conversation=conversation,
+                role="user",
+                user_id=user_id,
+                text=text,
+            )
 
         ctx = ToolContext(
             db=self.db,
@@ -217,7 +266,7 @@ class Agent:
         )
 
         answer = ""
-        code_mode = False
+        code_mode = bool(CODE_HINT_RE.search(text or ""))
         try:
             for _ in range(MAX_TOOL_ROUNDS):
                 response = await self._chat(
@@ -279,7 +328,16 @@ class Agent:
         answer = format_mrkdwn(answer)
 
         if answer and answer.strip() not in {"[NO_REPLY]", "NO_REPLY"}:
-            self.db.add_message(conversation, "assistant", self.bot_user_id, answer)
+            message_id = self.db.add_message(
+                conversation, "assistant", self.bot_user_id, answer
+            )
+            self._remember(
+                message_id=message_id,
+                conversation=conversation,
+                role="assistant",
+                user_id=None,
+                text=answer,
+            )
             return answer
         if trigger == "mention" and not answer:
             return "hmm, i blanked. try again?"

@@ -10,7 +10,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+      - name: compile
+        run: python -m compileall -q bot main.py
+      - name: lint
+        run: ruff check bot tests --select E9,F63,F7,F82
+      - name: tests
+        run: pytest -q
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -116,6 +138,10 @@ jobs:
               .venv/bin/pip install -q --upgrade pip
               .venv/bin/pip install -q -r requirements.txt
               .venv/bin/playwright install chromium >/dev/null 2>&1 || true
+              if [ -f data/bot.db ]; then
+                cp data/bot.db data/bot.db.bak.$(date +%s)
+                ls -1t data/bot.db.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+              fi
               systemctl restart $SERVICE_NAME
               sleep 3
               systemctl --no-pager --full status $SERVICE_NAME | head -15
