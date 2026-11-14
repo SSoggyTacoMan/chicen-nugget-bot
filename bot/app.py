@@ -161,6 +161,12 @@ async def run() -> None:
                 if settings.ai_assistant_fallback_model
                 else "",
             )
+            logger.info(
+                "code model %s; tts %s with voice %s",
+                settings.ai_code_model or "same as chat",
+                settings.tts_model or "off",
+                settings.tts_voice,
+            )
             status = runtime.budget.status()
             global_stop = (
                 f"${settings.ai_daily_budget_usd:.2f}/day"
