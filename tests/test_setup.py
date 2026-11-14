@@ -428,7 +428,7 @@ def test_setup_panel_has_advanced_areas():
         if block.get("type") == "actions"
         for element in block.get("elements") or []
     }
-    assert {"ai", "watchers", "storage", "channels"} <= values
+    assert {"ai", "voice", "watchers", "storage", "channels"} <= values
 
 
 def test_secret_config_writes_are_blocked(tmp_path):
@@ -484,6 +484,12 @@ def _setup_settings(**overrides):
         sandbox_ttl_days=30,
         storage_min_free_gb=2.0,
         auto_join_channels=("C1",),
+        tts_model="qwen/qwen3-tts",
+        tts_voice="Serena",
+        tts_language="English",
+        tts_style=None,
+        tts_max_chars=500,
+        tts_cost_per_1k_chars=0.02,
         is_admin=lambda user_id: user_id == "U_OWNER",
     )
     for key, value in overrides.items():
@@ -512,20 +518,23 @@ def test_advanced_config_modals_reflect_overrides(tmp_path, monkeypatch):
     db.kv_set("config:ai_model", "custom-model")
     db.kv_set("config:watch_urls", "https://example.com")
     db.kv_set("config:auto_join_channels", "C9")
+    db.kv_set("config:tts_voice", "Aiden")
     monkeypatch.setattr(runtime, "db", db)
     monkeypatch.setattr(runtime, "settings", _setup_settings())
 
     modals = {
         name: setup._config_modal(name)
-        for name in ("ai", "watchers", "storage", "channels")
+        for name in ("ai", "voice", "watchers", "storage", "channels")
     }
     assert modals["ai"]["callback_id"] == "setup_ai"
+    assert modals["voice"]["callback_id"] == "setup_voice"
     assert modals["watchers"]["callback_id"] == "setup_watchers"
     assert modals["storage"]["callback_id"] == "setup_storage"
     assert modals["channels"]["callback_id"] == "setup_channels"
     assert "custom-model" in json.dumps(modals["ai"])
     assert "https://example.com" in json.dumps(modals["watchers"])
     assert "C9" in json.dumps(modals["channels"])
+    assert "Aiden" in json.dumps(modals["voice"])
     assert setup._config_modal("unknown") is None
 
 
@@ -553,6 +562,26 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
                 {"ai_model": "new-model", "ai_code_model": "-"},
                 {"behavior": ["recaps", "ambient_ai"]},
             ),
+            client,
+        )
+        await setup.on_voice_submit(
+            AsyncMock(),
+            body,
+            {
+                "state": {
+                    "values": {
+                        "tts_model": {"value": {"value": "qwen/qwen3-tts"}},
+                        "tts_voice": {
+                            "value": {"selected_option": {"value": "Aiden"}}
+                        },
+                        "tts_language": {
+                            "value": {"selected_option": {"value": "French"}}
+                        },
+                        "tts_style": {"value": {"value": "speak slowly"}},
+                        "tts_max_chars": {"value": {"value": "20"}},
+                    }
+                }
+            },
             client,
         )
         await setup.on_watchers_submit(
@@ -593,6 +622,11 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
     assert db.kv_get("config:recaps") == "true"
     assert db.kv_get("config:ambient_ai") == "true"
     assert db.kv_get("config:welcomer") == "false"
+    assert db.kv_get("config:tts_model") == "qwen/qwen3-tts"
+    assert db.kv_get("config:tts_voice") == "Aiden"
+    assert db.kv_get("config:tts_language") == "French"
+    assert db.kv_get("config:tts_style") == "speak slowly"
+    assert db.kv_get("config:tts_max_chars") == "50"
     assert db.kv_get("config:watch_email") == "true"
     assert db.kv_get("config:watch_github_ci") == "false"
     assert db.kv_get("config:watch_urls") == "https://status.example.com"
@@ -642,3 +676,12 @@ def test_watcher_status_prefers_db_over_env_urls(tmp_path):
     db.kv_set("config:watch_github_ci", "false")
     db.kv_set("config:watch_urls", "https://a.example,https://b.example")
     assert integrations._active_watchers(db, settings) == ["urls (2)"]
+
+
+def test_speak_route_and_help():
+    from bot.features import router
+
+    handler, rest = router.resolve("speak hello there")
+    assert handler is router.cmd_speak
+    assert rest == "hello there"
+    assert router.resolve("tts hi")[0] is router.cmd_speak

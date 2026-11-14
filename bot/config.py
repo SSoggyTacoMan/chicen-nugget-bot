@@ -159,6 +159,12 @@ class Settings:
     imagine_model: str | None
     imagine_fallback_model: str | None
     image_user_ids: frozenset[str]
+    tts_model: str | None
+    tts_voice: str
+    tts_language: str
+    tts_style: str | None
+    tts_max_chars: int
+    tts_cost_per_1k_chars: float
 
     # welcomer
     watched_channel_ids: frozenset[str]
@@ -234,6 +240,10 @@ class Settings:
     @property
     def imagine_enabled(self) -> bool:
         return bool(self.ai_api_key and self.imagine_model)
+
+    @property
+    def tts_enabled(self) -> bool:
+        return bool(self.ai_api_key and self.tts_model)
 
     @property
     def welcomer_enabled(self) -> bool:
@@ -400,6 +410,12 @@ def load_settings() -> Settings:
         imagine_model=_str("IMAGINE_MODEL", "google/gemini-3.1-flash-image") or None,
         imagine_fallback_model=_str("IMAGINE_FALLBACK_MODEL", "google/gemini-2.5-flash-image") or None,
         image_user_ids=frozenset(_list("IMAGE_ALLOWED_USER_IDS")),
+        tts_model=_str("TTS_MODEL", "qwen/qwen3-tts") or None,
+        tts_voice=_str("TTS_VOICE", "Serena") or "Serena",
+        tts_language=_str("TTS_LANGUAGE", "English") or "English",
+        tts_style=_str("TTS_STYLE") or None,
+        tts_max_chars=max(50, min(1500, _int("TTS_MAX_CHARS", 500))),
+        tts_cost_per_1k_chars=max(0.0, _float("TTS_COST_PER_1K_CHARS", 0.02)),
         watched_channel_ids=frozenset(_list("WATCHED_CHANNEL_IDS")),
         welcome_public=_bool("WELCOME_PUBLIC", True),
         welcome_message=_str(

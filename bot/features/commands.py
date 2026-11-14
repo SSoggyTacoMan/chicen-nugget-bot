@@ -69,6 +69,7 @@ HELP = """*{bot}: everything lives under `/nugget`*
 • `/nugget ask <question>` - one-shot ai answer
 • `/nugget summarize [n]` - ai catch-up for this channel
 • `/nugget imagine <prompt> [--wide|--tall|--ratio 4:3]` - image generation
+• `/nugget speak <text>` - generate a voice clip with qwen3 tts
 • `/nugget imageaccess [list|add @user|remove @user]` - admin: who may make images
 • `/nugget budget` - admin: today's ai spend and limits
 • `/nugget memory [status|search|backfill]` - admin: semantic memory

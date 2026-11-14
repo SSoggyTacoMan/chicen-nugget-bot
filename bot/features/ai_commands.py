@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from bot import image_access
+from bot.ai import tts
 from bot.ai.limits import user_retry_after
 from bot.runtime import runtime
 from bot.slack_api import error_code, post, post_ephemeral
@@ -296,6 +297,98 @@ async def cmd_imagine(ack, command, client) -> None:
         else:
             hint = "check my logs for the slack error."
         await post_ephemeral(client, channel, user, f"couldn't upload the image (`{code}`). {hint}")
+
+
+# ------------------------------------------------------------------- /speak
+async def cmd_speak(ack, command, client) -> None:
+    await ack()
+    channel = command["channel_id"]
+    user = command["user_id"]
+    text = (command.get("text") or "").strip()
+    settings = runtime.settings
+    cfg = tts.voice_config(settings, runtime.db)
+    if not settings.ai_api_key or not cfg.model:
+        await post_ephemeral(
+            client,
+            channel,
+            user,
+            "voice is off. set `TTS_MODEL` and `AI_API_KEY`, then restart me.",
+        )
+        return
+    if not await _ai_ready(client, channel, user):
+        return
+    if not _ai_allowed(channel):
+        await post_ephemeral(
+            client,
+            channel,
+            user,
+            "i'm not allowed to use ai in this channel. add it to `AI_CHANNELS` first.",
+        )
+        return
+    if not text:
+        await post_ephemeral(
+            client,
+            channel,
+            user,
+            f"usage: `/nugget speak <text>` (up to {cfg.max_chars} characters)",
+        )
+        return
+    retry = user_retry_after(user)
+    if retry:
+        await post_ephemeral(client, channel, user, f"slow down a lil, try again in {retry}s :3")
+        return
+
+    clipped = tts.clip_text(text, cfg.max_chars)
+    await post_ephemeral(client, channel, user, ":microphone: recording…")
+    try:
+        audio, _, extension = await tts.synthesize(clipped, settings, db=runtime.db)
+    except tts.TTSError as exc:
+        await post_ephemeral(client, channel, user, _tts_error(exc))
+        return
+    except Exception:
+        logger.exception("tts failed")
+        await post_ephemeral(client, channel, user, "voice generation broke. check my logs?")
+        return
+
+    if runtime.budget is not None:
+        runtime.budget.record(
+            kind="tts",
+            model=cfg.model,
+            user_id=user,
+            cost_usd=len(clipped) / 1000 * cfg.cost_per_1k_chars,
+        )
+
+    try:
+        await client.files_upload_v2(
+            channel=channel,
+            file=audio,
+            filename=f"nugget-{int(time.time())}.{extension}",
+            title="voice clip",
+            initial_comment=f":microphone: <@{user}>",
+        )
+    except Exception as exc:  # noqa: BLE001
+        code = error_code(exc)
+        if code == "missing_scope":
+            hint = "i need the `files:write` bot scope: reinstall the app from the manifest."
+        elif code == "not_in_channel":
+            hint = "invite me to this channel first."
+        else:
+            hint = "check my logs for the slack error."
+        await post_ephemeral(client, channel, user, f"couldn't upload the voice clip (`{code}`). {hint}")
+
+
+def _tts_error(exc: tts.TTSError) -> str:
+    if exc.status == 401:
+        return "my ai key got rejected. check `AI_API_KEY`."
+    if exc.status == 402:
+        return "my hack club ai daily budget is used up. it resets at 00:00 UTC."
+    if exc.status == 429:
+        return "the voice model is rate limited right now. give it a minute."
+    if exc.status in {0, 500, 502, 503, 504}:
+        return "the voice model is having a moment. try again in a bit."
+    if exc.status == 400:
+        return "the voice model rejected that text. try shorter, simpler text."
+    return f"voice generation failed (`{exc.status}`). try again?"
 
 
 def _parse_imagine(text: str) -> tuple[str, str]:

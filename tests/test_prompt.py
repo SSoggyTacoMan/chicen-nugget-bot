@@ -20,6 +20,7 @@ REQUIRED = {
     "ai_code_model",
     "ai_code_fallback_model",
     "imagine_model",
+    "tts_model",
     "gate_model",
     "repo_url",
     "bot_user_id",

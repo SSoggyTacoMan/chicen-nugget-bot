@@ -10,7 +10,6 @@ import asyncio
 import base64
 import email
 import email.header
-from email.message import EmailMessage
 import fnmatch
 import html
 import imaplib
@@ -26,6 +25,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,7 @@ import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
 from bot import image_access, integrations
+from bot.ai import tts
 from bot.ai.browser import BrowserError, BrowserManager
 from bot.ai.sandbox import SandboxError, SandboxManager, safe_env, safe_name
 from bot.api_keys import (
@@ -911,6 +912,29 @@ class Toolbox:
                 ["prompt"],
             ),
             tool(
+                "speak",
+                "Generate a voice clip with Qwen3 TTS and upload it to the current Slack conversation. Use when someone asks for a voice message, audio, or to say something out loud. Owner/admin only.",
+                {
+                    "text": {
+                        "type": "string",
+                        "description": "Exact words to speak. Keep it conversational and under the configured character cap.",
+                    },
+                    "voice": {
+                        "type": "string",
+                        "description": "Optional preset voice: Serena, Aiden, Dylan, Eric, Ono_anna, Ryan, Sohee, Uncle_fu or Vivian. Defaults to setup.",
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Optional language: auto, English, Chinese, Japanese, Korean, French, German, Italian, Spanish, Portuguese or Russian.",
+                    },
+                    "style": {
+                        "type": "string",
+                        "description": "Optional style instruction, e.g. 'speak slowly and calmly' or 'excited tone'.",
+                    },
+                },
+                ["text"],
+            ),
+            tool(
                 "make_chart",
                 "Render a chart from data as a PNG and upload it to the conversation. Owner/admin only.",
                 {
@@ -1530,6 +1554,7 @@ class Toolbox:
                             "apis",
                             "slack",
                             "ai",
+                            "voice",
                             "watchers",
                             "storage",
                             "channels",
@@ -1552,6 +1577,8 @@ class Toolbox:
             hidden.add("browser")
         if not getattr(settings, "imagine_model", None):
             hidden.add("generate_image")
+        if not tts.voice_config(settings, self.db).model:
+            hidden.add("speak")
         if not isinstance(getattr(settings, "ai_embedding_model", None), str) or not settings.ai_embedding_model:
             hidden.add("search_memory")
         if not (
@@ -3408,6 +3435,59 @@ class Toolbox:
             return f"image successfully generated and uploaded to conversation for: {prompt}"
         except Exception as exc:  # noqa: BLE001
             return _error(f"failed to upload image: {exc}")
+
+    async def _tool_speak(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can make voice clips")
+        settings = ctx.settings
+        cfg = tts.voice_config(settings, ctx.db)
+        if not settings.ai_api_key or not cfg.model:
+            return _error("voice is not configured; set TTS_MODEL and AI_API_KEY")
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return _error("text is required")
+        if not ctx.channel_id:
+            return _error("no channel or dm context to post the voice clip to")
+
+        clipped = tts.clip_text(text, cfg.max_chars)
+        voice = str(args.get("voice") or "").strip() or None
+        language = str(args.get("language") or "").strip() or None
+        style = str(args.get("style") or "").strip() or None
+        from bot.features.ai_commands import _tts_error
+
+        try:
+            audio, _, extension = await tts.synthesize(
+                clipped,
+                settings,
+                voice=voice,
+                language=language,
+                style=style,
+                db=ctx.db,
+            )
+        except tts.TTSError as exc:
+            return _error(_tts_error(exc))
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"voice generation failed: {exc}")
+
+        if runtime.budget is not None:
+            runtime.budget.record(
+                kind="tts",
+                model=cfg.model,
+                user_id=ctx.user_id,
+                cost_usd=len(clipped) / 1000 * cfg.cost_per_1k_chars,
+            )
+
+        try:
+            await ctx.client.files_upload_v2(
+                channel=ctx.channel_id,
+                thread_ts=ctx.thread_ts,
+                file=audio,
+                filename=f"nugget-{int(time.time())}.{extension}",
+                title="voice clip",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"failed to upload voice clip: {exc}")
+        return f"voice clip uploaded ({len(clipped)} characters spoken)"
 
     async def _tool_make_chart(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
@@ -5593,7 +5673,7 @@ class Toolbox:
         if integration and integration not in integrations.SETUP_AREAS:
             areas = ", ".join(name for name, _ in integrations.SETUP_INTEGRATIONS)
             return _error(
-                f"integration must be {areas}, ai, watchers, storage, channels, or all"
+                f"integration must be {areas}, ai, voice, watchers, storage, channels, or all"
             )
         blocks = integrations.setup_panel_blocks(integration or None)
         result = await post(

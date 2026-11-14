@@ -27,6 +27,7 @@ SETUP_INTEGRATIONS: tuple[tuple[str, str], ...] = (
 # SQLite overrides instead of storing credentials.
 SETUP_CONFIG_AREAS: tuple[tuple[str, str], ...] = (
     ("ai", "AI & behavior"),
+    ("voice", "Voice"),
     ("watchers", "Watchers"),
     ("storage", "Storage"),
     ("channels", "Auto-join"),
@@ -379,6 +380,7 @@ def setup_panel_blocks(requested: str | None = None) -> list[dict[str, Any]]:
         "apis": ("API keys", "Vercel, Cloudflare, Notion, Linear, Sentry"),
         "slack": ("Slack profile", "Post in your own name"),
         "ai": ("AI & behavior", "Models, recaps, ambient replies"),
+        "voice": ("Voice", "Qwen3 TTS voice, language and style"),
         "watchers": ("Watchers", "CI, notifications, email, URLs"),
         "storage": ("Storage", "Retention and cleanup"),
         "channels": ("Auto-join", "Channels to join on boot"),

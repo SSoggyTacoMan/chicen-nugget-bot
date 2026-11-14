@@ -70,6 +70,19 @@ async def cmd_doctor(ack, command, client) -> None:
     else:
         lines.append(f"{warn} ai: disabled or missing AI_API_KEY")
 
+    try:
+        from bot.ai import tts
+
+        voice = tts.voice_config(settings, runtime.db)
+        if settings.ai_enabled and voice.model:
+            lines.append(
+                f"{ok} voice: `{voice.model}` · {voice.voice}/{voice.language}"
+            )
+        else:
+            lines.append(f"{warn} voice: off")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"{warn} voice: {exc}")
+
     memory = runtime.agent.memory if runtime.agent is not None else None
     if memory is None or not memory.enabled:
         lines.append(f"{warn} memory: embeddings off")

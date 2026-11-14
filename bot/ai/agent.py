@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 from slack_sdk.web.async_client import AsyncWebClient
 
 from bot import integrations
+from bot.ai import tts
 from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens
 from bot.ai.memory import MemoryIndex
 from bot.ai.tools import Toolbox, ToolContext, format_now, get_user_memory_prompt
@@ -171,6 +172,7 @@ class Agent:
         assistant_identity = bool(self.user_client)
         bot_model, bot_fallback, assistant_model, assistant_fallback = self._model_settings()
         code_model, code_fallback = self._code_model_settings()
+        tts_model = tts.voice_config(self.settings, self.db).model or "none"
         history = self.db.history(conversation, self.settings.ai_history_limit)
         role = "owner" if user_id == self.settings.owner_user_id else "guest"
         location = await self._location(
@@ -215,6 +217,7 @@ class Agent:
             )
             .replace("{ai_code_fallback_model}", code_fallback or "none")
             .replace("{imagine_model}", self.settings.imagine_model or "none")
+            .replace("{tts_model}", tts_model)
             .replace("{gate_model}", self.settings.ai_gate_model or "none")
             .replace("{repo_url}", self.settings.repo_url)
         )

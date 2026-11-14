@@ -48,7 +48,7 @@ INTEGRATION_NAMES: dict[str, str] = {
     "apis": "API keys",
     "slack": "your Slack profile",
 }
-CONFIG_NAMES = {"ai", "watchers", "storage", "channels"}
+CONFIG_NAMES = {"ai", "voice", "watchers", "storage", "channels"}
 
 
 def register(app) -> None:
@@ -61,6 +61,7 @@ def register(app) -> None:
     app.view("setup_email")(on_email_submit)
     app.view("setup_apis")(on_apis_submit)
     app.view("setup_ai")(on_ai_submit)
+    app.view("setup_voice")(on_voice_submit)
     app.view("setup_watchers")(on_watchers_submit)
     app.view("setup_storage")(on_storage_submit)
     app.view("setup_channels")(on_channels_submit)
@@ -179,6 +180,41 @@ def _checked(view: dict[str, Any], block_id: str) -> set[str]:
         for item in (element.get("selected_options") or [])
         if item.get("value")
     }
+
+
+def _select(
+    block_id: str,
+    label: str,
+    options: list[tuple[str, str]],
+    selected: str,
+) -> dict[str, Any]:
+    elements = [
+        {"text": {"type": "plain_text", "text": text}, "value": value}
+        for value, text in options
+    ]
+    element: dict[str, Any] = {
+        "type": "static_select",
+        "action_id": "value",
+        "options": elements,
+    }
+    for item in elements:
+        if item["value"] == selected:
+            element["initial_option"] = item
+            break
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "optional": True,
+        "label": {"type": "plain_text", "text": label},
+        "element": element,
+    }
+
+
+def _selected(view: dict[str, Any], block_id: str) -> str:
+    values = (view.get("state") or {}).get("values") or {}
+    element = ((values.get(block_id) or {}).get("value") or {})
+    selected = element.get("selected_option") or {}
+    return str(selected.get("value") or "")
 
 
 def _current(key: str, default: str = "") -> str:
@@ -346,6 +382,7 @@ def _usage() -> str:
         "• `/nugget setup mac` - companion bridge\n"
         "• `/nugget setup slack` - posting in your name (optional native token)\n"
         "• `/nugget setup ai` - models and behavior toggles\n"
+        "• `/nugget setup voice` - qwen3 tts voice, language and style\n"
         "• `/nugget setup watchers` - CI, notifications, email, URLs\n"
         "• `/nugget setup storage` - retention and cleanup\n"
         "• `/nugget setup channels` - auto-join public channels\n"
@@ -383,7 +420,7 @@ async def on_setup_open(ack, body, client) -> None:
                 await _dm(client, user_id or "", f"couldn't send the auth link: {message}")
             return
         view = _google_credentials_modal()
-    elif integration in {"ai", "watchers", "storage", "channels"}:
+    elif integration in {"ai", "voice", "watchers", "storage", "channels"}:
         view = _config_modal(integration)
     else:
         view = _integration_modal(integration)
@@ -668,6 +705,50 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                 ),
             ],
             submit="Save AI",
+        )
+    if integration == "voice":
+        from bot.ai import tts
+
+        cfg = tts.voice_config(settings, runtime.db)
+        return _modal(
+            "setup_voice",
+            "Voice",
+            [
+                _note(
+                    "qwen3 tts through hack club ai. `/nugget speak` and the speak tool use these defaults. leave a field blank to keep it, or enter `-` to fall back to env."
+                ),
+                _input(
+                    "tts_model",
+                    "TTS model",
+                    initial=cfg.model,
+                ),
+                _select(
+                    "tts_voice",
+                    "Voice",
+                    list(tts.VOICES),
+                    cfg.voice,
+                ),
+                _select(
+                    "tts_language",
+                    "Language",
+                    list(tts.LANGUAGES),
+                    cfg.language,
+                ),
+                _input(
+                    "tts_style",
+                    "Style instruction",
+                    placeholder="speak slowly and calmly",
+                    initial=cfg.style,
+                    max_length=200,
+                ),
+                _input(
+                    "tts_max_chars",
+                    "Max characters",
+                    initial=str(cfg.max_chars),
+                    max_length=4,
+                ),
+            ],
+            submit="Save voice",
         )
     if integration == "watchers":
         from bot.features.watchers import watcher_config
@@ -1019,6 +1100,32 @@ async def on_ai_submit(ack, body, view, client) -> None:
     for key in ("recaps", "thread_followups", "ambient_ai", "welcomer", "personal_updates"):
         _set(key, "true" if key in checked else "false")
     await _dm(client, user_id or "", "saved AI and behavior settings.")
+
+
+async def on_voice_submit(ack, body, view, client) -> None:
+    await ack()
+    user_id = (body.get("user") or {}).get("id")
+    if not _is_admin(user_id):
+        return
+    from bot.ai import tts
+
+    values = _values(view)
+    raw_model = values.get("tts_model", "")
+    if raw_model:
+        _set("tts_model", "" if raw_model.strip() == "-" else raw_model.strip())
+    raw_style = values.get("tts_style", "")
+    if raw_style:
+        _set("tts_style", "" if raw_style.strip() == "-" else raw_style.strip())
+    voice = _selected(view, "tts_voice")
+    if voice in {value for value, _ in tts.VOICES}:
+        _set("tts_voice", voice)
+    language = _selected(view, "tts_language")
+    if language in {value for value, _ in tts.LANGUAGES}:
+        _set("tts_language", language)
+    raw_chars = values.get("tts_max_chars", "")
+    if raw_chars.isdigit():
+        _set("tts_max_chars", str(max(50, min(1500, int(raw_chars)))))
+    await _dm(client, user_id or "", "saved voice settings.")
 
 
 async def on_watchers_submit(ack, body, view, client) -> None:

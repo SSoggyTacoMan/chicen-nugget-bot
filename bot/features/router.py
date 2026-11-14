@@ -13,7 +13,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from bot.features.access import cmd_access, cmd_accesspanel, cmd_pending
-from bot.features.ai_commands import cmd_ask, cmd_forget, cmd_imagine, cmd_summarize
+from bot.features.ai_commands import (
+    cmd_ask,
+    cmd_forget,
+    cmd_imagine,
+    cmd_speak,
+    cmd_summarize,
+)
 from bot.features.commands import (
     cmd_accounts,
     cmd_budget,
@@ -96,6 +102,9 @@ SUBCOMMANDS: dict[str, Handler] = {
     "forget": cmd_forget,
     "memory": cmd_memory,
     "imagine": cmd_imagine,
+    "speak": cmd_speak,
+    "say": cmd_speak,
+    "tts": cmd_speak,
     "imageaccess": cmd_imageaccess,
     "images": cmd_imageaccess,
     "pinggroup": cmd_pinggroup,

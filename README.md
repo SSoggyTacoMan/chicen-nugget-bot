@@ -132,6 +132,7 @@ run `/nugget setup`, or ask the bot to open the setup panel. secrets go into sla
 | email (imap) | `/nugget setup email` |
 | api keys | `/nugget setup apis` |
 | ai and behavior | `/nugget setup ai` |
+| voice | `/nugget setup voice` |
 | watchers | `/nugget setup watchers` |
 | storage | `/nugget setup storage` |
 | auto-join channels | `/nugget setup channels` |
@@ -141,7 +142,20 @@ run `/nugget setup`, or ask the bot to open the setup panel. secrets go into sla
 
 settings land in sqlite (`data/bot.db`) and override env values. env stays as a fallback for fresh deploys and ci.
 
-the panel also has AI & behavior, watchers, storage and auto-join. those write runtime settings instead of requiring an env edit.
+the panel also has AI & behavior, voice, watchers, storage and auto-join. those write runtime settings instead of requiring an env edit.
+
+### voice
+
+incoming slack voice messages are transcribed automatically when you DM the bot, mention it, or reply in a thread. it uses `whisper-1` and falls back to a multimodal model, so make sure the app has `files:read` and is reinstalled after manifest changes.
+
+outgoing voice uses qwen3 tts through hack club ai's replicate proxy:
+
+- `/nugget speak <text>` generates a clip and posts it.
+- asking the bot to "say it out loud" or "send a voice message" uses the `speak` tool.
+- `/nugget setup voice` changes the preset voice, language, style and character cap.
+- clips post as playable audio files. slack's public api does not expose native voice-note bubbles for apps.
+
+if tts is off, check `TTS_MODEL`, `AI_API_KEY` and `TTS_VOICE`.
 
 ### google
 
@@ -401,6 +415,7 @@ everything lives under `/nugget`. `/nugget help` is the full list.
 | `/nugget ask <question>` | one-shot ai answer | ai channels |
 | `/nugget summarize [n]` | ai catch-up for this channel | ai channels |
 | `/nugget imagine <prompt>` | generate an image | admin |
+| `/nugget speak <text>` | generate a qwen3 voice clip | admin |
 | `/nugget config` | runtime settings | admin |
 | `/nugget memory` | status, search or backfill semantic memory | admin |
 | `/nugget storage` | data usage, free disk, optional prune | admin |
