@@ -630,6 +630,11 @@ async def _handle_channel(
     prefix = "mpim" if event.get("channel_type") == "mpim" else "ch"
     conversation = f"{prefix}:{channel}:{root_ts}"
     message_ts = event.get("ts")
+    reply_thread_ts = (
+        None
+        if event.get("channel_type") == "mpim" and not event.get("thread_ts")
+        else root_ts
+    )
 
     if message_ts and trigger in {"mention", "mpim_mention", "named", "thread_followup"}:
         await react(client, channel, message_ts, "eyes")
@@ -641,7 +646,7 @@ async def _handle_channel(
                 user_id=user_id,
                 text=text,
                 channel_id=channel,
-                thread_ts=root_ts,
+                thread_ts=reply_thread_ts,
                 is_dm=False,
                 is_mpim=event.get("channel_type") == "mpim",
                 trigger=trigger,
@@ -651,7 +656,7 @@ async def _handle_channel(
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return False
         for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
-            await post(client, channel, chunk, thread_ts=root_ts)
+            await post(client, channel, chunk, thread_ts=reply_thread_ts)
         runtime.db.mark_thread(channel, root_ts, owner="bot")
         posted = True
     except Exception:
@@ -660,7 +665,7 @@ async def _handle_channel(
             client,
             channel,
             "something broke while i was thinking. check my logs?",
-            thread_ts=root_ts,
+            thread_ts=reply_thread_ts,
         )
         posted = True
     finally:

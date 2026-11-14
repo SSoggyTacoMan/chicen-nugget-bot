@@ -260,9 +260,11 @@ class UserGateway:
         is_mention = bool(self.user_id and f"<@{self.user_id}>" in text)
         thread_ts = event.get("thread_ts")
         root_ts = thread_ts or event.get("ts")
-        # DMs stay flat by default, but if the owner replies in a DM thread,
-        # keep the answer in that thread instead of dropping it into the main DM.
-        reply_thread_ts = root_ts if (not is_dm or thread_ts) else None
+        # DMs and group DMs stay flat unless the message itself is in a thread.
+        # Channel mentions reply in a thread.
+        reply_thread_ts = (
+            None if (is_dm or is_mpim) and not thread_ts else root_ts
+        )
 
         if not (is_dm or is_mention):
             return
