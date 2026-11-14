@@ -132,6 +132,9 @@ def test_asks_for_silence():
     assert asks_for_silence("don't answer this")
     assert asks_for_silence("shut up")
     assert asks_for_silence("can you not")
+    assert asks_for_silence("chicen nobody asked u shi")
+    assert asks_for_silence("stop replying")
+    assert asks_for_silence("why are u responding")
     assert not asks_for_silence("i dont respond to spam")
     assert not asks_for_silence("the api is down")
 

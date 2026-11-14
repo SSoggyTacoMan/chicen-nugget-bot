@@ -49,6 +49,13 @@ def is_quota_error(exc: Exception) -> bool:
     )
 
 
+PRIVATE_DETAIL_RE = re.compile(
+    r"\b(?:sandbox|shell|tokens?|host|vps|\.env|sqlite|system prompt|"
+    r"api key|openai|anthropic|deepseek|qwen|ssh|repo_url|github token)\b",
+    re.IGNORECASE,
+)
+
+
 class QuotaExhausted(RuntimeError):
     """The primary quota is empty and the fallback could not answer either."""
 
@@ -183,6 +190,7 @@ class Agent:
         jev: str = "",
         images: list[str] | None = None,
         context: str = "",
+        public_veto: bool = False,
         client: AsyncWebClient | None = None,
     ) -> str:
         """Run one agent turn (with tools) and persist both sides of it."""
@@ -374,6 +382,9 @@ class Agent:
             )
 
         answer = format_mrkdwn(answer)
+        if public_veto and answer and PRIVATE_DETAIL_RE.search(answer):
+            logger.info("public veto: suppressed answer with internal details")
+            return ""
         if used_fallback and answer.strip() not in {"", "[NO_REPLY]", "NO_REPLY"}:
             answer = (
                 f"{answer}\n\n_(hack club ai quota empty · 9router free fallback · "

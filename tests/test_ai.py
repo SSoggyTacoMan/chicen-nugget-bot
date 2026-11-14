@@ -2742,3 +2742,15 @@ def test_thread_followup_after_bot_reply_bypasses_strict_gate(tmp_path):
         runtime.gate = old_gate
         runtime.db = old_db
         runtime.settings = old_settings
+
+
+def test_public_veto_regex_catches_internal_details():
+    from bot.ai.agent import PRIVATE_DETAIL_RE
+
+    assert PRIVATE_DETAIL_RE.search(
+        "tools on the host: a shell sandbox, git, and the github token"
+    )
+    assert PRIVATE_DETAIL_RE.search("the vps runs sqlite and a .env file")
+    assert not PRIVATE_DETAIL_RE.search(
+        "run the tests before merging and check the diff"
+    )

@@ -111,7 +111,11 @@ _SILENCE_RE = re.compile(
     r"(?:^|[.!?,]\s*|\b(?:please|pls|plz)\s+)"
     r"(?:do\s+not|don't|dont)\s+(?:respond|reply|answer)\b"
     r"|\bno\s+response\b"
-    r"|\b(?:shut\s+up|stop\s+talking|quit\s+talking|be\s+quiet|can\s+you\s+not)\b",
+    r"|\b(?:shut\s+up|stop\s+talking|quit\s+talking|be\s+quiet|can\s+you\s+not)\b"
+    r"|\bnobody\s+asked\s+(?:you|u)\b"
+    r"|\b(?:stop|quit)\s+(?:replying|responding)\b"
+    r"|\b(?:don't|dont)\s+(?:talk|reply)\s+to\s+me\b"
+    r"|\bwhy\s+(?:are|r)\s+(?:you|u)\s+(?:replying|responding|talking)\b",
     re.IGNORECASE,
 )
 

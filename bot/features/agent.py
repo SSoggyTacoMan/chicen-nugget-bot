@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 import time
@@ -488,6 +489,16 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
     rows = runtime.db.history(f"{prefix}:{channel}:{thread_ts}", 8)
     bot_last = bool(rows and rows[-1].get("role") == "assistant")
     recent = await _recent_lines(client, rows)
+    thread_recent, thread_bot_last = await _thread_context(
+        client,
+        channel,
+        thread_ts,
+        event.get("ts"),
+        runtime.bot_user_id or "",
+    )
+    if thread_recent:
+        recent = thread_recent
+        bot_last = thread_bot_last
 
     bot_names = {runtime.settings.bot_name.lower(), "nugget", "chicen", "chicennugget"}
     text_lower = text.lower()
@@ -551,6 +562,7 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         trigger="thread_followup",
         jev=jev_hint,
         images=images,
+        context="\n".join(thread_recent[-4:]),
     )
     if posted:
         _last_thread[key] = time.monotonic()
@@ -572,6 +584,51 @@ async def _recent_lines(client, rows: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+async def _thread_context(
+    client,
+    channel: str,
+    thread_ts: str,
+    current_ts: str | None,
+    bot_user_id: str,
+) -> tuple[list[str], bool]:
+    """Real thread lines, including humans the bot never stored in sqlite."""
+    try:
+        response = await client.conversations_replies(
+            channel=channel, ts=thread_ts, limit=20
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("could not read thread context for %s: %s", thread_ts, exc)
+        return [], False
+    lines: list[str] = []
+    bot_last = False
+    payload = response.get("messages") if hasattr(response, "get") else None
+    if inspect.isawaitable(payload):
+        payload = await payload
+    for message in payload if isinstance(payload, list) else []:
+        if current_ts and message.get("ts") == current_ts:
+            continue
+        if message.get("subtype") in {
+            "channel_join",
+            "channel_leave",
+            "channel_topic",
+            "channel_purpose",
+            "bot_message",
+        }:
+            continue
+        text = " ".join((message.get("text") or "").split())
+        if not text:
+            continue
+        user_id = message.get("user") or ""
+        if user_id == bot_user_id:
+            lines.append(f"you: {text[:200]}")
+        elif user_id:
+            lines.append(f"{await _user_name(client, user_id)}: {text[:200]}")
+        else:
+            lines.append(text[:200])
+        bot_last = user_id == bot_user_id
+    return lines[-8:], bot_last
+
+
 async def _channel_context(
     client, channel: str, current_ts: str | None, bot_user_id: str
 ) -> tuple[list[str], bool]:
@@ -583,7 +640,10 @@ async def _channel_context(
         return [], False
     lines: list[str] = []
     bot_last = False
-    for message in reversed(response.get("messages") or []):
+    payload = response.get("messages") if hasattr(response, "get") else None
+    if inspect.isawaitable(payload):
+        payload = await payload
+    for message in reversed(payload if isinstance(payload, list) else []):
         if current_ts and message.get("ts") == current_ts:
             continue
         if message.get("subtype") in {
@@ -753,6 +813,10 @@ async def _handle_channel(
                 jev=jev,
                 images=images,
                 context=context,
+                public_veto=bool(
+                    event.get("channel_type") == "channel"
+                    and not settings.is_admin(user_id)
+                ),
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return False
