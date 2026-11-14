@@ -521,6 +521,8 @@ async def cmd_config(ack, command, client) -> None:
         "assistant_model": "ai_assistant_model",
         "boi_model": "ai_assistant_model",
         "boi_fallback_model": "ai_assistant_fallback_model",
+        "code_model": "ai_code_model",
+        "code_fallback_model": "ai_code_fallback_model",
         "google_token": "google_access_token",
         "google_auth": "google_access_token",
         "google_redirect": "google_redirect_uri",
@@ -554,6 +556,8 @@ async def cmd_config(ack, command, client) -> None:
         "ai_fallback_model",
         "ai_assistant_model",
         "ai_assistant_fallback_model",
+        "ai_code_model",
+        "ai_code_fallback_model",
         "google_access_token",
         "google_refresh_token",
         "google_client_id",
@@ -753,6 +757,8 @@ async def cmd_config(ack, command, client) -> None:
         "ai_fallback_model",
         "ai_assistant_model",
         "ai_assistant_fallback_model",
+        "ai_code_model",
+        "ai_code_fallback_model",
     }:
         await _say(
             client,

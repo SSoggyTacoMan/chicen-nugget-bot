@@ -153,6 +153,8 @@ Run `scripts/mac_companion.py` on the Mac, expose it with a Cloudflare Tunnel or
 
 A GitHub token is optional for public reads. With one you get notifications and a higher rate limit. IMAP works with Gmail and Fastmail app passwords. Use an app password, not your account password.
 
+The GitHub token also unlocks `github_write` in DMs: create PRs and issues, comment, review, close, reopen and merge. `close` and `merge` need `confirm=true` plus an explicit request from you.
+
 ### api keys
 
 `/nugget setup apis` stores optional tokens for Vercel, Cloudflare, Notion, Linear, Sentry, Resend, OpenAI and Anthropic. Boi can then call them with the generic `api_request` tool: it knows the base URL and auth header for each service, and you give it the path and body from the real API docs. Tokens live in SQLite and are never echoed back. Environment fallbacks are `VERCEL_TOKEN`, `CLOUDFLARE_API_TOKEN`, `NOTION_TOKEN`, `LINEAR_API_KEY`, `SENTRY_AUTH_TOKEN`, `RESEND_API_KEY`, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
@@ -211,7 +213,7 @@ The fallback model kicks in when the primary errors or times out. Conversation h
 | group | tools |
 |---|---|
 | web and research | `search_web`, `fetch_url`, `http_status`, `hacker_news`, `ocr_document`, `browser` |
-| code and dev | `inspect_code`, `clone_repo`, `sandbox`, `run_code`, `github_info`, `hackatime_stats`, `system_diagnostics` |
+| code and dev | `inspect_code`, `clone_repo`, `sandbox`, `run_code`, `github_info`, `github_write`, `hackatime_stats`, `system_diagnostics` |
 | slack | `search_slack`, `fetch_slack_message`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `manage_channel`, `send_dm`, `post_message`, `slack_status`, `slack_dnd`, `slack_react`, `slack_activity` |
 | personal operator | `google_calendar`, `gmail`, `google_drive`, `mac_control`, `check_emails`, `daily_briefing`, `hackatime_stats`, `api_request` |
 | setup | `integration_setup` |
@@ -475,6 +477,8 @@ AI:
 | `AI_FALLBACK_MODEL` | `anthropic/claude-haiku-5.5` | bot app fallback |
 | `AI_ASSISTANT_MODEL` | `anthropic/claude-sonnet-5` | Boi model |
 | `AI_ASSISTANT_FALLBACK_MODEL` | `anthropic/claude-haiku-5.5` | Boi fallback |
+| `AI_CODE_MODEL` | none | stronger model for sandbox, GitHub writes, browser and API turns |
+| `AI_CODE_FALLBACK_MODEL` | none | code model fallback |
 | `AI_MAX_TOKENS` | `1200` | max reply length |
 | `AI_HISTORY_LIMIT` | `24` | turns loaded per reply |
 | `AI_MAX_CONTEXT_CHARS` | `24000` | trim older turns above this size |
@@ -520,6 +524,8 @@ AI:
 | `MAX_REMINDERS` | `200` | active reminder cap |
 
 Jev only gates ambient replies for the bot app. Boi DMs and explicit mentions skip it. Both models can be changed at runtime with `/nugget config ai_model ...` and `/nugget config ai_assistant_model ...`.
+
+`AI_CODE_MODEL` is optional. when set, the first sandbox, `github_write`, `browser` or `api_request` tool call switches the rest of that turn to the code model and its fallback. normal chat stays on the identity model. change it with `/nugget config ai_code_model ...`.
 
 ## deployment
 

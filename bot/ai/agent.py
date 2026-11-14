@@ -25,6 +25,15 @@ PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system.md"
 PROMPT_DIGEST_KEY = "persona_digest"
 MAX_TOOL_ROUNDS = 6
 MAX_TOOL_RESULT = 7000
+CODE_TOOLS = {
+    "sandbox",
+    "github_write",
+    "api_request",
+    "browser",
+    "run_code",
+    "inspect_code",
+    "clone_repo",
+}
 
 
 def sync_prompt_digest(db: Database, template: str) -> int:
@@ -126,6 +135,7 @@ class Agent:
         owner_posting = bool(owner_client)
         assistant_identity = bool(self.user_client)
         bot_model, bot_fallback, assistant_model, assistant_fallback = self._model_settings()
+        code_model, code_fallback = self._code_model_settings()
         history = self.db.history(conversation, self.settings.ai_history_limit)
         role = "owner" if user_id == self.settings.owner_user_id else "guest"
         location = await self._location(
@@ -164,6 +174,11 @@ class Agent:
             .replace("{ai_fallback_model}", bot_fallback or "none")
             .replace("{ai_assistant_model}", assistant_model)
             .replace("{ai_assistant_fallback_model}", assistant_fallback or "none")
+            .replace(
+                "{ai_code_model}",
+                code_model or "not set (tool-heavy turns use the chat model)",
+            )
+            .replace("{ai_code_fallback_model}", code_fallback or "none")
             .replace("{imagine_model}", self.settings.imagine_model or "none")
             .replace("{gate_model}", self.settings.ai_gate_model or "none")
             .replace("{repo_url}", self.settings.repo_url)
@@ -202,6 +217,7 @@ class Agent:
         )
 
         answer = ""
+        code_mode = False
         try:
             for _ in range(MAX_TOOL_ROUNDS):
                 response = await self._chat(
@@ -209,6 +225,7 @@ class Agent:
                     tools=True,
                     user_id=user_id,
                     is_user_identity=is_user_identity,
+                    code=code_mode,
                 )
                 message = response.choices[0].message
                 tool_calls = message.tool_calls or []
@@ -242,6 +259,8 @@ class Agent:
                                 "content": result[:MAX_TOOL_RESULT],
                             }
                         )
+                    if any(call.function.name in CODE_TOOLS for call in tool_calls):
+                        code_mode = True
                     continue
 
                 answer = (message.content or "").strip()
@@ -251,9 +270,11 @@ class Agent:
         except BudgetExceeded as exc:
             logger.warning("ai budget exhausted: %s", exc)
             answer = _budget_text(exc)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("agent completion failed")
-            answer = self._friendly_error(exc, model=self._models_for(is_user_identity)[0])
+            answer = self._friendly_error(
+                exc, model=self._models_for(is_user_identity, code=code_mode)[0]
+            )
 
         answer = format_mrkdwn(answer)
 
@@ -293,7 +314,7 @@ class Agent:
         except BudgetExceeded as exc:
             logger.warning("ai budget exhausted: %s", exc)
             return _budget_text(exc)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("one-shot completion failed")
             return self._friendly_error(exc)
 
@@ -312,10 +333,38 @@ class Agent:
             runtime("ai_assistant_fallback_model", self.settings.ai_assistant_fallback_model),
         )
 
-    def _models_for(self, is_user_identity: bool) -> list[str]:
-        """Bot app and Boi can run different models; each keeps its own fallback."""
+    def _code_model_settings(self) -> tuple[str | None, str | None]:
+        def text(value: object) -> str | None:
+            return value if isinstance(value, str) and value.strip() else None
+
+        def runtime(key: str, default: object) -> str | None:
+            value = self.db.kv_get(f"config:{key}") if self.db else None
+            return text(value) or text(default)
+
+        return (
+            runtime("ai_code_model", self.settings.ai_code_model),
+            runtime("ai_code_fallback_model", self.settings.ai_code_fallback_model),
+        )
+
+    def _models_for(
+        self, is_user_identity: bool, *, code: bool = False
+    ) -> list[str]:
+        """Bot, Boi and tool-heavy turns can use different models."""
         bot_model, bot_fallback, assistant_model, assistant_fallback = self._model_settings()
-        if is_user_identity:
+        code_model, code_fallback = self._code_model_settings()
+        if code and code_model:
+            if is_user_identity:
+                candidates = [
+                    code_model,
+                    code_fallback,
+                    assistant_model,
+                    assistant_fallback,
+                    bot_model,
+                    bot_fallback,
+                ]
+            else:
+                candidates = [code_model, code_fallback, bot_model, bot_fallback]
+        elif is_user_identity:
             candidates = [assistant_model, assistant_fallback, bot_model, bot_fallback]
         else:
             candidates = [bot_model, bot_fallback]
@@ -334,8 +383,9 @@ class Agent:
         max_tokens: int | None = None,
         user_id: str | None = None,
         is_user_identity: bool = False,
+        code: bool = False,
     ):
-        models = self._models_for(is_user_identity)
+        models = self._models_for(is_user_identity, code=code)
 
         kwargs: dict[str, Any] = {
             "messages": messages,
@@ -365,7 +415,7 @@ class Agent:
                 return response
             except BudgetExceeded:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 last_error = exc
                 if index + 1 < len(models):
                     logger.warning(

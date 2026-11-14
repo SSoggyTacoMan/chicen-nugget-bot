@@ -84,6 +84,8 @@ class Settings:
     ai_fallback_model: str | None
     ai_assistant_model: str
     ai_assistant_fallback_model: str | None
+    ai_code_model: str | None
+    ai_code_fallback_model: str | None
     ai_max_tokens: int
     ai_history_limit: int
     ai_channels: frozenset[str]
@@ -298,6 +300,8 @@ def load_settings() -> Settings:
         ai_assistant_fallback_model=_str(
             "AI_ASSISTANT_FALLBACK_MODEL", "anthropic/claude-haiku-5.5"
         ) or None,
+        ai_code_model=_str("AI_CODE_MODEL") or None,
+        ai_code_fallback_model=_str("AI_CODE_FALLBACK_MODEL") or None,
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),
         ai_history_limit=_int("AI_HISTORY_LIMIT", 24),
         ai_channels=frozenset(_list("AI_CHANNELS", ("*",))),
