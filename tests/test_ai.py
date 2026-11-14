@@ -550,6 +550,7 @@ def test_thread_continuation_image_handling(tmp_path):
     db = Database(str(tmp_path / "thread_test.db"))
     db.init()
     db.mark_thread("C_TEST", "100.000")
+    old_db = runtime.db
     runtime.db = db
     old_settings = runtime.settings
     runtime.settings = MagicMock()
@@ -608,6 +609,7 @@ def test_thread_continuation_image_handling(tmp_path):
         asyncio.run(run())
     finally:
         runtime.gate = old_gate
+        runtime.db = old_db
         runtime.settings = old_settings
 
 
@@ -1180,6 +1182,7 @@ def test_thread_chatter_suppression_and_speaker_tags(tmp_path):
     db.add_message("ch:C_CHAT:500.000", "user", "U_ALICE", "is this novabot?")
     db.add_message("ch:C_CHAT:500.000", "assistant", None, "nope")
     db.add_message("ch:C_CHAT:500.000", "user", "U_BOB", "i copied it")
+    old_db = runtime.db
     runtime.db = db
 
     client = AsyncMock()
@@ -1212,6 +1215,7 @@ def test_thread_chatter_suppression_and_speaker_tags(tmp_path):
         asyncio.run(run())
     finally:
         runtime.gate = old_gate
+        runtime.db = old_db
 
 
 def test_named_mention_uses_agent_without_at():
@@ -2688,8 +2692,9 @@ def test_thread_followup_after_bot_reply_bypasses_strict_gate(tmp_path):
     db = Database(str(tmp_path / "followup.db"))
     db.init()
     db.mark_thread("C_FOLLOW", "600.000")
-    db.add_message("ch:C_FOLLOW:600.000", "user", "U_ALICE", "why do u code so much")
+    db.add_message("ch:C_FOLLOW:600.000", "user", "U_FOLLOW_ALICE", "why do u code so much")
     db.add_message("ch:C_FOLLOW:600.000", "assistant", None, "someone's gotta read the traceback")
+    old_db = runtime.db
     runtime.db = db
 
     client = AsyncMock()
@@ -2703,12 +2708,13 @@ def test_thread_followup_after_bot_reply_bypasses_strict_gate(tmp_path):
         with patch("bot.features.agent._user_name", return_value="alice"), \
              patch("bot.features.agent._channel_name", return_value="general"), \
              patch("bot.features.agent.fetch_slack_images", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.user_retry_after", return_value=0), \
              patch("bot.features.agent._handle_channel", AsyncMock(return_value=True)) as mock_handle:
             await _handle_thread_continuation(
                 {
                     "channel": "C_FOLLOW",
                     "thread_ts": "600.000",
-                    "user": "U_ALICE",
+                    "user": "U_FOLLOW_ALICE",
                     "text": "explain",
                 },
                 client,
@@ -2720,3 +2726,4 @@ def test_thread_followup_after_bot_reply_bypasses_strict_gate(tmp_path):
         asyncio.run(run())
     finally:
         runtime.gate = old_gate
+        runtime.db = old_db
