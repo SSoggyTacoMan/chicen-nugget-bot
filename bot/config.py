@@ -335,7 +335,7 @@ def load_settings() -> Settings:
         ) or None,
         ai_code_model=_str("AI_CODE_MODEL") or None,
         ai_code_fallback_model=_str("AI_CODE_FALLBACK_MODEL") or None,
-        ai_embedding_model=_str("AI_EMBEDDING_MODEL", "qwen3-embedding-8b") or None,
+        ai_embedding_model=_str("AI_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b") or None,
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),
         ai_history_limit=_int("AI_HISTORY_LIMIT", 24),
         ai_channels=frozenset(_list("AI_CHANNELS", ("*",))),
