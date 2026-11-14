@@ -110,6 +110,11 @@ def test_manage_channel_join_leave_list_and_create():
         client.conversations_create = AsyncMock(
             return_value={"channel": {"id": "C_NEW", "name": "new-room", "is_private": False}}
         )
+        client.conversations_setTopic = AsyncMock(return_value={"ok": True})
+        client.conversations_setPurpose = AsyncMock(return_value={"ok": True})
+        client.conversations_invite = AsyncMock(return_value={"ok": True})
+        client.pins_add = AsyncMock(return_value={"ok": True})
+        client.pins_remove = AsyncMock(return_value={"ok": True})
         ctx = _ctx(client=client, is_dm=False)
 
         channel = {"id": "C1", "name": "dev", "is_member": False}
@@ -129,6 +134,42 @@ def test_manage_channel_join_leave_list_and_create():
 
             listed = await box.execute("manage_channel", {"action": "list"}, ctx)
             assert "dev" in listed
+
+            topic = await box.execute(
+                "manage_channel",
+                {"action": "set_topic", "channel": "C1", "topic": "ship it"},
+                ctx,
+            )
+            assert "set topic" in topic
+            client.conversations_setTopic.assert_called_once_with(
+                channel="C1", topic="ship it"
+            )
+
+            purpose = await box.execute(
+                "manage_channel",
+                {"action": "set_purpose", "channel": "C1", "purpose": "build log"},
+                ctx,
+            )
+            assert "set purpose" in purpose
+
+            box._find_user = AsyncMock(return_value={"id": "U2"})
+            invited = await box.execute(
+                "manage_channel",
+                {"action": "invite", "channel": "C1", "user": "maaren"},
+                ctx,
+            )
+            assert "invited <@U2>" in invited
+            client.conversations_invite.assert_called_once_with(
+                channel="C1", users="U2"
+            )
+
+            pinned = await box.execute(
+                "manage_channel",
+                {"action": "pin", "channel": "C1", "timestamp": "10.0"},
+                ctx,
+            )
+            assert "pinned message 10.0" in pinned
+            client.pins_add.assert_called_once_with(channel="C1", timestamp="10.0")
 
         created = await box.execute(
             "manage_channel", {"action": "create", "channel": "New Room"}, ctx

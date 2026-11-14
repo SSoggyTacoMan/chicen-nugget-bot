@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from bot.features import access, agent, polls, recaps, router, setup, threads, welcomer
+from bot.features import access, agent, polls, recaps, router, setup, shortcuts, threads, welcomer
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 def register(app) -> None:
     app.event("message")(agent.on_message)
     app.event("app_mention")(agent.on_app_mention)
+    app.event("reaction_added")(agent.on_reaction_added)
 
     welcomer.register(app)
     access.register(app)
@@ -18,6 +19,7 @@ def register(app) -> None:
     recaps.register(app)
     setup.register(app)
     router.register(app)
+    shortcuts.register(app)
 
     app.error(_on_error)
 

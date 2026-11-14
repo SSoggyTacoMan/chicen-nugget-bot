@@ -56,6 +56,8 @@ TRIGGER_TEXT = {
     "mention": "you were @mentioned in the latest message.",
     "mpim_mention": "you were @mentioned in a group DM.",
     "named": "someone addressed you by name in a channel message without an @mention.",
+    "reaction": "someone reacted to a message to ask you to act on it.",
+    "shortcut": "someone used a message shortcut on this message.",
     "thread_followup": "someone replied in a thread you are already part of.",
     "ambient": "nobody addressed you. you chose to chime in on the latest message because you thought you could help.",
 }

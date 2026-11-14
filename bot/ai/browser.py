@@ -34,6 +34,8 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 MAX_TEXT = 7000
+MAX_URL_CHARS = 2048
+MAX_SCREENSHOT_BYTES = 10_000_000
 
 
 class BrowserError(Exception):
@@ -116,9 +118,13 @@ class BrowserManager:
 
     async def validate_url(self, url: str) -> str:
         value = (url or "").strip()
+        if len(value) > MAX_URL_CHARS:
+            raise BrowserError("url is too long")
         parsed = urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise BrowserError("url must be a public http:// or https:// page")
+        if parsed.username or parsed.password:
+            raise BrowserError("urls with embedded credentials are not allowed")
         if await self._host_blocked(parsed.hostname):
             raise BrowserError("that url points at a private or local address")
         return value
@@ -278,6 +284,8 @@ class BrowserManager:
             data = await session.page.screenshot(full_page=full_page)
         except Exception as exc:
             raise BrowserError(f"couldn't take a screenshot: {exc}") from exc
+        if len(data) > MAX_SCREENSHOT_BYTES:
+            raise BrowserError("screenshot is too large; try full_page=false")
         session.last_used = time.monotonic()
         return data
 

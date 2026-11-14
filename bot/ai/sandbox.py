@@ -15,15 +15,19 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 MAX_NAME_LENGTH = 48
 MAX_READ_BYTES = 512_000
+MAX_WRITE_BYTES = 2_000_000
+MAX_UPLOAD_BYTES = 20_000_000
 MAX_LIST_ENTRIES = 200
 MAX_SEARCH_MATCHES = 60
 MAX_COMMAND_CHARS = 8_000
@@ -312,6 +316,175 @@ class SandboxManager:
             cwd=str(workdir.relative_to(info.path)) if workdir != info.path else ".",
         )
 
+    # ------------------------------------------------------------ background
+    def _jobs_root(self) -> Path:
+        path = self.root / ".jobs"
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            path.chmod(0o700)
+        except OSError:
+            pass
+        return path
+
+    def _job_meta_path(self, job_id: str) -> Path:
+        if not re.fullmatch(r"[a-f0-9]{8,32}", job_id or ""):
+            raise SandboxError("invalid job id")
+        return self._jobs_root() / f"{job_id}.json"
+
+    async def start_job(
+        self,
+        name: str,
+        command: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
+        info = self.get(name)
+        command = (command or "").strip()
+        if not command:
+            raise SandboxError("command is required")
+        if len(command) > MAX_COMMAND_CHARS:
+            raise SandboxError(f"command is too long (max {MAX_COMMAND_CHARS} chars)")
+        workdir = info.path
+        if cwd:
+            workdir = self._resolve_in(info.path, cwd)
+            if not workdir.is_dir():
+                raise SandboxError(f"cwd is not a directory: {cwd}")
+        timeout_s = max(5, min(int(timeout or self.exec_timeout), self.max_exec_timeout))
+
+        jobs = self._jobs_root()
+        job_id = uuid.uuid4().hex[:12]
+        script = jobs / f"{job_id}.sh"
+        log = jobs / f"{job_id}.log"
+        exit_file = jobs / f"{job_id}.exit"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            f"cd {shlex.quote(str(workdir))} || exit 1\n"
+            f"{command}\n"
+            f"printf '%s' \"$?\" > {shlex.quote(str(exit_file))}\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o700)
+        env = safe_env()
+        env.update(
+            {
+                "HOME": str(info.path),
+                "TMPDIR": str(info.path / ".tmp"),
+                "PYTHONPATH": "",
+                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "TERM": "dumb",
+                "CI": "1",
+            }
+        )
+        (info.path / ".tmp").mkdir(exist_ok=True)
+        runner = f"bash {shlex.quote(str(script))}"
+        timeout_bin = shutil.which("timeout")
+        if timeout_bin:
+            runner = f"{shlex.quote(timeout_bin)} {timeout_s}s {runner}"
+        wrapper = (
+            f"nohup {runner} > {shlex.quote(str(log))} 2>&1 & echo $!"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "bash",
+            "-lc",
+            wrapper,
+            cwd=str(workdir),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except TimeoutError:
+            raise SandboxError("could not start the background job") from None
+        pid_text = stdout_b.decode(errors="replace").strip().splitlines()
+        try:
+            pid = int(pid_text[-1]) if pid_text else 0
+        except ValueError:
+            pid = 0
+        if proc.returncode != 0 or not pid:
+            detail = stderr_b.decode(errors="replace").strip()[:300]
+            raise SandboxError(f"could not start the background job: {detail or 'unknown error'}")
+        meta = {
+            "job_id": job_id,
+            "sandbox": name,
+            "command": command[:500],
+            "cwd": str(workdir.relative_to(info.path)) if workdir != info.path else ".",
+            "pid": pid,
+            "started": time.time(),
+            "timeout": timeout_s,
+        }
+        self._job_meta_path(job_id).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self._touch(name)
+        return meta
+
+    def job_status(self, job_id: str) -> dict[str, Any]:
+        meta_path = self._job_meta_path(job_id)
+        if not meta_path.is_file():
+            raise SandboxError(f"job {job_id!r} does not exist")
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise SandboxError(f"could not read job {job_id!r}") from exc
+        exit_file = self._jobs_root() / f"{job_id}.exit"
+        log = self._jobs_root() / f"{job_id}.log"
+        exit_code: int | None = None
+        if exit_file.is_file():
+            try:
+                exit_code = int(exit_file.read_text(encoding="utf-8").strip() or "-1")
+            except ValueError:
+                exit_code = -1
+        pid = int(meta.get("pid") or 0)
+        running = False
+        if exit_code is None and pid > 0:
+            try:
+                os.kill(pid, 0)
+                running = True
+            except ProcessLookupError:
+                running = False
+            except PermissionError:
+                running = True
+        tail = ""
+        if log.is_file():
+            with log.open("rb") as handle:
+                handle.seek(max(0, log.stat().st_size - 4000))
+                tail = handle.read().decode("utf-8", errors="replace").strip()
+        return {
+            "job_id": job_id,
+            "sandbox": meta.get("sandbox"),
+            "command": meta.get("command"),
+            "status": "running" if running else ("done" if exit_code is not None else "stopped"),
+            "exit_code": exit_code,
+            "output": tail,
+        }
+
+    def list_jobs(self, name: str | None = None) -> list[dict[str, Any]]:
+        jobs: list[dict[str, Any]] = []
+        for path in self._jobs_root().glob("*.json"):
+            try:
+                meta = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if name and meta.get("sandbox") != name:
+                continue
+            jobs.append(
+                {
+                    "job_id": meta.get("job_id") or path.stem,
+                    "sandbox": meta.get("sandbox"),
+                    "command": (meta.get("command") or "")[:200],
+                    "started": meta.get("started"),
+                }
+            )
+        jobs.sort(key=lambda item: float(item.get("started") or 0), reverse=True)
+        return jobs[:20]
+
     # ----------------------------------------------------------------- files
     def _resolve_in(self, root: Path, rel_path: str) -> Path:
         rel = (rel_path or "").strip().lstrip("/")
@@ -343,6 +516,74 @@ class SandboxManager:
         return "\n".join(
             f"{i}: {line}" for i, line in enumerate(selected, start=offset)
         ) or "(empty file)"
+
+    def write(
+        self,
+        name: str,
+        path: str,
+        content: str,
+        *,
+        append: bool = False,
+    ) -> str:
+        info = self.get(name)
+        target = self._resolve_in(info.path, path)
+        if target == info.path or target.is_dir():
+            raise SandboxError("path must point at a file")
+        data = content or ""
+        size = len(data.encode("utf-8"))
+        if size > MAX_WRITE_BYTES:
+            raise SandboxError(f"content is too large (max {MAX_WRITE_BYTES} bytes)")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a" if append else "w", encoding="utf-8") as handle:
+            handle.write(data)
+        self._touch(name)
+        action = "appended" if append else "wrote"
+        return f"{action} {size} bytes to {target.relative_to(info.path)}"
+
+    def edit(
+        self,
+        name: str,
+        path: str,
+        find: str,
+        replace: str,
+        *,
+        count: int = 0,
+    ) -> str:
+        info = self.get(name)
+        target = self._resolve_in(info.path, path)
+        if not target.is_file():
+            raise SandboxError(f"file not found: {path}")
+        if target.stat().st_size > MAX_READ_BYTES:
+            raise SandboxError(f"file is too large to edit (max {MAX_READ_BYTES} bytes)")
+        if not find:
+            raise SandboxError("find text is required")
+        text = target.read_text(encoding="utf-8", errors="replace")
+        total = text.count(find)
+        if total == 0:
+            return f"no match for {find!r} in {path}"
+        limit = count if count > 0 else -1
+        updated = text.replace(find, replace or "", limit)
+        replaced = min(count, total) if count > 0 else total
+        target.write_text(updated, encoding="utf-8")
+        self._touch(name)
+        return f"replaced {replaced} occurrence(s) in {path}"
+
+    def file_bytes(
+        self,
+        name: str,
+        path: str,
+        *,
+        max_bytes: int = MAX_UPLOAD_BYTES,
+    ) -> tuple[str, bytes]:
+        info = self.get(name)
+        target = self._resolve_in(info.path, path)
+        if not target.is_file():
+            raise SandboxError(f"file not found: {path}")
+        size = target.stat().st_size
+        if size > max_bytes:
+            raise SandboxError(f"file is too large to upload (max {max_bytes} bytes)")
+        self._touch(name)
+        return target.name, target.read_bytes()
 
     def list_files(self, name: str, path: str = "") -> str:
         info = self.get(name)
