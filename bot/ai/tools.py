@@ -35,7 +35,7 @@ import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
 from bot import image_access, integrations
-from bot.ai import tts
+from bot.ai import images, tts
 from bot.ai.browser import BrowserError, BrowserManager
 from bot.ai.sandbox import SandboxError, SandboxManager, safe_env, safe_name
 from bot.api_keys import (
@@ -1555,6 +1555,7 @@ class Toolbox:
                             "slack",
                             "ai",
                             "voice",
+                            "images",
                             "watchers",
                             "storage",
                             "channels",
@@ -1575,7 +1576,7 @@ class Toolbox:
         settings = self.settings
         if not getattr(settings, "browser_enabled", True):
             hidden.add("browser")
-        if not getattr(settings, "imagine_model", None):
+        if not images.imagine_config(settings, self.db).model:
             hidden.add("generate_image")
         if not tts.voice_config(settings, self.db).model:
             hidden.add("speak")
@@ -3423,6 +3424,14 @@ class Toolbox:
             image_bytes, mime = await _generate_image(prompt, ratio)
         except Exception as exc:  # noqa: BLE001
             return _error(f"image generation failed: {exc}")
+        cfg = images.imagine_config(ctx.settings, ctx.db)
+        if runtime.budget is not None:
+            runtime.budget.record(
+                kind="image",
+                model=cfg.model or "image",
+                user_id=ctx.user_id,
+                cost_usd=cfg.cost_usd,
+            )
         ext = "png" if "png" in mime else "jpg"
         try:
             await ctx.client.files_upload_v2(
@@ -5673,7 +5682,7 @@ class Toolbox:
         if integration and integration not in integrations.SETUP_AREAS:
             areas = ", ".join(name for name, _ in integrations.SETUP_INTEGRATIONS)
             return _error(
-                f"integration must be {areas}, ai, voice, watchers, storage, channels, or all"
+                f"integration must be {areas}, ai, voice, images, watchers, storage, channels, or all"
             )
         blocks = integrations.setup_panel_blocks(integration or None)
         result = await post(

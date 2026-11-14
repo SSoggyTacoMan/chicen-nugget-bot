@@ -28,6 +28,7 @@ SETUP_INTEGRATIONS: tuple[tuple[str, str], ...] = (
 SETUP_CONFIG_AREAS: tuple[tuple[str, str], ...] = (
     ("ai", "AI & behavior"),
     ("voice", "Voice"),
+    ("images", "Images"),
     ("watchers", "Watchers"),
     ("storage", "Storage"),
     ("channels", "Auto-join"),
@@ -381,6 +382,7 @@ def setup_panel_blocks(requested: str | None = None) -> list[dict[str, Any]]:
         "slack": ("Slack profile", "Post in your own name"),
         "ai": ("AI & behavior", "Models, recaps, ambient replies"),
         "voice": ("Voice", "Qwen3 TTS voice, language and style"),
+        "images": ("Images", "Nano Banana model, fallback and cost"),
         "watchers": ("Watchers", "CI, notifications, email, URLs"),
         "storage": ("Storage", "Retention and cleanup"),
         "channels": ("Auto-join", "Channels to join on boot"),

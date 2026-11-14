@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from bot import image_access
+from bot.ai import images as image_settings
 from bot.ai import tts
 from bot.ai.limits import user_retry_after
 from bot.runtime import runtime
@@ -229,6 +230,7 @@ async def cmd_imagine(ack, command, client) -> None:
     channel = command["channel_id"]
     user = command["user_id"]
     settings = runtime.settings
+    cfg = image_settings.imagine_config(settings, runtime.db)
     if not image_access.can_generate(settings, runtime.db, user):
         await post_ephemeral(
             client,
@@ -237,7 +239,7 @@ async def cmd_imagine(ack, command, client) -> None:
             "image generation is limited. ask an admin to add you to the image allowlist.",
         )
         return
-    if not settings.imagine_enabled:
+    if not settings.ai_api_key or not cfg.model:
         await post_ephemeral(
             client,
             channel,
@@ -275,9 +277,9 @@ async def cmd_imagine(ack, command, client) -> None:
     if runtime.budget is not None:
         runtime.budget.record(
             kind="image",
-            model=settings.imagine_model or "image",
+            model=cfg.model or "image",
             user_id=user,
-            cost_usd=settings.ai_image_cost_usd,
+            cost_usd=cfg.cost_usd,
         )
 
     extension = "png" if "png" in mime else "jpg"
@@ -419,9 +421,9 @@ def _parse_imagine(text: str) -> tuple[str, str]:
 
 async def _generate_image(prompt: str, ratio: str) -> tuple[bytes, str]:
     settings = runtime.settings
-    models = [settings.imagine_model]
-    if settings.imagine_fallback_model and settings.imagine_fallback_model != settings.imagine_model:
-        models.append(settings.imagine_fallback_model)
+    cfg = image_settings.imagine_config(settings, runtime.db)
+    models = [model for model in (cfg.model, cfg.fallback) if model]
+    models = list(dict.fromkeys(models))
 
     last: ImageError | None = None
     for model in models:

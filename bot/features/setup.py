@@ -48,7 +48,7 @@ INTEGRATION_NAMES: dict[str, str] = {
     "apis": "API keys",
     "slack": "your Slack profile",
 }
-CONFIG_NAMES = {"ai", "voice", "watchers", "storage", "channels"}
+CONFIG_NAMES = {"ai", "voice", "images", "watchers", "storage", "channels"}
 
 
 def register(app) -> None:
@@ -62,6 +62,7 @@ def register(app) -> None:
     app.view("setup_apis")(on_apis_submit)
     app.view("setup_ai")(on_ai_submit)
     app.view("setup_voice")(on_voice_submit)
+    app.view("setup_images")(on_images_submit)
     app.view("setup_watchers")(on_watchers_submit)
     app.view("setup_storage")(on_storage_submit)
     app.view("setup_channels")(on_channels_submit)
@@ -383,6 +384,7 @@ def _usage() -> str:
         "• `/nugget setup slack` - posting in your name (optional native token)\n"
         "• `/nugget setup ai` - models and behavior toggles\n"
         "• `/nugget setup voice` - qwen3 tts voice, language and style\n"
+        "• `/nugget setup images` - nano banana model, fallback and budget cost\n"
         "• `/nugget setup watchers` - CI, notifications, email, URLs\n"
         "• `/nugget setup storage` - retention and cleanup\n"
         "• `/nugget setup channels` - auto-join public channels\n"
@@ -420,7 +422,7 @@ async def on_setup_open(ack, body, client) -> None:
                 await _dm(client, user_id or "", f"couldn't send the auth link: {message}")
             return
         view = _google_credentials_modal()
-    elif integration in {"ai", "voice", "watchers", "storage", "channels"}:
+    elif integration in {"ai", "voice", "images", "watchers", "storage", "channels"}:
         view = _config_modal(integration)
     else:
         view = _integration_modal(integration)
@@ -749,6 +751,38 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                 ),
             ],
             submit="Save voice",
+        )
+    if integration == "images":
+        from bot.ai import images as image_models
+
+        cfg = image_models.imagine_config(settings, runtime.db)
+        return _modal(
+            "setup_images",
+            "Images",
+            [
+                _note(
+                    "nano banana 2 is the default. 2.1 is newer, pro is best but slowest and priciest, lite is cheapest. the cost field is what `/nugget budget` charges per image, not what google bills."
+                ),
+                _select(
+                    "imagine_model",
+                    "Image model",
+                    list(image_models.MODEL_OPTIONS),
+                    cfg.model or image_models.DEFAULT_MODEL,
+                ),
+                _select(
+                    "imagine_fallback_model",
+                    "Fallback model",
+                    list(image_models.FALLBACK_OPTIONS),
+                    cfg.fallback or "none",
+                ),
+                _input(
+                    "imagine_cost_usd",
+                    "Budget charge per image (USD)",
+                    initial=str(cfg.cost_usd),
+                    max_length=8,
+                ),
+            ],
+            submit="Save images",
         )
     if integration == "watchers":
         from bot.features.watchers import watcher_config
@@ -1126,6 +1160,30 @@ async def on_voice_submit(ack, body, view, client) -> None:
     if raw_chars.isdigit():
         _set("tts_max_chars", str(max(50, min(1500, int(raw_chars)))))
     await _dm(client, user_id or "", "saved voice settings.")
+
+
+async def on_images_submit(ack, body, view, client) -> None:
+    await ack()
+    user_id = (body.get("user") or {}).get("id")
+    if not _is_admin(user_id):
+        return
+    from bot.ai import images as image_models
+
+    model = _selected(view, "imagine_model")
+    if model in {value for value, _ in image_models.MODEL_OPTIONS}:
+        _set("imagine_model", model)
+    fallback = _selected(view, "imagine_fallback_model")
+    if fallback == "none":
+        _set("imagine_fallback_model", "none")
+    elif fallback in {value for value, _ in image_models.MODEL_OPTIONS}:
+        _set("imagine_fallback_model", fallback)
+    raw_cost = _values(view).get("imagine_cost_usd", "")
+    try:
+        if raw_cost:
+            _set("imagine_cost_usd", str(max(0.0, float(raw_cost))))
+    except ValueError:
+        pass
+    await _dm(client, user_id or "", "saved image settings.")
 
 
 async def on_watchers_submit(ack, body, view, client) -> None:

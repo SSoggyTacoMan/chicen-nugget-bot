@@ -11,6 +11,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from bot import integrations
+from bot.ai import images as image_settings
 from bot.ai.agent import Agent
 from bot.ai.budget import Budget
 from bot.ai.gate import Gate
@@ -169,6 +170,12 @@ async def run() -> None:
                 else "",
                 settings.tts_model or "off",
                 settings.tts_voice,
+            )
+            image_cfg = image_settings.imagine_config(settings, runtime.db)
+            logger.info(
+                "image model %s%s",
+                image_cfg.model or "off",
+                f" (fallback {image_cfg.fallback})" if image_cfg.fallback else "",
             )
             status = runtime.budget.status()
             global_stop = (

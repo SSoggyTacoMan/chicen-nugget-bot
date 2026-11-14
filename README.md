@@ -133,6 +133,7 @@ run `/nugget setup`, or ask the bot to open the setup panel. secrets go into sla
 | api keys | `/nugget setup apis` |
 | ai and behavior | `/nugget setup ai` |
 | voice | `/nugget setup voice` |
+| images | `/nugget setup images` |
 | watchers | `/nugget setup watchers` |
 | storage | `/nugget setup storage` |
 | auto-join channels | `/nugget setup channels` |
@@ -142,7 +143,7 @@ run `/nugget setup`, or ask the bot to open the setup panel. secrets go into sla
 
 settings land in sqlite (`data/bot.db`) and override env values. env stays as a fallback for fresh deploys and ci.
 
-the panel also has AI & behavior, voice, watchers, storage and auto-join. those write runtime settings instead of requiring an env edit.
+the panel also has AI & behavior, voice, images, watchers, storage and auto-join. those write runtime settings instead of requiring an env edit.
 
 ### voice
 
@@ -156,6 +157,19 @@ outgoing voice uses qwen3 tts through hack club ai's replicate proxy:
 - clips post as playable audio files. slack's public api does not expose native voice-note bubbles for apps.
 
 if tts is off, check `TTS_MODEL`, `AI_API_KEY` and `TTS_VOICE`.
+
+### images
+
+`/nugget setup images` picks the nano banana model, fallback and the per-image budget charge.
+
+| option | model | tradeoff |
+|---|---|---|
+| nano banana 2 | `google/gemini-3.1-flash-image` | default, balanced |
+| nano banana 2.1 | `google/gemini-nano-banana-2.1` | newer, better |
+| nano banana pro | `google/gemini-3-pro-image` | best, slowest and priciest |
+| nano banana 2 lite | `google/gemini-3.1-flash-lite-image` | cheapest and fastest |
+
+the cost field only affects the bot's internal `/nugget budget`, not google's bill. runtime choices override `IMAGINE_MODEL` / `IMAGINE_FALLBACK_MODEL` / `AI_IMAGE_COST_USD`.
 
 ### google
 

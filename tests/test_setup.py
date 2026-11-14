@@ -428,7 +428,7 @@ def test_setup_panel_has_advanced_areas():
         if block.get("type") == "actions"
         for element in block.get("elements") or []
     }
-    assert {"ai", "voice", "watchers", "storage", "channels"} <= values
+    assert {"ai", "voice", "images", "watchers", "storage", "channels"} <= values
 
 
 def test_secret_config_writes_are_blocked(tmp_path):
@@ -490,6 +490,9 @@ def _setup_settings(**overrides):
         tts_style=None,
         tts_max_chars=500,
         tts_cost_per_1k_chars=0.02,
+        imagine_model="google/gemini-3.1-flash-image",
+        imagine_fallback_model="google/gemini-2.5-flash-image",
+        ai_image_cost_usd=0.04,
         is_admin=lambda user_id: user_id == "U_OWNER",
     )
     for key, value in overrides.items():
@@ -524,10 +527,11 @@ def test_advanced_config_modals_reflect_overrides(tmp_path, monkeypatch):
 
     modals = {
         name: setup._config_modal(name)
-        for name in ("ai", "voice", "watchers", "storage", "channels")
+        for name in ("ai", "voice", "images", "watchers", "storage", "channels")
     }
     assert modals["ai"]["callback_id"] == "setup_ai"
     assert modals["voice"]["callback_id"] == "setup_voice"
+    assert modals["images"]["callback_id"] == "setup_images"
     assert modals["watchers"]["callback_id"] == "setup_watchers"
     assert modals["storage"]["callback_id"] == "setup_storage"
     assert modals["channels"]["callback_id"] == "setup_channels"
@@ -584,6 +588,32 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
             },
             client,
         )
+        await setup.on_images_submit(
+            AsyncMock(),
+            body,
+            {
+                "state": {
+                    "values": {
+                        "imagine_model": {
+                            "value": {
+                                "selected_option": {
+                                    "value": "google/gemini-nano-banana-2.1"
+                                }
+                            }
+                        },
+                        "imagine_fallback_model": {
+                            "value": {
+                                "selected_option": {
+                                    "value": "google/gemini-3.1-flash-lite-image"
+                                }
+                            }
+                        },
+                        "imagine_cost_usd": {"value": {"value": "0.06"}},
+                    }
+                }
+            },
+            client,
+        )
         await setup.on_watchers_submit(
             AsyncMock(),
             body,
@@ -627,6 +657,12 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
     assert db.kv_get("config:tts_language") == "French"
     assert db.kv_get("config:tts_style") == "speak slowly"
     assert db.kv_get("config:tts_max_chars") == "50"
+    assert db.kv_get("config:imagine_model") == "google/gemini-nano-banana-2.1"
+    assert (
+        db.kv_get("config:imagine_fallback_model")
+        == "google/gemini-3.1-flash-lite-image"
+    )
+    assert db.kv_get("config:imagine_cost_usd") == "0.06"
     assert db.kv_get("config:watch_email") == "true"
     assert db.kv_get("config:watch_github_ci") == "false"
     assert db.kv_get("config:watch_urls") == "https://status.example.com"
