@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from bot.ai.limits import user_retry_after
 from bot.runtime import runtime
 from bot.slack_api import post
-from bot.utils.text import chunk_text, disarm_broadcasts, format_mrkdwn
+from bot.utils.text import chat_chunks, chunk_options, disarm_broadcasts, format_mrkdwn
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,15 @@ async def _run_shortcut(
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return
-        for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
+        max_fragments, delay = chunk_options(runtime.settings)
+        chunks = chat_chunks(
+            disarm_broadcasts(format_mrkdwn(answer)),
+            max_fragments=max_fragments,
+        )
+        for index, chunk in enumerate(chunks):
             await post(client, channel, chunk, thread_ts=root_ts)
+            if index + 1 < len(chunks) and delay > 0:
+                await asyncio.sleep(delay)
         if runtime.db:
             runtime.db.mark_thread(channel, root_ts, owner="bot")
     except Exception:

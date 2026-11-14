@@ -1,7 +1,16 @@
 import random
 
 from bot.utils.dice import roll
-from bot.utils.text import chunk_text, extract_id, format_mrkdwn, has_owner_signature, incoming_text, asks_for_silence
+from bot.utils.text import (
+    asks_for_silence,
+    chat_chunks,
+    chunk_text,
+    extract_id,
+    format_mrkdwn,
+    has_owner_signature,
+    incoming_text,
+    is_ignored_message,
+)
 
 
 def test_dice_basic():
@@ -125,3 +134,30 @@ def test_asks_for_silence():
     assert asks_for_silence("can you not")
     assert not asks_for_silence("i dont respond to spam")
     assert not asks_for_silence("the api is down")
+
+
+def test_is_ignored_message():
+    assert is_ignored_message("# nugget stay out of this")
+    assert is_ignored_message("  # manual opt out")
+    assert not is_ignored_message("what does # mean in markdown")
+    assert not is_ignored_message("#nospace")
+
+
+def test_chat_chunks_splits_paragraphs_and_keeps_code_together():
+    text = "first paragraph\n\nsecond paragraph\n\n```python\na = 1\n\nb = 2\n```\n\nlast"
+    chunks = chat_chunks(text, max_fragments=4)
+    assert chunks == [
+        "first paragraph",
+        "second paragraph",
+        "```python\na = 1\n\nb = 2\n```",
+        "last",
+    ]
+
+
+def test_chat_chunks_combines_overflow_into_last_fragment():
+    text = "\n\n".join(f"paragraph {i}" for i in range(8))
+    chunks = chat_chunks(text, max_fragments=3)
+    assert len(chunks) == 3
+    assert chunks[0] == "paragraph 0"
+    assert chunks[1] == "paragraph 1"
+    assert "paragraph 7" in chunks[2]

@@ -249,6 +249,57 @@ def test_api_request_uses_stored_token_and_guards_paths():
     asyncio.run(run())
 
 
+def test_toolbox_hides_unconnected_integrations():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from bot.ai.tools import Toolbox
+
+    settings = SimpleNamespace(
+        browser_enabled=False,
+        imagine_model=None,
+        slack_user_token=None,
+        slack_web_token=None,
+        github_token="",
+        github_username="",
+        repo_url="",
+        google_client_id="",
+        google_client_secret="",
+        google_refresh_token="",
+        google_access_token="",
+        imap_host="",
+        imap_user="",
+        imap_password="",
+        mac_bridge_url="",
+        mac_bridge_token="",
+    )
+    db = MagicMock()
+    db.kv_get.return_value = ""
+    with patch("bot.ai.tools.sys.platform", "linux"), \
+         patch("bot.ai.tools.api_key_status", return_value={}):
+        names = {
+            tool["function"]["name"]
+            for tool in Toolbox(settings, db).definitions
+        }
+    for hidden in (
+        "browser",
+        "github_write",
+        "gmail",
+        "google_calendar",
+        "google_drive",
+        "check_emails",
+        "mac_control",
+        "slack_status",
+        "slack_dnd",
+        "slack_activity",
+        "api_request",
+        "generate_image",
+    ):
+        assert hidden not in names
+    for present in ("github_info", "sandbox", "post_message", "send_dm"):
+        assert present in names
+
+
 def test_owner_posting_checks_granted_customize_scope():
     from bot import slack_api
 

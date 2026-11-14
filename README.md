@@ -20,6 +20,7 @@ they share one sqlite database, one toolbox and one memory. socket mode only, so
 - posting in the owner's name, either as a customized bot message or from their real account
 - jev, a small classifier that decides whether an unaddressed message deserves a reply
 - images, charts, powerpoint decks, welcomer, access requests, recaps, reminders and polls
+- a message starting with `# ` is ignored, always. manual mute switch
 
 ## how it fits
 
@@ -37,6 +38,8 @@ the accounts are separate tokens, but they share the same code, database and too
 
 boi connects to `wss://wss-primary.slack.com` with a browser session token (`xoxc-...`) and matching cookie (`xoxd-...`). that's not an app token and there's no oauth install.
 
+you can split the credentials: `SLACK_USER_TOKEN` (ideally `xoxp`) handles api calls and search, while `SLACK_WEB_TOKEN` + `SLACK_WEB_COOKIE` handle presence and typing. if the web pair is empty, boi falls back to the user token and cookie.
+
 - typing: a typing frame goes out every 2.5 seconds while the model runs.
 - messages: bots, its own messages, the bot account, duplicate timestamps and unrelated thread chatter get ignored.
 - group dms: boi answers when someone `@mentions` it. private dm history and group history stay separate.
@@ -46,6 +49,8 @@ boi connects to `wss://wss-primary.slack.com` with a browser session token (`xox
 - isolation: workspace admin actions stay on the bot app. a stolen user session can't approve access or change settings.
 
 treat `xoxc` and `xoxd` like passwords. they grant full access to the account, including private channels. to rotate them, sign out and back in, then update the env.
+
+`AUTO_JOIN_CHANNELS` joins public channel ids on startup. `CHAT_CHUNK_DELAY_SECONDS` and `CHAT_CHUNK_MAX` control paragraph splitting. `QUIET_HOURS` and `PROACTIVE_DAILY_CAP` gate ambient replies.
 
 ### posting in the owner's name
 
@@ -76,6 +81,8 @@ after changing scopes or events, paste the manifest again and reinstall. saving 
 | `OWNER_USER_ID` (`U...`) | your profile > more > copy member id |
 | `SLACK_USER_TOKEN` | optional, for boi (`xoxp` or `xoxc`) |
 | `SLACK_USER_COOKIE` (`xoxd-...`) | optional, required with an `xoxc` boi token |
+| `SLACK_WEB_TOKEN` | optional, `xoxc` session for typing/presence |
+| `SLACK_WEB_COOKIE` (`xoxd-...`) | optional, required with `SLACK_WEB_TOKEN` |
 | `SLACK_OWNER_TOKEN` | optional, for native posts in the owner's name |
 | `SLACK_OWNER_COOKIE` (`xoxd-...`) | optional, required with an `xoxc` owner token |
 
@@ -206,7 +213,7 @@ change them at runtime:
 | media | `generate_image`, `make_chart`, `make_deck` |
 | misc | `get_weather`, `public_holidays`, `roll_dice`, `dog_fact`, `taco_recipe`, `urban_dict`, `nugget_fact` |
 
-owner and admin checks happen in code against the real slack sender. the prompt can't grant permissions on its own.
+owner and admin checks happen in code against the real slack sender. the prompt can't grant permissions on its own. tools whose integration isn't connected are omitted from the model's tool list entirely.
 
 `search_slack` uses the user session for real workspace search and falls back to local history. `manage_channel` lists, inspects, joins, leaves, creates, sets topic/purpose, invites, pins and lists members.
 

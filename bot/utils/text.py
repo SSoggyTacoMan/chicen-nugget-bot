@@ -31,6 +31,49 @@ def chunk_text(text: str, limit: int = MAX_SLACK_TEXT) -> list[str]:
     return chunks
 
 
+def chat_chunks(
+    text: str,
+    *,
+    max_fragments: int = 4,
+    limit: int = MAX_SLACK_TEXT,
+) -> list[str]:
+    """Split a reply into human-sized chat fragments.
+
+    Paragraphs become separate messages, but code fences are kept together.
+    Long paragraphs still go through chunk_text, so nothing is dropped.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    max_fragments = max(1, int(max_fragments))
+    paragraphs: list[str] = []
+    current: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+        if not stripped and not in_fence:
+            if current:
+                paragraphs.append("\n".join(current).strip())
+                current = []
+            continue
+        current.append(line)
+    if current:
+        paragraphs.append("\n".join(current).strip())
+    paragraphs = [p for p in paragraphs if p]
+    if not paragraphs:
+        return []
+    if len(paragraphs) > max_fragments:
+        head = paragraphs[: max_fragments - 1]
+        tail = "\n\n".join(paragraphs[max_fragments - 1 :])
+        paragraphs = head + [tail]
+    chunks: list[str] = []
+    for paragraph in paragraphs:
+        chunks.extend(chunk_text(paragraph, limit))
+    return chunks
+
+
 def strip_mentions(text: str) -> str:
     return re.sub(r"<@[^>]+>", "", text or "").strip()
 
@@ -76,6 +119,22 @@ _SILENCE_RE = re.compile(
 def asks_for_silence(text: str) -> bool:
     """True when someone explicitly asks the bot not to reply."""
     return bool(_SILENCE_RE.search(text or ""))
+
+
+def is_ignored_message(text: str) -> bool:
+    """Manual opt-out: messages starting with ``# `` are never answered."""
+    return (text or "").lstrip().startswith("# ")
+
+
+def chunk_options(settings: object) -> tuple[int, float]:
+    """Read chunk settings safely, including mocked settings in tests."""
+    max_fragments = getattr(settings, "chat_chunk_max", 4)
+    if not isinstance(max_fragments, int) or max_fragments < 1:
+        max_fragments = 4
+    delay = getattr(settings, "chat_chunk_delay", 0.0)
+    if not isinstance(delay, (int, float)):
+        delay = 0.0
+    return min(max_fragments, 8), max(0.0, float(delay))
 
 
 def has_owner_signature(text: str) -> bool:

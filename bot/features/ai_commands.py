@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -15,7 +16,13 @@ from bot import image_access
 from bot.ai.limits import user_retry_after
 from bot.runtime import runtime
 from bot.slack_api import error_code, post, post_ephemeral
-from bot.utils.text import chunk_text, disarm_broadcasts, escape_mrkdwn, format_mrkdwn
+from bot.utils.text import (
+    chat_chunks,
+    chunk_options,
+    disarm_broadcasts,
+    escape_mrkdwn,
+    format_mrkdwn,
+)
 from bot.utils.tz import tzinfo
 
 logger = logging.getLogger(__name__)
@@ -72,13 +79,19 @@ async def cmd_ask(ack, command, client) -> None:
 
 
 async def _post_answer(client, channel: str, user: str, question: str, answer: str) -> None:
-    chunks = chunk_text(disarm_broadcasts(format_mrkdwn(answer)))
+    max_fragments, delay = chunk_options(runtime.settings)
+    chunks = chat_chunks(
+        disarm_broadcasts(format_mrkdwn(answer)),
+        max_fragments=max_fragments,
+    )
     if not chunks:
         chunks = ["i blanked on that one. try rephrasing?"]
     header = f":speech_balloon: <@{user}> asked: {escape_mrkdwn(question)}"
     for index, chunk in enumerate(chunks):
         text = f"{header}\n\n{chunk}" if index == 0 else chunk
         await post(client, channel, text)
+        if index + 1 < len(chunks) and delay > 0:
+            await asyncio.sleep(delay)
 
 
 # ---------------------------------------------------------------- /summarize
@@ -133,12 +146,18 @@ async def cmd_summarize(ack, command, client) -> None:
         user_id=user,
     )
     header = f":newspaper: *catch-up for <#{channel}>* - last {len(transcript)} messages"
-    chunks = chunk_text(disarm_broadcasts(format_mrkdwn(summary)))
+    max_fragments, delay = chunk_options(runtime.settings)
+    chunks = chat_chunks(
+        disarm_broadcasts(format_mrkdwn(summary)),
+        max_fragments=max_fragments,
+    )
     if not chunks:
         chunks = ["nothing memorable happened."]
     for index, chunk in enumerate(chunks):
         text = f"{header}\n\n{chunk}" if index == 0 else chunk
         await post(client, channel, text)
+        if index + 1 < len(chunks) and delay > 0:
+            await asyncio.sleep(delay)
 
 
 def _summary_limit(text: str | None) -> int:

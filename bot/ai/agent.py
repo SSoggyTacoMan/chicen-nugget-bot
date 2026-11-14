@@ -97,7 +97,7 @@ class Agent:
             timeout=60.0,
             max_retries=1,
         )
-        self.toolbox = Toolbox(settings)
+        self.toolbox = Toolbox(settings, db)
         self.system_template = PROMPT_PATH.read_text(encoding="utf-8")
         sync_prompt_digest(self.db, self.system_template)
 

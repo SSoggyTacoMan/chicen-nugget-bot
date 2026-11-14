@@ -54,6 +54,13 @@ async def run() -> None:
     runtime.bot_user_id = auth.get("user_id") or ""
     runtime.bot_id = auth.get("bot_id") or ""
 
+    for channel_id in settings.auto_join_channels:
+        try:
+            status = await ensure_public_member(app.client, channel_id)
+            logger.info("auto-join %s: %s", channel_id, status)
+        except Exception:
+            logger.warning("auto-join failed for %s", channel_id, exc_info=True)
+
     scope_headers = getattr(auth, "headers", None)
     scopes = (
         scope_headers.get("x-oauth-scopes", "")
@@ -81,25 +88,33 @@ async def run() -> None:
                 db.kv_set("warned:customize_scope", app_id)
 
     user_client = None
-    if settings.slack_user_token:
-        headers = {}
-        if settings.slack_user_cookie:
-            headers["Cookie"] = f"d={settings.slack_user_cookie}"
-        user_client = AsyncWebClient(token=settings.slack_user_token, headers=headers)
+    api_token = settings.slack_user_token or settings.slack_web_token
+    api_cookie = ""
+    if api_token and api_token.startswith("xoxc"):
+        api_cookie = settings.slack_user_cookie or settings.slack_web_cookie or ""
+    if api_token:
+        headers = {"Cookie": f"d={api_cookie}"} if api_cookie else {}
+        user_client = AsyncWebClient(token=api_token, headers=headers)
         try:
             user_auth = await user_client.auth_test()
             runtime.user_id = user_auth.get("user_id") or ""
-            logger.info("user token active as %s (%s)", user_auth.get("user"), runtime.user_id)
-            if settings.slack_user_cookie:
+            logger.info(
+                "user api token active as %s (%s)", user_auth.get("user"), runtime.user_id
+            )
+            web_token = settings.slack_web_token or settings.slack_user_token
+            web_cookie = settings.slack_web_cookie or settings.slack_user_cookie
+            if web_token and web_cookie and web_token.startswith("xoxc"):
                 from bot.user_gateway import UserGateway
+
                 runtime.user_gateway = UserGateway(
-                    token=settings.slack_user_token,
-                    cookie=settings.slack_user_cookie,
+                    token=web_token,
+                    cookie=web_cookie,
                     user_id=runtime.user_id,
                     user_client=user_client,
                 )
+                logger.info("user gateway using browser session")
         except Exception as exc:  # noqa: BLE001
-            logger.warning("SLACK_USER_TOKEN is set but invalid: %s", exc)
+            logger.warning("user token is set but invalid: %s", exc)
             user_client = None
     runtime.user_client = user_client
 

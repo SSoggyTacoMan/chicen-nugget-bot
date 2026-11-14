@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
 from typing import Any
 
 from bot.ai.limits import user_retry_after
+from bot.features.proactive import is_quiet_now, note_proactive, proactive_available
 from bot.runtime import runtime
 from bot.slack_api import (
     channel_info,
@@ -21,12 +23,14 @@ from bot.slack_api import (
 )
 from bot.utils.text import (
     asks_for_silence,
-    chunk_text,
+    chat_chunks,
+    chunk_options,
     disarm_broadcasts,
     display_name,
     format_mrkdwn,
     has_owner_signature,
     incoming_text,
+    is_ignored_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,11 +61,32 @@ _REQUEST_RE = re.compile(
 _names: dict[str, str] = {}
 
 
+async def _post_chunks(
+    client,
+    channel: str,
+    text: str,
+    *,
+    thread_ts: str | None = None,
+) -> None:
+    settings = runtime.settings
+    max_fragments, delay = chunk_options(settings)
+    chunks = chat_chunks(
+        disarm_broadcasts(format_mrkdwn(text)),
+        max_fragments=max_fragments,
+    )
+    for index, chunk in enumerate(chunks):
+        await post(client, channel, chunk, thread_ts=thread_ts)
+        if index + 1 < len(chunks) and delay > 0:
+            await asyncio.sleep(delay)
+
+
 async def on_message(event: dict[str, Any], client) -> None:
     subtype = event.get("subtype")
     if (subtype and subtype != "file_share") or event.get("bot_id"):
         return
     if has_owner_signature(event.get("text") or ""):
+        return
+    if is_ignored_message(event.get("text") or ""):
         return
     user_id = event.get("user")
     if not user_id or user_id == runtime.bot_user_id or (runtime.user_id and user_id == runtime.user_id):
@@ -88,6 +113,8 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
     if (subtype and subtype != "file_share") or event.get("bot_id"):
         return
     if has_owner_signature(event.get("text") or ""):
+        return
+    if is_ignored_message(event.get("text") or ""):
         return
     user_id = event.get("user")
     if not user_id or user_id == runtime.bot_user_id or (runtime.user_id and user_id == runtime.user_id):
@@ -205,8 +232,12 @@ async def on_reaction_added(event: dict[str, Any], client) -> None:
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return
-        for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
-            await post(client, channel, chunk, thread_ts=None if is_dm else root_ts)
+        await _post_chunks(
+            client,
+            channel,
+            answer,
+            thread_ts=None if is_dm else root_ts,
+        )
         if not is_dm and runtime.db:
             runtime.db.mark_thread(channel, root_ts, owner="bot")
     except Exception:
@@ -273,7 +304,7 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
         return
     if not text and images:
         text = "Describe or look at this image."
-    if asks_for_silence(text):
+    if asks_for_silence(text) or is_ignored_message(text):
         return
     retry = user_retry_after(user_id)
     if retry:
@@ -305,8 +336,9 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
             except Exception:
                 logger.exception("dm agent turn failed")
                 answer = "something broke on my side. check my logs?"
-        for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
-            await post(client, event["channel"], chunk, thread_ts=reply_thread_ts)
+        await _post_chunks(
+            client, event["channel"], answer, thread_ts=reply_thread_ts
+        )
     finally:
         if message_ts:
             await unreact(client, event["channel"], message_ts, "eyes")
@@ -556,6 +588,10 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
         return
     if user_retry_after(user_id):
         return
+    if is_quiet_now(settings):
+        return
+    if runtime.db is not None and not proactive_available(runtime.db, settings):
+        return
 
     cooldown = settings.ai_ambient_cooldown
     last = _last_ambient.get(channel, 0.0)
@@ -571,6 +607,8 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
         return
 
     _last_ambient[channel] = time.monotonic()
+    if runtime.db is not None:
+        note_proactive(runtime.db, settings)
     logger.info("gate let %s through in %s (%s)", user_id, channel, decision.kind)
     await _handle_channel(
         event,
@@ -623,7 +661,7 @@ async def _handle_channel(
         text = "hey"
     elif not text and images:
         text = "Look at this image."
-    if asks_for_silence(text):
+    if asks_for_silence(text) or is_ignored_message(text):
         return False
     retry = user_retry_after(user_id)
     if retry:
@@ -660,8 +698,7 @@ async def _handle_channel(
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return False
-        for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
-            await post(client, channel, chunk, thread_ts=reply_thread_ts)
+        await _post_chunks(client, channel, answer, thread_ts=reply_thread_ts)
         runtime.db.mark_thread(channel, root_ts, owner="bot")
         posted = True
     except Exception:

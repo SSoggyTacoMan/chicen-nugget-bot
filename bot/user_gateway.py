@@ -22,11 +22,13 @@ from bot.runtime import runtime
 from bot.slack_api import fetch_slack_images, transcribe_slack_audio
 from bot.utils.text import (
     asks_for_silence,
-    chunk_text,
+    chat_chunks,
+    chunk_options,
     disarm_broadcasts,
     format_mrkdwn,
     has_owner_signature,
     incoming_text,
+    is_ignored_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -256,6 +258,8 @@ class UserGateway:
         text = (event.get("text") or "").strip()
         if has_owner_signature(text):
             return
+        if is_ignored_message(text):
+            return
         is_dm = channel.startswith("D")
         is_mpim = (event.get("channel_type") or "") == "mpim"
         is_mention = bool(self.user_id and f"<@{self.user_id}>" in text)
@@ -360,7 +364,12 @@ class UserGateway:
             runtime.db.mark_thread(channel, root_ts, owner="user")
 
         if self.user_client:
-            for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
+            max_fragments, delay = chunk_options(runtime.settings)
+            chunks = chat_chunks(
+                disarm_broadcasts(format_mrkdwn(answer)),
+                max_fragments=max_fragments,
+            )
+            for index, chunk in enumerate(chunks):
                 try:
                     await self.user_client.chat_postMessage(
                         channel=channel,
@@ -369,5 +378,7 @@ class UserGateway:
                         unfurl_links=False,
                         unfurl_media=False,
                     )
+                    if index + 1 < len(chunks) and delay > 0:
+                        await asyncio.sleep(delay)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("failed to post user reply to %s: %s", channel, exc)

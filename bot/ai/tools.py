@@ -36,7 +36,14 @@ from slack_sdk.web.async_client import AsyncWebClient
 from bot import image_access, integrations
 from bot.ai.browser import BrowserError, BrowserManager
 from bot.ai.sandbox import SandboxError, SandboxManager, safe_env, safe_name
-from bot.api_keys import API_SERVICES, api_service, api_token, auth_headers, save_api_token
+from bot.api_keys import (
+    API_SERVICES,
+    api_key_status,
+    api_service,
+    api_token,
+    auth_headers,
+    save_api_token,
+)
 from bot.config import Settings
 from bot.db import Database
 from bot.features.nuggets import random_fact
@@ -477,8 +484,9 @@ def parse_slack_thread_ref(ref: str) -> tuple[str | None, str | None]:
 class Toolbox:
     """Registry of model-callable tools."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, db: Database | None = None) -> None:
         self.settings = settings
+        self.db = db
         self._browser_manager: BrowserManager | None = None
 
     # ------------------------------------------------------------ definitions
@@ -1486,7 +1494,41 @@ class Toolbox:
                 ["action"],
             ),
         ]
-        return tools
+        return self._filter_tools(tools)
+
+    def _filter_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Only expose tools whose backing service is actually configured."""
+        if self.db is None:
+            return tools
+        hidden: set[str] = set()
+        settings = self.settings
+        if not getattr(settings, "browser_enabled", True):
+            hidden.add("browser")
+        if not getattr(settings, "imagine_model", None):
+            hidden.add("generate_image")
+        if not (
+            getattr(settings, "slack_user_token", None)
+            or getattr(settings, "slack_web_token", None)
+        ):
+            hidden.update({"slack_status", "slack_dnd", "slack_activity"})
+        if not integrations.github_config(self.db, settings).get("token"):
+            hidden.add("github_write")
+        google = integrations.google_credentials(self.db, settings)
+        if not (google.get("refresh_token") or google.get("access_token")):
+            hidden.update({"google_calendar", "gmail", "google_drive"})
+        imap = integrations.imap_config(self.db, settings)
+        if not (imap.get("host") and imap.get("user") and imap.get("password")):
+            hidden.add("check_emails")
+        mac = integrations.mac_config(self.db, settings)
+        if not mac.get("url") and sys.platform != "darwin":
+            hidden.add("mac_control")
+        if not any(api_key_status(self.db, settings).values()):
+            hidden.add("api_request")
+        return [
+            tool
+            for tool in tools
+            if tool.get("function", {}).get("name") not in hidden
+        ]
 
     # ---------------------------------------------------------------- dispatch
     async def execute(self, name: str, args: Any, ctx: ToolContext) -> str:

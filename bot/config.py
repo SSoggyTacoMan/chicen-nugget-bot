@@ -48,6 +48,24 @@ def _float(name: str, default: float) -> float:
         return default
 
 
+def _quiet_hours(name: str) -> tuple[int, int]:
+    """Parse ``HH:MM-HH:MM`` into minutes since midnight. Empty disables."""
+    raw = _str(name)
+    if not raw:
+        return -1, -1
+    try:
+        start_raw, end_raw = raw.split("-", 1)
+        start_h, start_m = (int(part) for part in start_raw.strip().split(":", 1))
+        end_h, end_m = (int(part) for part in end_raw.strip().split(":", 1))
+        if not (0 <= start_h < 24 and 0 <= end_h < 24):
+            return -1, -1
+        if not (0 <= start_m < 60 and 0 <= end_m < 60):
+            return -1, -1
+        return start_h * 60 + start_m, end_h * 60 + end_m
+    except ValueError:
+        return -1, -1
+
+
 def _list(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     raw = _str(name)
     if not raw:
@@ -67,12 +85,15 @@ class Settings:
     slack_app_token: str
     slack_user_token: str | None
     slack_user_cookie: str | None
+    slack_web_token: str | None
+    slack_web_cookie: str | None
     slack_owner_token: str | None
     slack_owner_cookie: str | None
     bot_name: str
     owner_user_id: str
     admin_user_ids: frozenset[str]
     timezone: str
+    auto_join_channels: frozenset[str]
 
     data_dir: Path
     log_dir: Path
@@ -106,6 +127,11 @@ class Settings:
     ai_ambient_channels: frozenset[str]
     ai_ambient_cooldown: int
     ai_thread_cooldown: int
+    chat_chunk_delay: float
+    chat_chunk_max: int
+    quiet_hours_start: int
+    quiet_hours_end: int
+    proactive_daily_cap: int
     sandbox_dir: Path
     sandbox_max_workspaces: int
     sandbox_exec_timeout: int
@@ -278,18 +304,22 @@ def load_settings() -> Settings:
         if _str("BROWSER_DIR")
         else data_dir / "browser"
     )
+    quiet_start, quiet_end = _quiet_hours("QUIET_HOURS")
 
     return Settings(
         slack_bot_token=_str("SLACK_BOT_TOKEN"),
         slack_app_token=_str("SLACK_APP_TOKEN"),
         slack_user_token=_str("SLACK_USER_TOKEN") or None,
         slack_user_cookie=_str("SLACK_USER_COOKIE") or None,
+        slack_web_token=_str("SLACK_WEB_TOKEN") or None,
+        slack_web_cookie=_str("SLACK_WEB_COOKIE") or None,
         slack_owner_token=_str("SLACK_OWNER_TOKEN") or None,
         slack_owner_cookie=_str("SLACK_OWNER_COOKIE") or None,
         bot_name=_str("BOT_NAME", "Chicen Nugget Bot") or "Chicen Nugget Bot",
         owner_user_id=owner,
         admin_user_ids=frozenset(admins),
         timezone=_str("TIMEZONE", "UTC") or "UTC",
+        auto_join_channels=frozenset(_list("AUTO_JOIN_CHANNELS")),
         data_dir=data_dir,
         log_dir=_path("LOG_DIR", "logs"),
         ai_api_key=_str("AI_API_KEY") or None,
@@ -322,6 +352,11 @@ def load_settings() -> Settings:
         ai_ambient_channels=frozenset(_list("AI_AMBIENT_CHANNELS")),
         ai_ambient_cooldown=max(0, _int("AI_AMBIENT_COOLDOWN", 120)),
         ai_thread_cooldown=max(0, _int("AI_THREAD_COOLDOWN", 120)),
+        chat_chunk_delay=max(0.0, _float("CHAT_CHUNK_DELAY_SECONDS", 0.6)),
+        chat_chunk_max=max(1, min(8, _int("CHAT_CHUNK_MAX", 4))),
+        quiet_hours_start=quiet_start,
+        quiet_hours_end=quiet_end,
+        proactive_daily_cap=max(0, _int("PROACTIVE_DAILY_CAP", 0)),
         sandbox_dir=sandbox_dir,
         sandbox_max_workspaces=max(1, _int("SANDBOX_MAX_WORKSPACES", 20)),
         sandbox_exec_timeout=max(5, _int("SANDBOX_EXEC_TIMEOUT", 120)),
