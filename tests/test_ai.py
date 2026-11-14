@@ -2695,7 +2695,13 @@ def test_thread_followup_after_bot_reply_bypasses_strict_gate(tmp_path):
     db.add_message("ch:C_FOLLOW:600.000", "user", "U_FOLLOW_ALICE", "why do u code so much")
     db.add_message("ch:C_FOLLOW:600.000", "assistant", None, "someone's gotta read the traceback")
     old_db = runtime.db
+    old_settings = runtime.settings
     runtime.db = db
+    runtime.settings = MagicMock()
+    runtime.settings.ai_allowed.return_value = True
+    runtime.settings.ai_thread_cooldown = 0
+    runtime.settings.ai_gate_enabled = True
+    runtime.settings.bot_name = "Chicen Nugget Bot"
 
     client = AsyncMock()
     gate = MagicMock()
@@ -2727,3 +2733,4 @@ def test_thread_followup_after_bot_reply_bypasses_strict_gate(tmp_path):
     finally:
         runtime.gate = old_gate
         runtime.db = old_db
+        runtime.settings = old_settings
