@@ -1,11 +1,15 @@
 # chicen nugget
 
-a slack bot for a hack club workspace. one process, two slack identities.
+chicen nugget is a slack bot for a hack club workspace. it's one process with two slack identities: the workspace bot app, and boi, an optional personal assistant account that talks like a real user.
+
+it's built to be useful without being loud. it answers when asked, stays out of conversations that aren't its, and keeps the weird stuff — custom welcome messages, ping-group buttons, huddle summaries, voice clips — one command away.
 
 - the bot app handles channels, mentions, thread follow-ups, slash commands, welcomer, access requests, recaps, reminders and polls.
-- boi is an optional personal assistant account. give it a slack user token and it answers your dms, group dms and mentions with a typing indicator.
+- boi is the personal assistant. give it a slack user token and it answers your dms, group dms and mentions with a typing indicator.
 
-they share one sqlite database, one toolbox and one memory. socket mode only, so there's no public url, no web server and no separate database.
+they share one sqlite database, one toolbox and one memory. socket mode only, so there's no public url, no web server and no separate database to babysit.
+
+if something feels off, `/nugget doctor` is the first stop. it checks scopes, tokens, sqlite, browser, github, sandbox, storage and models.
 
 ## what it does
 
