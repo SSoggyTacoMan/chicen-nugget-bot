@@ -623,3 +623,22 @@ def test_advanced_setup_rejects_non_admin(tmp_path, monkeypatch):
 
     asyncio.run(run())
     assert db.kv_get("config:memory_retention_days") is None
+
+
+def test_watcher_status_prefers_db_over_env_urls(tmp_path):
+    settings = SimpleNamespace(
+        github_watch=True,
+        watch_github_notifications=False,
+        watch_email=False,
+        watch_urls=("https://env.example",),
+    )
+    assert integrations._active_watchers(None, settings) == [
+        "github ci",
+        "urls (1)",
+    ]
+
+    db = Database(tmp_path / "watchers.db")
+    db.init()
+    db.kv_set("config:watch_github_ci", "false")
+    db.kv_set("config:watch_urls", "https://a.example,https://b.example")
+    assert integrations._active_watchers(db, settings) == ["urls (2)"]

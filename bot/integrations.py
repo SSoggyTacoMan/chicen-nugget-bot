@@ -91,6 +91,36 @@ def _get(db: Database | None, key: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _active_watchers(db: Database | None, settings: Settings) -> list[str]:
+    bits: list[str] = []
+    for key, label, default in (
+        ("watch_github_ci", "github ci", bool(getattr(settings, "github_watch", False))),
+        (
+            "watch_github_notifications",
+            "github notifications",
+            bool(getattr(settings, "watch_github_notifications", False)),
+        ),
+        ("watch_email", "email", bool(getattr(settings, "watch_email", False))),
+    ):
+        raw = db.kv_get(f"config:{key}") if db else None
+        enabled = (
+            default
+            if raw is None
+            else str(raw).lower() in {"1", "true", "yes", "on"}
+        )
+        if enabled:
+            bits.append(label)
+    urls_raw = db.kv_get("config:watch_urls") if db else None
+    urls = (
+        [item.strip() for item in urls_raw.split(",") if item.strip()]
+        if isinstance(urls_raw, str)
+        else list(getattr(settings, "watch_urls", ()))
+    )
+    if urls:
+        bits.append(f"urls ({len(urls)})")
+    return bits
+
+
 def _setting(settings: Settings, name: str) -> str:
     value = getattr(settings, name, None)
     if isinstance(value, str):
@@ -243,36 +273,7 @@ def setup_status_text(
     boi_state = (
         "connected" if assistant_identity else "not configured (SLACK_USER_TOKEN in the server env)"
     )
-    watch_bits = []
-    for key, label, default in (
-        (
-            "watch_github_ci",
-            "ci",
-            bool(getattr(settings, "github_watch", False)),
-        ),
-        (
-            "watch_github_notifications",
-            "notifications",
-            bool(getattr(settings, "watch_github_notifications", False)),
-        ),
-        (
-            "watch_email",
-            "email",
-            bool(getattr(settings, "watch_email", False)),
-        ),
-    ):
-        raw = _get(db, key)
-        enabled = default if not raw else raw.lower() in {"1", "true", "yes", "on"}
-        if enabled:
-            watch_bits.append(label)
-    urls_raw = _get(db, "watch_urls")
-    urls = (
-        urls_raw.split(",")
-        if urls_raw is not None
-        else getattr(settings, "watch_urls", ())
-    )
-    if any(str(url).strip() for url in urls):
-        watch_bits.append(f"urls ({len([url for url in urls if str(url).strip()])})")
+    watch_bits = _active_watchers(db, settings)
     watch_state = ", ".join(watch_bits) if watch_bits else "none"
 
     lines = [
@@ -353,30 +354,7 @@ def prompt_integration_lines(
         if present
     ]
     api_state = ", ".join(connected_apis) if connected_apis else "none"
-    watchers = []
-
-    def watcher_on(key: str, default: bool) -> bool:
-        raw = _get(db, key)
-        return default if not raw else raw.lower() in {"1", "true", "yes", "on"}
-
-    if watcher_on("watch_github_ci", bool(getattr(settings, "github_watch", False))):
-        watchers.append("github ci")
-    if watcher_on(
-        "watch_github_notifications",
-        bool(getattr(settings, "watch_github_notifications", False)),
-    ):
-        watchers.append("github notifications")
-    if watcher_on("watch_email", bool(getattr(settings, "watch_email", False))):
-        watchers.append("email")
-    urls_raw = _get(db, "watch_urls")
-    watch_urls = (
-        [item for item in urls_raw.split(",") if item.strip()]
-        if urls_raw is not None
-        else list(getattr(settings, "watch_urls", ()))
-    )
-    if watch_urls:
-        watchers.append(f"urls ({len(watch_urls)})")
-    watcher_state = ", ".join(watchers) if watchers else "off"
+    watcher_state = ", ".join(_active_watchers(db, settings)) or "off"
     return (
         f"- GitHub & Hackatime: {gh_state}\n"
         f"- Extra APIs (generic api_request): {api_state}\n"
