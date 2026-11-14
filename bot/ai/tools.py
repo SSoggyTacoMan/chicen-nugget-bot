@@ -1864,7 +1864,7 @@ class Toolbox:
             if not name:
                 return _error("that channel name has no usable characters")
             try:
-                response = await ctx.client.conversations_create(
+                response = await (ctx.bot_client or ctx.client).conversations_create(
                     name=name, is_private=bool(args.get("private", False))
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1883,7 +1883,7 @@ class Toolbox:
             return _error(f"could not resolve channel {raw_channel!r}")
 
         if action == "info":
-            info = await channel_info(ctx.client, channel_id)
+            info = await channel_info(ctx.bot_client or ctx.client, channel_id)
             if not info:
                 return _error(f"could not read channel {raw_channel!r}")
             return _json(
@@ -1896,7 +1896,7 @@ class Toolbox:
 
         if action == "members":
             try:
-                response = await ctx.client.conversations_members(
+                response = await (ctx.bot_client or ctx.client).conversations_members(
                     channel=channel_id, limit=100
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1973,7 +1973,7 @@ class Toolbox:
             return f"{'pinned' if action == 'pin' else 'unpinned'} message {timestamp} in <#{channel_id}>."
 
         if action == "join":
-            info = await channel_info(ctx.client, channel_id)
+            info = await channel_info(ctx.bot_client or ctx.client, channel_id)
             if info and info.get("is_archived"):
                 return _error("that channel is archived")
             if info and info.get("is_private") and not info.get("is_member"):
