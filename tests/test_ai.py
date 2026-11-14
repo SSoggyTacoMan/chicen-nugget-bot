@@ -104,6 +104,7 @@ def test_toolbox_has_expanded_tools():
     assert "check_emails" in names
     assert "hackatime_stats" in names
     assert "github_info" in names
+    assert "github_write" in names
     assert "run_code" in names
     assert "hacker_news" in names
     assert "http_status" in names

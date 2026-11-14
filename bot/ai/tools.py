@@ -1036,6 +1036,73 @@ class Toolbox:
                 ["action"],
             ),
             tool(
+                "github_write",
+                "Create PRs and issues, comment, review, close, reopen or merge pull requests. Owner/admin only, DM only. close and merge require confirm=true and an explicit owner request.",
+                {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "create_pr",
+                            "comment",
+                            "review",
+                            "close",
+                            "reopen",
+                            "merge",
+                            "create_issue",
+                        ],
+                        "description": "Write action.",
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "owner/repo. Defaults to REPO_URL when set.",
+                    },
+                    "number": {
+                        "type": "integer",
+                        "description": "PR or issue number for comment/review/close/reopen/merge.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "PR or issue title for create actions.",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Comment, review, PR or issue body.",
+                    },
+                    "head": {
+                        "type": "string",
+                        "description": "For create_pr: source branch.",
+                    },
+                    "base": {
+                        "type": "string",
+                        "description": "For create_pr: target branch. Default main.",
+                    },
+                    "draft": {
+                        "type": "boolean",
+                        "description": "For create_pr: open as a draft.",
+                    },
+                    "event": {
+                        "type": "string",
+                        "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+                        "description": "For review: default COMMENT.",
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["merge", "squash", "rebase"],
+                        "description": "For merge: default squash.",
+                    },
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "For create_issue: labels.",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Required for close and merge.",
+                    },
+                },
+                ["action"],
+            ),
+            tool(
                 "run_code",
                 "Execute a Python code snippet in a sandboxed subprocess and return stdout/stderr. Owner/admin only.",
                 {"code": {"type": "string", "description": "Python 3 code to execute."}},
@@ -3788,6 +3855,147 @@ class Toolbox:
         except Exception as exc:  # noqa: BLE001
             return _error(f"github api error: {exc}")
 
+    async def _tool_github_write(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can change GitHub")
+        if not ctx.is_dm:
+            return _error("github_write is only permitted in direct messages")
+        action = str(args.get("action") or "").lower().strip()
+        github = integrations.github_config(ctx.db, ctx.settings)
+        token = (github.get("token") or "").strip()
+        if not token:
+            return _error("github isn't connected. use `/nugget setup github` to add a token.")
+        repo = str(args.get("repo") or github.get("repo") or "").strip()
+        if repo.startswith(("http://", "https://")):
+            repo = _default_repo(ctx.settings, ctx.db)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            return _error("repo must be 'owner/repo'")
+
+        def number_arg() -> int | None:
+            try:
+                value = int(args.get("number") or 0)
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "chicen-nugget-bot",
+        }
+        base = f"https://api.github.com/repos/{repo}"
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                if action == "create_pr":
+                    title = str(args.get("title") or "").strip()
+                    head = str(args.get("head") or "").strip()
+                    if not title or not head:
+                        return _error("title and head are required for create_pr")
+                    base_branch = str(args.get("base") or "").strip()
+                    if not base_branch:
+                        repo_resp = await http.get(base, headers=headers)
+                        if repo_resp.status_code < 400:
+                            base_branch = str(
+                                (repo_resp.json() or {}).get("default_branch") or "main"
+                            )
+                        else:
+                            base_branch = "main"
+                    payload = {
+                        "title": title,
+                        "head": head,
+                        "base": base_branch,
+                        "body": str(args.get("body") or "")[:20000],
+                        "draft": bool(args.get("draft", False)),
+                    }
+                    resp = await http.post(f"{base}/pulls", headers=headers, json=payload)
+                elif action == "create_issue":
+                    title = str(args.get("title") or "").strip()
+                    if not title:
+                        return _error("title is required for create_issue")
+                    labels = args.get("labels") or []
+                    payload = {
+                        "title": title,
+                        "body": str(args.get("body") or "")[:20000],
+                        "labels": [str(label) for label in labels][:20]
+                        if isinstance(labels, list)
+                        else [],
+                    }
+                    resp = await http.post(f"{base}/issues", headers=headers, json=payload)
+                elif action == "comment":
+                    number = number_arg()
+                    body = str(args.get("body") or "").strip()
+                    if not number or not body:
+                        return _error("number and body are required for comment")
+                    resp = await http.post(
+                        f"{base}/issues/{number}/comments",
+                        headers=headers,
+                        json={"body": body[:20000]},
+                    )
+                elif action == "review":
+                    number = number_arg()
+                    if not number:
+                        return _error("number is required for review")
+                    event = str(args.get("event") or "COMMENT").upper()
+                    if event not in {"APPROVE", "REQUEST_CHANGES", "COMMENT"}:
+                        return _error("event must be APPROVE, REQUEST_CHANGES or COMMENT")
+                    payload = {"event": event, "body": str(args.get("body") or "")[:20000]}
+                    resp = await http.post(
+                        f"{base}/pulls/{number}/reviews", headers=headers, json=payload
+                    )
+                elif action in {"close", "reopen"}:
+                    number = number_arg()
+                    if not number:
+                        return _error(f"number is required for {action}")
+                    if action == "close" and not bool(args.get("confirm", False)):
+                        return _error("closing a PR needs confirm=true and an explicit owner request")
+                    resp = await http.patch(
+                        f"{base}/pulls/{number}",
+                        headers=headers,
+                        json={"state": "closed" if action == "close" else "open"},
+                    )
+                elif action == "merge":
+                    number = number_arg()
+                    if not number:
+                        return _error("number is required for merge")
+                    if not bool(args.get("confirm", False)):
+                        return _error("merging needs confirm=true and an explicit owner request")
+                    method = str(args.get("method") or "squash").lower()
+                    if method not in {"merge", "squash", "rebase"}:
+                        return _error("method must be merge, squash or rebase")
+                    resp = await http.put(
+                        f"{base}/pulls/{number}/merge",
+                        headers=headers,
+                        json={"merge_method": method},
+                    )
+                else:
+                    return _error(f"unknown action: {action}")
+
+                if resp.status_code >= 400:
+                    detail = resp.text[:500]
+                    return _error(f"github {action} failed ({resp.status_code}): {detail}")
+                data = resp.json() if getattr(resp, "content", b"") else {}
+                if action in {"create_pr", "create_issue"}:
+                    return _json(
+                        {
+                            "action": action,
+                            "number": data.get("number"),
+                            "url": data.get("html_url"),
+                            "state": data.get("state"),
+                        }
+                    )
+                if action == "merge":
+                    return _json({"merged": data.get("merged"), "message": data.get("message")})
+                return _json(
+                    {
+                        "action": action,
+                        "number": number_arg(),
+                        "ok": True,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"github write failed: {exc}")
+
     async def _tool_run_code(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can run code")
@@ -4470,6 +4678,8 @@ class Toolbox:
             "assistant_model": "ai_assistant_model",
             "boi_model": "ai_assistant_model",
             "boi_fallback_model": "ai_assistant_fallback_model",
+            "code_model": "ai_code_model",
+            "code_fallback_model": "ai_code_fallback_model",
             "google_token": "google_access_token",
             "google_auth": "google_access_token",
             "google_redirect": "google_redirect_uri",
@@ -4504,6 +4714,8 @@ class Toolbox:
             "ai_fallback_model",
             "ai_assistant_model",
             "ai_assistant_fallback_model",
+            "ai_code_model",
+            "ai_code_fallback_model",
             "google_access_token",
             "google_refresh_token",
             "google_client_id",
@@ -4663,6 +4875,8 @@ class Toolbox:
                 "ai_fallback_model",
                 "ai_assistant_model",
                 "ai_assistant_fallback_model",
+                "ai_code_model",
+                "ai_code_fallback_model",
             }:
                 return f"*{key}* set to `{normalized_val}`. it applies to new turns."
 

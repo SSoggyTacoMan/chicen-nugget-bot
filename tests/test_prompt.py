@@ -17,6 +17,8 @@ REQUIRED = {
     "ai_fallback_model",
     "ai_assistant_model",
     "ai_assistant_fallback_model",
+    "ai_code_model",
+    "ai_code_fallback_model",
     "imagine_model",
     "gate_model",
     "repo_url",
