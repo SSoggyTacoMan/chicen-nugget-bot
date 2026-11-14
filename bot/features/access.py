@@ -221,8 +221,12 @@ async def on_request_submit(ack, body, view, client) -> None:
                 )
             else:
                 remaining = cooldown - (datetime.now(UTC) - created)
-                hours = max(1, int(remaining.total_seconds() // 3600))
-                await post(client, user_id, f"you asked recently. try again in about {hours}h.")
+                hours = max(1, int((remaining.total_seconds() + 3599) // 3600))
+                if hours >= 48:
+                    wait = f"about {(hours + 23) // 24} days"
+                else:
+                    wait = f"about {hours}h"
+                await post(client, user_id, f"you asked recently. try again in {wait}.")
             return
 
     request_id = runtime.db.create_access_request(user_id, reason)
@@ -251,7 +255,7 @@ async def on_request_submit(ack, body, view, client) -> None:
         await post(
             client,
             user_id,
-            f"request *#{request_id}* submitted for admin review. you'll get a DM once decided.",
+            f"request *#{request_id}* sent. i'll DM you once there's an answer.",
         )
 
     await _notify_admins(client, request_id, user_id, reason)
@@ -486,7 +490,7 @@ async def on_deny_submit(ack, body, view, client) -> None:
     await post(
         client,
         request["user_id"],
-        f"your tier 2 request *#{request['id']}* was denied."
+        f"your tier 2 request *#{request['id']}* wasn't approved this time."
         + (f"\nreason: {note}" if note else ""),
     )
     await _log(f"tier 2 request *#{request['id']}* denied by <@{admin_id}> for <@{request['user_id']}>.")

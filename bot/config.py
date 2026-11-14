@@ -370,15 +370,15 @@ def load_settings() -> Settings:
         ai_assistant_model=_str("AI_ASSISTANT_MODEL", "anthropic/claude-sonnet-5.5")
         or "anthropic/claude-sonnet-5.5",
         ai_assistant_fallback_model=_str(
-            "AI_ASSISTANT_FALLBACK_MODEL", "openai/gpt-5.5"
+            "AI_ASSISTANT_FALLBACK_MODEL", "openai/gpt-6.1-sol"
         )
-        or "openai/gpt-5.5",
+        or "openai/gpt-6.1-sol",
         ai_code_model=_str("AI_CODE_MODEL", "anthropic/claude-sonnet-5.5")
         or "anthropic/claude-sonnet-5.5",
         ai_code_fallback_model=_str(
-            "AI_CODE_FALLBACK_MODEL", "openai/gpt-5.5"
+            "AI_CODE_FALLBACK_MODEL", "openai/gpt-6.1-sol"
         )
-        or "openai/gpt-5.5",
+        or "openai/gpt-6.1-sol",
         ai_embedding_model=_str("AI_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b") or None,
         transcribe_model=_str("TRANSCRIBE_MODEL", "openai/gpt-audio")
         or "openai/gpt-audio",
@@ -477,9 +477,9 @@ def load_settings() -> Settings:
         access_panel_text=_str(
             "ACCESS_PANEL_TEXT",
             "*tier 2 access* :lock:\nwant into the private tier 2 channel? "
-            "hit the button, tell me why, and i'll send it to the admins.",
+            "hit the button, tell me why, and i'll pass it along.",
         ),
-        access_cooldown_hours=max(0, _int("ACCESS_COOLDOWN_HOURS", 24)),
+        access_cooldown_hours=max(168, _int("ACCESS_COOLDOWN_HOURS", 168)),
         admin_channel_id=_str("ADMIN_CHANNEL_ID") or None,
         access_auto_approve=_bool("ACCESS_AUTO_APPROVE", False),
         usergroup_guard=_bool("USERGROUP_GUARD", True),
@@ -494,7 +494,8 @@ def load_settings() -> Settings:
         weather_default_location=_str("WEATHER_DEFAULT_LOCATION") or None,
         tavily_api_key=_str("TAVILY_API_KEY") or None,
         max_reminders=max(1, _int("MAX_REMINDERS", 200)),
-        repo_url=_str("REPO_URL"),
+        repo_url=_str("REPO_URL", "https://github.com/SSoggyTacoMan/chicen-nugget-bot")
+        or "https://github.com/SSoggyTacoMan/chicen-nugget-bot",
         github_username=_str("GITHUB_USERNAME") or None,
         imap_host=_str("IMAP_HOST") or None,
         imap_port=_int("IMAP_PORT", 993),

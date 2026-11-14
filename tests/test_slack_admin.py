@@ -113,6 +113,7 @@ def test_manage_channel_join_leave_list_and_create():
         client.conversations_setTopic = AsyncMock(return_value={"ok": True})
         client.conversations_setPurpose = AsyncMock(return_value={"ok": True})
         client.conversations_invite = AsyncMock(return_value={"ok": True})
+        client.conversations_kick = AsyncMock(return_value={"ok": True})
         client.pins_add = AsyncMock(return_value={"ok": True})
         client.pins_remove = AsyncMock(return_value={"ok": True})
         ctx = _ctx(client=client, is_dm=False)
@@ -161,6 +162,16 @@ def test_manage_channel_join_leave_list_and_create():
             assert "invited <@U2>" in invited
             client.conversations_invite.assert_called_once_with(
                 channel="C1", users="U2"
+            )
+
+            kicked = await box.execute(
+                "manage_channel",
+                {"action": "kick", "channel": "C1", "user": "maaren"},
+                ctx,
+            )
+            assert "removed <@U2>" in kicked
+            client.conversations_kick.assert_called_once_with(
+                channel="C1", user="U2"
             )
 
             pinned = await box.execute(

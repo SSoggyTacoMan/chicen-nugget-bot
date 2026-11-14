@@ -53,6 +53,10 @@ _NAME_ADDRESS = (
     re.compile(r"\b(?:chicen\s+nugget|chicen)\b", re.IGNORECASE),
     re.compile(r"\bnugget\s*[,?!:]", re.IGNORECASE),
 )
+_FOLLOWUP_RE = re.compile(
+    r"\b(?:you|u|why|how|what|explain|huh|really|serious|confused)\b|don'?t get",
+    re.IGNORECASE,
+)
 _REQUEST_RE = re.compile(
     r"\b(?:can|could|would|will)\s+you\b|"
     r"\b(?:help|check|look at|fix|review|explain|thoughts|opinion|advice|debug)\b",
@@ -488,8 +492,12 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
     bot_names = {runtime.settings.bot_name.lower(), "nugget", "chicen", "chicennugget"}
     text_lower = text.lower()
     explicitly_named = any(re.search(rf"\b{re.escape(name)}\b", text_lower) for name in bot_names if name)
+    followup_to_bot = bool(
+        bot_last
+        and ("?" in text or _REQUEST_RE.search(text) or _FOLLOWUP_RE.search(text))
+    )
 
-    if not explicitly_named:
+    if not explicitly_named and not followup_to_bot:
         human_users = {r.get("user_id") for r in rows if r.get("role") == "user" and r.get("user_id")}
         if len(human_users) >= 2 and "?" not in text and not images:
             return
@@ -501,7 +509,9 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
             return
 
     jev_hint = ""
-    if runtime.gate is not None and runtime.settings.ai_gate_enabled:
+    if followup_to_bot:
+        jev_hint = "you spoke last in this thread; this reads as a direct follow-up"
+    elif runtime.gate is not None and runtime.settings.ai_gate_enabled:
         user_name = await _user_name(client, user_id)
         channel_name = await _channel_name(client, channel)
         decision = await runtime.gate.decide(
@@ -562,6 +572,42 @@ async def _recent_lines(client, rows: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+async def _channel_context(
+    client, channel: str, current_ts: str | None, bot_user_id: str
+) -> tuple[list[str], bool]:
+    """Recent channel lines and whether the bot spoke last, for ambient Jev."""
+    try:
+        response = await client.conversations_history(channel=channel, limit=12)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("could not read ambient context for %s: %s", channel, exc)
+        return [], False
+    lines: list[str] = []
+    bot_last = False
+    for message in reversed(response.get("messages") or []):
+        if current_ts and message.get("ts") == current_ts:
+            continue
+        if message.get("subtype") in {
+            "channel_join",
+            "channel_leave",
+            "channel_topic",
+            "channel_purpose",
+            "bot_message",
+        }:
+            continue
+        text = " ".join((message.get("text") or "").split())
+        if not text:
+            continue
+        user_id = message.get("user") or ""
+        if user_id == bot_user_id:
+            lines.append(f"you: {text[:200]}")
+        elif user_id:
+            lines.append(f"{await _user_name(client, user_id)}: {text[:200]}")
+        else:
+            lines.append(text[:200])
+        bot_last = user_id == bot_user_id
+    return lines[-6:], bot_last
+
+
 async def _maybe_ambient(event: dict[str, Any], client) -> None:
     """Let jev decide whether an unaddressed channel message deserves a reply."""
     if runtime.db and runtime.db.kv_get("config:ambient_ai") == "false":
@@ -600,8 +646,17 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
 
     user_name = await _user_name(client, user_id)
     channel_name = await _channel_name(client, channel)
+    recent, bot_last = await _channel_context(
+        client, channel, event.get("ts"), runtime.bot_user_id or ""
+    )
     decision = await runtime.gate.decide(
-        text=text, channel_name=channel_name, user_name=user_name, user_id=user_id
+        text=text,
+        channel_name=channel_name,
+        user_name=user_name,
+        user_id=user_id,
+        recent=recent,
+        bot_last=bot_last,
+        require_addressed=True,
     )
     if not decision.reply:
         return

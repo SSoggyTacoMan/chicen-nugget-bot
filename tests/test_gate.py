@@ -72,9 +72,16 @@ def answers(should=0.0, addressed=0.0, spam=0.0, kind="other", confidence=0.8,
     }
 
 
-def decide(jev_answers, text="hello", budget=None, user_id="U1", bot_last=False, **overrides):
+def decide(jev_answers, text="hello", budget=None, user_id="U1", bot_last=False, require_addressed=False, **overrides):
     gate = Gate(settings(**overrides), jev=FakeJev(jev_answers), budget=budget)
-    return asyncio.run(gate.decide(text=text, user_id=user_id, bot_last=bot_last))
+    return asyncio.run(
+        gate.decide(
+            text=text,
+            user_id=user_id,
+            bot_last=bot_last,
+            require_addressed=require_addressed,
+        )
+    )
 
 
 def test_high_probability_replies():
@@ -132,6 +139,23 @@ def test_hint_mentions_tools_and_bot_last():
 def test_state_includes_bot_last():
     state = _state("latest one", "#chan", "someone", None, bot_last=True)
     assert "the bot spoke last: yes" in state
+
+
+def test_ambient_requires_addressed():
+    general = decide(
+        answers(should=0.95, kind="question", recipient="everyone"),
+        text="why do u code so much",
+        require_addressed=True,
+    )
+    assert not general.reply
+
+    followup = decide(
+        answers(should=0.55, kind="question", recipient="everyone"),
+        text="explain",
+        bot_last=True,
+        require_addressed=True,
+    )
+    assert not followup.reply
 
 
 def test_threshold_is_configurable():

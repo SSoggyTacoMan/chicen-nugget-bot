@@ -2674,3 +2674,49 @@ def test_transcription_cost_is_recorded(monkeypatch):
         user_id="U123",
         cost_usd=0.0036,
     )
+
+
+def test_thread_followup_after_bot_reply_bypasses_strict_gate(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.ai.gate import GateDecision
+    from bot.db import Database
+    from bot.features.agent import _handle_thread_continuation, _last_thread
+    from bot.runtime import runtime
+
+    db = Database(str(tmp_path / "followup.db"))
+    db.init()
+    db.mark_thread("C_FOLLOW", "600.000")
+    db.add_message("ch:C_FOLLOW:600.000", "user", "U_ALICE", "why do u code so much")
+    db.add_message("ch:C_FOLLOW:600.000", "assistant", None, "someone's gotta read the traceback")
+    runtime.db = db
+
+    client = AsyncMock()
+    gate = MagicMock()
+    gate.decide = AsyncMock(return_value=GateDecision(reply=False, kind="chatter"))
+    old_gate = runtime.gate
+    runtime.gate = gate
+    _last_thread.clear()
+
+    async def run():
+        with patch("bot.features.agent._user_name", return_value="alice"), \
+             patch("bot.features.agent._channel_name", return_value="general"), \
+             patch("bot.features.agent.fetch_slack_images", AsyncMock(return_value=[])), \
+             patch("bot.features.agent._handle_channel", AsyncMock(return_value=True)) as mock_handle:
+            await _handle_thread_continuation(
+                {
+                    "channel": "C_FOLLOW",
+                    "thread_ts": "600.000",
+                    "user": "U_ALICE",
+                    "text": "explain",
+                },
+                client,
+            )
+            mock_handle.assert_called_once()
+            gate.decide.assert_not_called()
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.gate = old_gate

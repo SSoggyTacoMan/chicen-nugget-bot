@@ -28,6 +28,14 @@ MODEL_OPTIONS: tuple[tuple[str, str], ...] = (
         "google/gemini-3.1-flash-lite-image",
         "Nano Banana 2 Lite - cheapest + fastest",
     ),
+    (
+        "openai/gpt-5.4-image-2",
+        "GPT-5.4 Image 2 - OpenAI, strong",
+    ),
+    (
+        "openai/gpt-5-image-mini",
+        "GPT-5 Image Mini - OpenAI, cheaper",
+    ),
 )
 
 FALLBACK_OPTIONS: tuple[tuple[str, str], ...] = (

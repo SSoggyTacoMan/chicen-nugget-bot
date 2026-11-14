@@ -41,4 +41,6 @@ def test_model_options_include_the_nano_banana_family():
         "google/gemini-nano-banana-2.1",
         "google/gemini-3-pro-image",
         "google/gemini-3.1-flash-lite-image",
+        "openai/gpt-5.4-image-2",
+        "openai/gpt-5-image-mini",
     } <= values

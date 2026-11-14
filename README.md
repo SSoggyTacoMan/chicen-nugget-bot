@@ -169,8 +169,10 @@ if tts is off, check `TTS_MODEL`, `AI_API_KEY` and `TTS_VOICE`.
 | nano banana 2.1 | `google/gemini-nano-banana-2.1` | newer, better |
 | nano banana pro | `google/gemini-3-pro-image` | best, slowest and priciest |
 | nano banana 2 lite | `google/gemini-3.1-flash-lite-image` | cheapest and fastest |
+| gpt image 2 | `openai/gpt-5.4-image-2` | OpenAI, strong |
+| gpt image mini | `openai/gpt-5-image-mini` | OpenAI, cheaper |
 
-the cost field only affects the bot's internal `/nugget budget`, not google's bill. runtime choices override `IMAGINE_MODEL` / `IMAGINE_FALLBACK_MODEL` / `AI_IMAGE_COST_USD`.
+the cost field only affects the bot's internal `/nugget budget`, not the provider's bill. runtime choices override `IMAGINE_MODEL` / `IMAGINE_FALLBACK_MODEL` / `AI_IMAGE_COST_USD`.
 
 ### google
 
@@ -242,8 +244,8 @@ mcp servers aren't wired yet. for now it's these presets plus the built-in googl
 | job | default | fallback |
 |---|---|---|
 | bot chat | `deepseek/deepseek-v4.1-flash` | `anthropic/claude-haiku-5.5` |
-| boi chat | `anthropic/claude-sonnet-5.5` | `openai/gpt-5.5` |
-| code turns | `anthropic/claude-sonnet-5.5` | `openai/gpt-5.5` |
+| boi chat | `anthropic/claude-sonnet-5.5` | `openai/gpt-6.1-sol` |
+| code turns | `anthropic/claude-sonnet-5.5` | `openai/gpt-6.1-sol` |
 
 `AI_CODE_MODEL` is set by default. a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
 

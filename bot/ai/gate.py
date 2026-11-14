@@ -157,6 +157,7 @@ class Gate:
         user_id: str | None = None,
         recent: list[str] | None = None,
         bot_last: bool = False,
+        require_addressed: bool = False,
     ) -> GateDecision:
         if not self.settings.ai_gate_enabled or not text.strip():
             return GateDecision(reply=False, error="gate disabled")
@@ -213,9 +214,16 @@ class Gate:
         aimed = directed or p_recipient_bot >= self.settings.ai_gate_addressed_confidence
         spammy = p_spam >= self.settings.ai_gate_spam_threshold
         helpful = p_should >= self.settings.ai_gate_min_confidence
-        # Never spend an agent turn on a message aimed at someone else unless the
-        # speaker is clearly directing it at the bot too.
-        reply = not spammy and (aimed or (helpful and recipient_choice != "someone_else"))
+        # Ambient messages must be aimed at the bot (or answer a bot turn).
+        # Thread follow-ups can still be helpful without a direct mention.
+        if require_addressed:
+            reply = not spammy and aimed
+        else:
+            # Never spend an agent turn on a message aimed at someone else unless the
+            # speaker is clearly directing it at the bot too.
+            reply = not spammy and (
+                aimed or (helpful and recipient_choice != "someone_else")
+            )
 
         decision = GateDecision(
             reply=reply,

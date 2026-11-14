@@ -605,7 +605,7 @@ class Toolbox:
             ),
             tool(
                 "manage_channel",
-                "List, inspect, join, leave, create, or list members of Slack channels. Owner/admin only. Joining and leaving are public actions, so confirm with the owner first.",
+                "List, inspect, join, leave, create, list members, invite or remove people from Slack channels. Owner/admin only. Joining, leaving and kicking are public actions, so confirm with the owner first.",
                 {
                     "action": {
                         "type": "string",
@@ -619,6 +619,7 @@ class Toolbox:
                             "set_topic",
                             "set_purpose",
                             "invite",
+                            "kick",
                             "pin",
                             "unpin",
                         ],
@@ -638,7 +639,7 @@ class Toolbox:
                     },
                     "user": {
                         "type": "string",
-                        "description": "For action='invite': user id, @name, display name or email.",
+                        "description": "For invite/kick: user id, @name, display name or email.",
                     },
                     "timestamp": {
                         "type": "string",
@@ -2162,6 +2163,36 @@ class Toolbox:
                     return f"<@{user_id}> is already in <#{channel_id}>."
                 return _error(f"could not invite <@{user_id}>: {code}")
             return f"invited <@{user_id}> to <#{channel_id}>."
+
+        if action in {"kick", "remove"}:
+            query = str(args.get("user") or "").strip()
+            if not query:
+                return _error("user is required for action='kick'")
+            user = await self._find_user(ctx, query)
+            if not user or not user.get("id"):
+                return _error(f"could not find a user matching {query!r}")
+            user_id = str(user["id"])
+            if user_id in {ctx.bot_user_id, ctx.assistant_user_id, ctx.user_id}:
+                return _error("i won't kick myself or the person asking")
+            if user_id == ctx.settings.owner_user_id:
+                return _error("i won't kick the owner")
+            target_client = ctx.bot_client or client
+            try:
+                await target_client.conversations_kick(
+                    channel=channel_id, user=user_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                code = error_code(exc)
+                if code == "not_in_channel":
+                    return f"<@{user_id}> isn't in <#{channel_id}>."
+                if code == "cant_kick_self":
+                    return _error("i can't kick that account")
+                if code == "missing_scope":
+                    return _error(
+                        "i need `channels:manage` / `groups:write` and a reinstall to kick people"
+                    )
+                return _error(f"could not kick <@{user_id}>: {code}")
+            return f"removed <@{user_id}> from <#{channel_id}>."
 
         if action in {"pin", "unpin"}:
             timestamp = str(args.get("timestamp") or "").strip()
