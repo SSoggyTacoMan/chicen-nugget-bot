@@ -64,6 +64,20 @@ def incoming_text(
     return cleaned.strip()
 
 
+_SILENCE_RE = re.compile(
+    r"(?:^|[.!?,]\s*|\b(?:please|pls|plz)\s+)"
+    r"(?:do\s+not|don't|dont)\s+(?:respond|reply|answer)\b"
+    r"|\bno\s+response\b"
+    r"|\b(?:shut\s+up|stop\s+talking|quit\s+talking|be\s+quiet|can\s+you\s+not)\b",
+    re.IGNORECASE,
+)
+
+
+def asks_for_silence(text: str) -> bool:
+    """True when someone explicitly asks the bot not to reply."""
+    return bool(_SILENCE_RE.search(text or ""))
+
+
 def has_owner_signature(text: str) -> bool:
     """True for messages we posted through the owner's profile.
 

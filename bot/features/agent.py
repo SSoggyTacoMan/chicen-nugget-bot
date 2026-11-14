@@ -20,6 +20,7 @@ from bot.slack_api import (
     user_info,
 )
 from bot.utils.text import (
+    asks_for_silence,
     chunk_text,
     disarm_broadcasts,
     display_name,
@@ -272,6 +273,8 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
         return
     if not text and images:
         text = "Describe or look at this image."
+    if asks_for_silence(text):
+        return
     retry = user_retry_after(user_id)
     if retry:
         await post(
@@ -620,6 +623,8 @@ async def _handle_channel(
         text = "hey"
     elif not text and images:
         text = "Look at this image."
+    if asks_for_silence(text):
+        return False
     retry = user_retry_after(user_id)
     if retry:
         await post_ephemeral(

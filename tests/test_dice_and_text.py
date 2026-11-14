@@ -1,7 +1,7 @@
 import random
 
 from bot.utils.dice import roll
-from bot.utils.text import chunk_text, extract_id, format_mrkdwn, has_owner_signature, incoming_text
+from bot.utils.text import chunk_text, extract_id, format_mrkdwn, has_owner_signature, incoming_text, asks_for_silence
 
 
 def test_dice_basic():
@@ -115,3 +115,13 @@ def test_incoming_text_keeps_mentions_readable():
     )
     assert cleaned == "i have @boi and @nugget, cc <@U0ALICE>"
     assert "cut off" not in cleaned
+
+
+def test_asks_for_silence():
+    assert asks_for_silence("pls dont respond to this chicken")
+    assert asks_for_silence("please don't reply")
+    assert asks_for_silence("don't answer this")
+    assert asks_for_silence("shut up")
+    assert asks_for_silence("can you not")
+    assert not asks_for_silence("i dont respond to spam")
+    assert not asks_for_silence("the api is down")
