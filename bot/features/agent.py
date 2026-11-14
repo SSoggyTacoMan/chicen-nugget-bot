@@ -151,14 +151,22 @@ async def on_reaction_added(event: dict[str, Any], client) -> None:
             return
     elif not runtime.settings.ai_allowed(channel):
         return
+    if reaction == "pushpin":
+        if not (
+            user_id == runtime.settings.owner_user_id
+            or runtime.settings.is_admin(user_id)
+        ):
+            return
+        try:
+            await client.pins_add(channel=channel, timestamp=ts)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("could not pin %s/%s: %s", channel, ts, exc)
+            return
+        await react(client, channel, ts, "white_check_mark")
+        return
     if runtime.agent is None or not runtime.settings.ai_enabled:
         return
     if user_retry_after(user_id):
-        return
-    if reaction == "pushpin" and not (
-        user_id == runtime.settings.owner_user_id
-        or runtime.settings.is_admin(user_id)
-    ):
         return
 
     now = time.monotonic()
@@ -168,14 +176,6 @@ async def on_reaction_added(event: dict[str, Any], client) -> None:
     _last_reaction[key] = now
 
     text, root_ts = await _reaction_message(client, channel, ts)
-    if reaction == "pushpin":
-        try:
-            await client.pins_add(channel=channel, timestamp=ts)
-        except Exception as exc:  # noqa: BLE001
-            logger.info("could not pin %s/%s: %s", channel, ts, exc)
-            return
-        await react(client, channel, ts, "white_check_mark")
-        return
     if not text:
         return
 
