@@ -182,11 +182,19 @@ class Agent:
         trigger: str = "mention",
         jev: str = "",
         images: list[str] | None = None,
+        context: str = "",
         client: AsyncWebClient | None = None,
     ) -> str:
         """Run one agent turn (with tools) and persist both sides of it."""
         if not self.settings.ai_enabled:
             return "my ai brain isn't configured yet. add AI_API_KEY and restart me."
+        if context.strip():
+            text = (
+                "[recent channel context, for reference]\n"
+                f"{context.strip()}\n"
+                "[end context]\n\n"
+                f"[latest message]\n{text}"
+            )
 
         active_client = client or self.client
         is_user_identity = bool(self.user_client and active_client == self.user_client)

@@ -677,6 +677,7 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
         thread_ts=event.get("ts"),
         trigger="ambient",
         jev=decision.hint(),
+        context="\n".join(recent[-4:]),
     )
 
 
@@ -703,6 +704,7 @@ async def _handle_channel(
     trigger: str = "mention",
     jev: str = "",
     images: list[str] | None = None,
+    context: str = "",
 ) -> bool:
     settings = runtime.settings
     channel = event.get("channel")
@@ -750,6 +752,7 @@ async def _handle_channel(
                 trigger=trigger,
                 jev=jev,
                 images=images,
+                context=context,
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return False
