@@ -286,10 +286,11 @@ mcp servers aren't wired yet. for now it's these presets plus the built-in googl
 | job | default | fallback |
 |---|---|---|
 | bot chat | `deepseek/deepseek-v4.1-flash` | `anthropic/claude-haiku-5.5` |
+| boi quick chat | `anthropic/claude-haiku-5.5` | `anthropic/claude-sonnet-5.5` |
 | boi chat | `anthropic/claude-sonnet-5.5` | `openai/gpt-6.1-sol` |
 | code turns | `anthropic/claude-sonnet-5.5` | `openai/gpt-6.1-sol` |
 
-`AI_CODE_MODEL` is set by default. a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
+short/simple Boi messages use the quick model; anything that needs tools, code or a longer answer goes to the main Boi model. `AI_CODE_MODEL` is set by default. a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
 
 ### quota fallback
 

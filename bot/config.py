@@ -104,6 +104,7 @@ class Settings:
     ai_model: str
     ai_fallback_model: str | None
     ai_assistant_model: str
+    ai_assistant_fast_model: str | None
     ai_assistant_fallback_model: str | None
     ai_code_model: str | None
     ai_code_fallback_model: str | None
@@ -373,6 +374,10 @@ def load_settings() -> Settings:
         ai_fallback_model=_str("AI_FALLBACK_MODEL", "anthropic/claude-haiku-5.5") or None,
         ai_assistant_model=_str("AI_ASSISTANT_MODEL", "anthropic/claude-sonnet-5.5")
         or "anthropic/claude-sonnet-5.5",
+        ai_assistant_fast_model=_str(
+            "AI_ASSISTANT_FAST_MODEL", "anthropic/claude-haiku-5.5"
+        )
+        or None,
         ai_assistant_fallback_model=_str(
             "AI_ASSISTANT_FALLBACK_MODEL", "openai/gpt-6.1-sol"
         )

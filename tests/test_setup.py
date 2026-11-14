@@ -474,6 +474,7 @@ def _setup_settings(**overrides):
     settings = SimpleNamespace(
         ai_model="bot-model",
         ai_assistant_model="boi-model",
+        ai_assistant_fast_model="boi-fast",
         ai_code_model="code-model",
         ai_embedding_model="embed-model",
         github_watch=False,

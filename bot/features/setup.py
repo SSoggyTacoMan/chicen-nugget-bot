@@ -717,6 +717,14 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                     "Boi model",
                     initial=_current("ai_assistant_model", settings.ai_assistant_model),
                 ),
+                _input(
+                    "ai_assistant_fast_model",
+                    "Boi quick-chat model",
+                    initial=_current(
+                        "ai_assistant_fast_model",
+                        settings.ai_assistant_fast_model or "",
+                    ),
+                ),
                 _input("ai_code_model", "Code model", initial=_current("ai_code_model", settings.ai_code_model or "")),
                 _checkboxes(
                     "behavior",
@@ -1314,6 +1322,7 @@ async def on_ai_submit(ack, body, view, client) -> None:
     for key in (
         "ai_model",
         "ai_assistant_model",
+        "ai_assistant_fast_model",
         "ai_code_model",
     ):
         raw = values.get(key, "")

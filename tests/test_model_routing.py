@@ -12,6 +12,7 @@ def test_code_model_routing_uses_code_model_after_code_tools():
     settings.ai_model = "bot-chat"
     settings.ai_fallback_model = None
     settings.ai_assistant_model = "boi-chat"
+    settings.ai_assistant_fast_model = "boi-fast"
     settings.ai_assistant_fallback_model = None
     settings.ai_code_model = "code-model"
     settings.ai_code_fallback_model = "code-fallback"
@@ -36,9 +37,47 @@ def test_code_model_routing_uses_code_model_after_code_tools():
         "bot-chat",
     ]
     assert agent._models_for(True) == ["boi-chat", "bot-chat"]
+    assert agent._models_for(True, fast=True) == [
+        "boi-fast",
+        "boi-chat",
+        "bot-chat",
+    ]
+    assert agent._models_for(False, fast=True) == ["bot-chat"]
     assert agent._models_for(True, code=True) == [
         "code-model",
         "code-fallback",
         "boi-chat",
         "bot-chat",
     ]
+    assert agent._models_for(True, code=True, fast=True) == [
+        "code-model",
+        "code-fallback",
+        "boi-chat",
+        "bot-chat",
+    ]
+
+
+def test_simple_chat_detection(tmp_path):
+    settings = MagicMock()
+    settings.ai_api_key = "key"
+    settings.ai_base_url = "https://ai.example.com/v1"
+    settings.ai_model = "bot-chat"
+    settings.ai_fallback_model = None
+    settings.ai_assistant_model = "boi-chat"
+    settings.ai_assistant_fast_model = "boi-fast"
+    settings.ai_assistant_fallback_model = None
+    settings.ai_code_model = None
+    settings.ai_code_fallback_model = None
+    settings.ai_daily_budget_usd = 0
+    settings.ai_user_daily_budget_usd = 0
+    settings.ai_enabled = True
+    db = MagicMock()
+    db.kv_get.return_value = None
+    agent = Agent(settings, db, client=AsyncMock(), user_client=None, bot_user_id="U_BOT")
+
+    assert agent._simple_chat("hey, what's up?")
+    assert agent._simple_chat("who built you?")
+    assert not agent._simple_chat("can you check my calendar?")
+    assert not agent._simple_chat("debug this traceback")
+    assert not agent._simple_chat("look at https://example.com")
+    assert not agent._simple_chat("what's up?", images=["data:image/png;base64,abc"])

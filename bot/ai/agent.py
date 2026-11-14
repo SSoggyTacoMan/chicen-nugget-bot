@@ -84,6 +84,13 @@ CODE_HINT_RE = re.compile(
     r"typescript|python|javascript|docker|github)\b",
     re.IGNORECASE,
 )
+SIMPLE_CHAT_RE = re.compile(
+    r"\b(?:search|look\s+up|check|find|open|run|build|deploy|fix|review|"
+    r"summar(?:y|ize|ise)|remind|schedule|email|calendar|github|pr|repo|"
+    r"sandbox|file|image|chart|deck|hackatime|weather|docs?|link|upload|"
+    r"download|browser|api)\b",
+    re.IGNORECASE,
+)
 
 
 def sync_prompt_digest(db: Database, template: str) -> int:
@@ -324,6 +331,11 @@ class Agent:
 
         answer = ""
         code_mode = bool(CODE_HINT_RE.search(text or ""))
+        fast_chat = bool(
+            is_user_identity
+            and not code_mode
+            and self._simple_chat(text, images=images)
+        )
         used_fallback = False
         try:
             for _ in range(MAX_TOOL_ROUNDS):
@@ -333,11 +345,13 @@ class Agent:
                     user_id=user_id,
                     is_user_identity=is_user_identity,
                     code=code_mode,
+                    fast=fast_chat,
                 )
                 used_fallback = used_fallback or provider == "fallback"
                 message = response.choices[0].message
                 tool_calls = message.tool_calls or []
                 if tool_calls:
+                    fast_chat = False
                     payload: dict[str, Any] = {
                         "role": "assistant",
                         "content": message.content or "",
@@ -463,6 +477,24 @@ class Agent:
             runtime("ai_assistant_fallback_model", self.settings.ai_assistant_fallback_model),
         )
 
+    def _fast_model(self) -> str | None:
+        value = self.db.kv_get("config:ai_assistant_fast_model") if self.db else None
+        if not value:
+            value = getattr(self.settings, "ai_assistant_fast_model", None)
+        return value if isinstance(value, str) and value.strip() else None
+
+    def _simple_chat(self, text: str, *, images: list[str] | None = None) -> bool:
+        clean = (text or "").strip()
+        if not clean or images or "[Voice message]" in clean:
+            return False
+        if len(clean) > 180 or clean.count("\n") > 2:
+            return False
+        if CODE_HINT_RE.search(clean) or SIMPLE_CHAT_RE.search(clean):
+            return False
+        if "http://" in clean or "https://" in clean or "`" in clean:
+            return False
+        return True
+
     def _code_model_settings(self) -> tuple[str | None, str | None]:
         def text(value: object) -> str | None:
             return value if isinstance(value, str) and value.strip() else None
@@ -477,11 +509,12 @@ class Agent:
         )
 
     def _models_for(
-        self, is_user_identity: bool, *, code: bool = False
+        self, is_user_identity: bool, *, code: bool = False, fast: bool = False
     ) -> list[str]:
         """Bot, Boi and tool-heavy turns can use different models."""
         bot_model, bot_fallback, assistant_model, assistant_fallback = self._model_settings()
         code_model, code_fallback = self._code_model_settings()
+        fast_model = self._fast_model()
         if code and code_model:
             if is_user_identity:
                 candidates = [
@@ -494,6 +527,14 @@ class Agent:
                 ]
             else:
                 candidates = [code_model, code_fallback, bot_model, bot_fallback]
+        elif is_user_identity and fast and fast_model:
+            candidates = [
+                fast_model,
+                assistant_model,
+                assistant_fallback,
+                bot_model,
+                bot_fallback,
+            ]
         elif is_user_identity:
             candidates = [assistant_model, assistant_fallback, bot_model, bot_fallback]
         else:
@@ -559,8 +600,9 @@ class Agent:
         user_id: str | None = None,
         is_user_identity: bool = False,
         code: bool = False,
+        fast: bool = False,
     ) -> tuple[Any, str]:
-        models = self._models_for(is_user_identity, code=code)
+        models = self._models_for(is_user_identity, code=code, fast=fast)
 
         kwargs: dict[str, Any] = {
             "messages": messages,

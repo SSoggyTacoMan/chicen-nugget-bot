@@ -155,13 +155,14 @@ async def run() -> None:
                 budget=runtime.budget,
             )
             logger.info(
-                "ai agent enabled with bot model %s%s; Boi model %s%s",
+                "ai agent enabled with bot model %s%s; Boi model %s%s; quick model %s",
                 settings.ai_model,
                 f" (fallback {settings.ai_fallback_model})" if settings.ai_fallback_model else "",
                 settings.ai_assistant_model,
                 f" (fallback {settings.ai_assistant_fallback_model})"
                 if settings.ai_assistant_fallback_model
                 else "",
+                settings.ai_assistant_fast_model or "off",
             )
             logger.info(
                 "code model %s%s; tts %s with voice %s",
