@@ -69,6 +69,8 @@ from bot.utils.tz import tzinfo
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT = 7000
+MAX_API_BODY_BYTES = 1_000_000
+MAX_API_RESPONSE_BYTES = 5_000_000
 WEATHER_CODES = {
     0: "clear",
     1: "mainly clear",
@@ -581,12 +583,40 @@ class Toolbox:
                 {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "info", "join", "leave", "members", "create"],
+                        "enum": [
+                            "list",
+                            "info",
+                            "join",
+                            "leave",
+                            "members",
+                            "create",
+                            "set_topic",
+                            "set_purpose",
+                            "invite",
+                            "pin",
+                            "unpin",
+                        ],
                         "description": "Action to perform.",
                     },
                     "channel": {
                         "type": "string",
-                        "description": "Channel id or #name. Required for info/join/leave/members/create.",
+                        "description": "Channel id or #name. Required for everything except 'list'.",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "For action='set_topic': new channel topic.",
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": "For action='set_purpose': new channel purpose.",
+                    },
+                    "user": {
+                        "type": "string",
+                        "description": "For action='invite': user id, @name, display name or email.",
+                    },
+                    "timestamp": {
+                        "type": "string",
+                        "description": "For pin/unpin: message timestamp.",
                     },
                     "as": {
                         "type": "string",
@@ -1171,7 +1201,7 @@ class Toolbox:
             ),
             tool(
                 "sandbox",
-                "Persistent workspace for repo investigation and shell work. Use this instead of `clone_repo` when a task spans turns or needs commands. Create a named sandbox (optionally cloning a repo), run commands in it, read/list/search files, and delete it when done. It stays on disk until deleted. Owner/admin only, DM only.",
+                "Persistent workspace for repo investigation and shell work. Use this instead of `clone_repo` when a task spans turns or needs commands. Create a named sandbox (optionally cloning a repo), run commands, read/write/edit/search files, upload a file to Slack, and delete it when done. It stays on disk until deleted. Owner/admin only, DM only.",
                 {
                     "action": {
                         "type": "string",
@@ -1181,11 +1211,17 @@ class Toolbox:
                             "info",
                             "exec",
                             "read",
+                            "write",
+                            "edit",
+                            "diff",
+                            "upload",
+                            "jobs",
+                            "job",
                             "list_files",
                             "search",
                             "delete",
                         ],
-                        "description": "Action: 'create' (optional repo_url), 'list', 'info', 'exec', 'read', 'list_files', 'search', or 'delete'.",
+                        "description": "Action: 'create', 'list', 'info', 'exec', 'read', 'write', 'edit', 'diff', 'upload', 'jobs', 'job', 'list_files', 'search', or 'delete'.",
                     },
                     "name": {
                         "type": "string",
@@ -1201,7 +1237,31 @@ class Toolbox:
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "For action='exec': optional relative directory inside the sandbox to run in.",
+                        "description": "For action='exec' or 'diff': optional relative directory inside the sandbox to run in.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "For action='write': text to write. Max 2 MB.",
+                    },
+                    "find": {
+                        "type": "string",
+                        "description": "For action='edit': exact text to replace.",
+                    },
+                    "replace": {
+                        "type": "string",
+                        "description": "For action='edit': replacement text. Empty removes the match.",
+                    },
+                    "append": {
+                        "type": "boolean",
+                        "description": "For action='write': append instead of overwrite. Default false.",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "For action='edit': max replacements. 0 means all.",
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "For action='upload': optional filename shown in Slack.",
                     },
                     "path": {
                         "type": "string",
@@ -1222,6 +1282,14 @@ class Toolbox:
                     "timeout": {
                         "type": "integer",
                         "description": "For action='exec': seconds before the command is killed. Default 120, max 600.",
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "For action='exec': run it in the background and return a job id. Default false.",
+                    },
+                    "job_id": {
+                        "type": "string",
+                        "description": "For action='job': job id returned by a background exec.",
                     },
                 },
                 ["action"],
@@ -1496,7 +1564,10 @@ class Toolbox:
         query = str(args.get("query") or "").strip()
         if not query:
             return _error("query is required")
-        count = max(1, min(20, int(args.get("count") or 10)))
+        try:
+            count = max(1, min(20, int(args.get("count") or 10)))
+        except (TypeError, ValueError):
+            count = 10
         kind = str(args.get("kind") or "messages").lower().strip()
         if kind not in {"messages", "files", "all"}:
             kind = "messages"
@@ -1589,27 +1660,28 @@ class Toolbox:
         query = str(args.get("query") or "").strip()
         if not query:
             return _error("query is required")
+        client = ctx.bot_client or ctx.client
         q_lower = query.lower()
         if q_lower in {"me", "myself", "self"} and ctx.user_id:
-            user = await user_info(ctx.client, ctx.user_id)
+            user = await user_info(client, ctx.user_id)
             return _json(self._user_summary(user)) if user else _error("no user with that id")
         if q_lower == "owner" and ctx.settings.owner_user_id:
-            user = await user_info(ctx.client, ctx.settings.owner_user_id)
+            user = await user_info(client, ctx.settings.owner_user_id)
             return _json(self._user_summary(user)) if user else _error("no user with that id")
         user_id = extract_id(query, "@")
         if user_id:
-            user = await user_info(ctx.client, user_id)
+            user = await user_info(client, user_id)
             return _json(self._user_summary(user)) if user else _error("no user with that id")
         if "@" in query and "." in query:
             try:
-                response = await ctx.client.users_lookupByEmail(email=query)
+                response = await client.users_lookupByEmail(email=query)
                 user = response.get("user")
                 return _json(self._user_summary(user)) if user else _error("no user with that email")
             except Exception:  # noqa: BLE001 - fall through to a name search
                 pass
         needle = query.lstrip("@").lower()
         matches = []
-        for user in await all_users(ctx.client):
+        for user in await all_users(client):
             profile = user.get("profile") or {}
             haystack = " ".join(
                 str(value or "")
@@ -1846,6 +1918,60 @@ class Toolbox:
         if client is None:
             return _error("slack client not available")
 
+        if action == "set_topic":
+            if "topic" not in args:
+                return _error("topic is required for action='set_topic'")
+            topic = str(args.get("topic") or "").strip()[:250]
+            try:
+                await client.conversations_setTopic(channel=channel_id, topic=topic)
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"could not set topic: {error_code(exc)}")
+            return f"set topic for <#{channel_id}>."
+
+        if action == "set_purpose":
+            if "purpose" not in args:
+                return _error("purpose is required for action='set_purpose'")
+            purpose = str(args.get("purpose") or "").strip()[:250]
+            try:
+                await client.conversations_setPurpose(
+                    channel=channel_id, purpose=purpose
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"could not set purpose: {error_code(exc)}")
+            return f"set purpose for <#{channel_id}>."
+
+        if action == "invite":
+            query = str(args.get("user") or "").strip()
+            if not query:
+                return _error("user is required for action='invite'")
+            user = await self._find_user(ctx, query)
+            if not user or not user.get("id"):
+                return _error(f"could not find a user matching {query!r}")
+            user_id = str(user["id"])
+            try:
+                await client.conversations_invite(
+                    channel=channel_id, users=user_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                code = error_code(exc)
+                if code == "already_in_channel":
+                    return f"<@{user_id}> is already in <#{channel_id}>."
+                return _error(f"could not invite <@{user_id}>: {code}")
+            return f"invited <@{user_id}> to <#{channel_id}>."
+
+        if action in {"pin", "unpin"}:
+            timestamp = str(args.get("timestamp") or "").strip()
+            if not timestamp:
+                return _error("timestamp is required for pin/unpin")
+            try:
+                if action == "pin":
+                    await client.pins_add(channel=channel_id, timestamp=timestamp)
+                else:
+                    await client.pins_remove(channel=channel_id, timestamp=timestamp)
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"could not {action} that message: {error_code(exc)}")
+            return f"{'pinned' if action == 'pin' else 'unpinned'} message {timestamp} in <#{channel_id}>."
+
         if action == "join":
             info = await channel_info(ctx.client, channel_id)
             if info and info.get("is_archived"):
@@ -1930,22 +2056,23 @@ class Toolbox:
         return random_fact()
 
     async def _find_user(self, ctx: ToolContext, query: str) -> dict[str, Any] | None:
+        client = ctx.bot_client or ctx.client
         q_lower = query.strip().lower()
         if q_lower in {"me", "myself", "self"} and ctx.user_id:
-            return await user_info(ctx.client, ctx.user_id)
+            return await user_info(client, ctx.user_id)
         if q_lower == "owner" and ctx.settings.owner_user_id:
-            return await user_info(ctx.client, ctx.settings.owner_user_id)
+            return await user_info(client, ctx.settings.owner_user_id)
         user_id = extract_id(query, "@")
         if user_id:
-            return await user_info(ctx.client, user_id)
+            return await user_info(client, user_id)
         if "@" in query and "." in query:
             try:
-                response = await ctx.client.users_lookupByEmail(email=query)
+                response = await client.users_lookupByEmail(email=query)
                 return response.get("user")
             except Exception:  # noqa: BLE001 - fall through to a name search
                 pass
         needle = query.lstrip("@").lower()
-        for user in await all_users(ctx.client):
+        for user in await all_users(client):
             profile = user.get("profile") or {}
             haystack = " ".join(
                 str(value or "")
@@ -3812,6 +3939,8 @@ class Toolbox:
             parsed = urlparse(raw_url)
             if not parsed.hostname or await self._is_private_host(parsed.hostname):
                 return "", "invalid or private repository host"
+            if parsed.username or parsed.password:
+                return "", "repo URLs with embedded credentials are not allowed"
             return raw_url, ""
         return "", "only https:// or 'owner/repo' GitHub URLs are allowed"
 
@@ -3832,6 +3961,11 @@ class Toolbox:
                 str(dest),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env={
+                    **safe_env(),
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                },
             )
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except TimeoutError:
@@ -3911,7 +4045,17 @@ class Toolbox:
         # Small ergonomic win: most actions can target the newest workspace
         # without making the model repeat its name every turn. Delete still
         # requires an explicit name so a stray call can't nuke the latest box.
-        if action in {"exec", "read", "list_files", "search", "info"} and not raw_name:
+        if action in {
+            "exec",
+            "read",
+            "write",
+            "edit",
+            "diff",
+            "upload",
+            "list_files",
+            "search",
+            "info",
+        } and not raw_name:
             recent = manager.list()
             if not recent:
                 return _error("no sandboxes yet; create one first")
@@ -3941,7 +4085,7 @@ class Toolbox:
                         "sandbox": name,
                         "repo": repo_url or None,
                         "created": self._sandbox_time(info.created),
-                        "hint": "use action=exec, read, list_files or search, then delete when done",
+                        "hint": "use action=exec, read, write, edit, upload, list_files or search, then delete when done",
                     }
                 )
 
@@ -3963,6 +4107,15 @@ class Toolbox:
                     }
                 )
 
+            if action == "jobs":
+                return _json({"jobs": manager.list_jobs(raw_name or None)})
+
+            if action == "job":
+                job_id = str(args.get("job_id") or "").strip()
+                if not job_id:
+                    return _error("job_id is required for action='job'")
+                return _json(manager.job_status(job_id))
+
             if not raw_name:
                 return _error(f"name is required for action={action}")
             name = safe_name(raw_name)
@@ -3979,6 +4132,21 @@ class Toolbox:
                 )
 
             if action == "exec":
+                if bool(args.get("background", False)):
+                    meta = await manager.start_job(
+                        name,
+                        str(args.get("command") or ""),
+                        cwd=str(args.get("cwd") or "").strip() or None,
+                        timeout=int(args.get("timeout") or 0) or None,
+                    )
+                    return _json(
+                        {
+                            "job_id": meta["job_id"],
+                            "sandbox": name,
+                            "status": "running",
+                            "hint": "use action=job to check it",
+                        }
+                    )
                 result = await manager.exec(
                     name,
                     str(args.get("command") or ""),
@@ -4003,6 +4171,59 @@ class Toolbox:
                     offset=int(args.get("offset") or 1),
                     limit=int(args.get("limit") or 150),
                 )[:MAX_TOOL_RESULT]
+
+            if action == "write":
+                return manager.write(
+                    name,
+                    str(args.get("path") or ""),
+                    str(args.get("content") or ""),
+                    append=bool(args.get("append", False)),
+                )
+
+            if action == "edit":
+                return manager.edit(
+                    name,
+                    str(args.get("path") or ""),
+                    str(args.get("find") or ""),
+                    str(args.get("replace") or ""),
+                    count=int(args.get("count") or 0),
+                )
+
+            if action == "diff":
+                result = await manager.exec(
+                    name,
+                    "git diff --no-color -- .",
+                    cwd=str(args.get("cwd") or "").strip() or None,
+                    timeout=60,
+                )
+                return _json(
+                    {
+                        "sandbox": name,
+                        "exit_code": result.code,
+                        "diff": result.stdout[:6000],
+                        "stderr": result.stderr[:1000],
+                    }
+                )
+
+            if action == "upload":
+                file_name, data = manager.file_bytes(
+                    name, str(args.get("path") or "")
+                )
+                safe_file = re.sub(r"[^A-Za-z0-9._-]+", "-", str(args.get("filename") or file_name)).strip(".-")
+                safe_file = safe_file or file_name
+                if not ctx.channel_id:
+                    return _error("no channel or dm context to upload to")
+                try:
+                    await ctx.client.files_upload_v2(
+                        channel=ctx.channel_id,
+                        thread_ts=ctx.thread_ts,
+                        file=data,
+                        filename=safe_file,
+                        initial_comment=f":paperclip: `{safe_file}` from sandbox `{name}`",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return _error(f"couldn't upload {safe_file}: {exc}")
+                return f"uploaded {safe_file} ({len(data)} bytes)"
 
             if action == "list_files":
                 return manager.list_files(
@@ -4584,7 +4805,8 @@ class Toolbox:
             return _error("method must be GET, POST, PUT, PATCH or DELETE")
         path = str(args.get("path") or "").strip()
         if (
-            not path.startswith("/")
+            len(path) > 2000
+            or not path.startswith("/")
             or path.startswith("//")
             or "://" in path
             or ".." in path
@@ -4595,9 +4817,13 @@ class Toolbox:
         if not isinstance(raw_query, dict):
             return _error("query must be an object of key/value pairs")
         query = {str(k): v for k, v in raw_query.items() if v is not None}
+        if len(json.dumps(query, default=str)) > 20_000:
+            return _error("query is too large")
         body = args.get("body")
         if body is not None and not isinstance(body, (dict, list)):
             return _error("body must be a JSON object or array")
+        if body is not None and len(json.dumps(body, default=str)) > MAX_API_BODY_BYTES:
+            return _error(f"body is too large (max {MAX_API_BODY_BYTES} bytes)")
 
         url = f"{str(preset['base']).rstrip('/')}{path}"
         headers = {
@@ -4617,6 +4843,11 @@ class Toolbox:
         except Exception as exc:  # noqa: BLE001
             return _error(f"{preset['label']} request failed: {exc}")
 
+        content = getattr(response, "content", b"") or b""
+        if len(content) > MAX_API_RESPONSE_BYTES:
+            return _error(
+                f"{preset['label']} response is too large (max {MAX_API_RESPONSE_BYTES} bytes)"
+            )
         try:
             parsed = response.json()
         except ValueError:
@@ -4892,7 +5123,8 @@ class Toolbox:
         for client in clients:
             try:
                 channels = await all_channels(client)
-            except Exception:  # noqa: BLE001
+            except Exception:
+                logger.debug("could not list channels for resolution", exc_info=True)
                 continue
             for channel in channels:
                 if str(channel.get("name", "")).lower() == needle:

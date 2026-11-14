@@ -11,7 +11,8 @@ Both run in one Python process over Socket Mode. No public URL, no web server, n
 ## what you get
 
 - mentions, name calls ("hey nugget"), DMs, group DMs, thread follow-ups and optional ambient replies, with tool calling and per-user memory
-- workspace search (messages and files) plus channel join, leave, create and member tools
+- workspace search (messages and files) plus channel join, leave, create, topic, invite and pin tools
+- reaction shortcuts and message shortcuts for research, explain and thread summaries
 - a second Slack identity for personal assistant work
 - optional API tokens for Vercel, Cloudflare, Notion, Linear, Sentry, Resend, OpenAI and Anthropic
 - headless Chromium for pages that need JavaScript, clicking or forms
@@ -221,7 +222,9 @@ The fallback model kicks in when the primary errors or times out. Conversation h
 
 Owner and admin checks run in code against the real Slack sender. The prompt can't grant permissions on its own.
 
-`search_slack` uses the connected user session for real workspace search, including files, and falls back to the bot's local conversation history when that session is unavailable. `manage_channel` lists, inspects, joins, leaves, creates and lists members of channels as either the bot or Boi.
+`search_slack` uses the connected user session for real workspace search, including files, and falls back to the bot's local conversation history when that session is unavailable. `manage_channel` lists, inspects, joins, leaves, creates, sets topic/purpose, invites, pins and lists members of channels as either the bot or Boi.
+
+Reaction shortcuts: `:mag:` researches a message, `:thread:` summarizes it, `:pushpin:` pins it (owner/admin only). Message shortcuts: "Explain this" and "Summarize thread". Both answer in the thread.
 
 `flaron` also looks up workspace emojis, which is handy when you want a custom one to actually render.
 
@@ -236,6 +239,11 @@ Owner/admin only, DM only. It is a workspace boundary, not a security boundary: 
 | `create` | make a named workspace. pass `repo_url` (`owner/repo` or an https git url) to shallow-clone into it |
 | `exec` | run a shell command in the workspace, optionally in a subdirectory with `cwd`. uses the newest workspace when `name` is omitted |
 | `read` | read a file with line numbers, with `offset` and `limit` |
+| `write` | create or overwrite a file. `append` adds to the end |
+| `edit` | replace exact text in a file, with an optional `count` |
+| `diff` | run `git diff` inside the workspace |
+| `upload` | upload a file from the workspace into the current DM/thread |
+| `jobs` / `job` | list background jobs or check one by id |
 | `list_files` | list a directory. `.git` and noisy build dirs are skipped |
 | `search` | text or regex search across the workspace |
 | `info` | show the repo and created/updated timestamps for one workspace |
@@ -243,6 +251,15 @@ Owner/admin only, DM only. It is a workspace boundary, not a security boundary: 
 | `delete` | remove the workspace and its metadata. always needs an explicit name |
 
 `exec`, `read`, `list_files`, `search` and `info` default to the most recently updated workspace, so "run it again" works without repeating the name. `delete` never guesses.
+
+Long commands can run in the background:
+
+```text
+boi: sandbox exec name=widget command="pytest -q" background=true
+boi: sandbox job job_id=abc123
+```
+
+`jobs` lists what is running, and the log tail comes back with `job`. Background jobs are OS processes, so they survive the turn but not a server restart.
 
 A typical DM goes like this:
 
@@ -563,6 +580,7 @@ bot/
   config.py                Settings, env parsing, allowlists
   runtime.py               shared state: db, agent, gate, clients, locks
   api_keys.py              optional API token presets for api_request
+  owner_posting.py         optional native posting as the owner
   db.py                    SQLite schema, history, kv store, reminders
   handlers.py              socket mode event registration
   slack_api.py             post, react and upload helpers, retries, member checks
@@ -584,6 +602,7 @@ bot/
     access.py              tier-2 request flow
     recaps.py              daily recap and private follow-up
     polls.py, threads.py, stats.py, nuggets.py, ai_commands.py
+    shortcuts.py           message shortcut handlers
 prompts/system.md          agent system prompt
 tests/                     pytest suite
 .github/workflows/         deploy and log tailing

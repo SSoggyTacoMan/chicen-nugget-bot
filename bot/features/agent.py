@@ -41,6 +41,8 @@ _last_thread: dict[tuple[str, str], float] = {}
 _last_unsubscribe: dict[tuple[str, str], float] = {}
 _UNSUBSCRIBE_COOLDOWN = 15.0
 _UNSUBSCRIBE_WORDS = {"unsubscribe", "unsub"}
+_REACTION_COOLDOWN = 30.0
+_last_reaction: dict[tuple[str, str, str, str], float] = {}
 _NAME_ADDRESS = (
     re.compile(r"^\s*(?:hey|yo|hi|ok|okay|so|alright)?\s*(?:chicen\s+nugget|chicen|nugget)\b", re.IGNORECASE),
     re.compile(r"\b(?:chicen\s+nugget|chicen)\b", re.IGNORECASE),
@@ -120,6 +122,120 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
         trigger="mpim_mention" if event.get("channel_type") == "mpim" else "mention",
         images=images,
     )
+
+
+async def on_reaction_added(event: dict[str, Any], client) -> None:
+    """Small reaction shortcuts: 🔍 research, 🧵 summarize, 📌 pin."""
+    item = event.get("item") or {}
+    if item.get("type") != "message":
+        return
+    reaction = str(event.get("reaction") or "").lower().strip()
+    if reaction not in {"mag", "thread", "pushpin"}:
+        return
+    channel = item.get("channel") or ""
+    ts = item.get("ts") or ""
+    user_id = event.get("user") or ""
+    item_user = event.get("item_user") or ""
+    if not channel or not ts or not user_id:
+        return
+    if user_id in {runtime.bot_user_id, runtime.user_id}:
+        return
+    if item_user in {runtime.bot_user_id, runtime.user_id}:
+        return
+    is_dm = channel.startswith("D")
+    if is_dm:
+        allowed = user_id == runtime.settings.owner_user_id or (
+            runtime.settings.ai_allow_admins and runtime.settings.is_admin(user_id)
+        )
+        if not allowed:
+            return
+    elif not runtime.settings.ai_allowed(channel):
+        return
+    if runtime.agent is None or not runtime.settings.ai_enabled:
+        return
+    if user_retry_after(user_id):
+        return
+    if reaction == "pushpin" and not (
+        user_id == runtime.settings.owner_user_id
+        or runtime.settings.is_admin(user_id)
+    ):
+        return
+
+    now = time.monotonic()
+    key = (channel, ts, reaction, user_id)
+    if now - _last_reaction.get(key, 0.0) < _REACTION_COOLDOWN:
+        return
+    _last_reaction[key] = now
+
+    text, root_ts = await _reaction_message(client, channel, ts)
+    if reaction == "pushpin":
+        try:
+            await client.pins_add(channel=channel, timestamp=ts)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("could not pin %s/%s: %s", channel, ts, exc)
+            return
+        await react(client, channel, ts, "white_check_mark")
+        return
+    if not text:
+        return
+
+    if reaction == "mag":
+        prompt = (
+            "someone reacted with a magnifying glass, meaning: research this message "
+            "and reply with the useful answer. keep it short.\n\n" + text
+        )
+    else:
+        prompt = (
+            "someone reacted with a thread emoji, meaning: summarize this thread in "
+            "a few lines.\n\n" + text
+        )
+    conversation = f"dm:{user_id}" if is_dm else f"ch:{channel}:{root_ts}"
+    try:
+        async with runtime.lock(conversation):
+            answer = await runtime.agent.reply(
+                conversation=conversation,
+                user_id=user_id,
+                text=prompt[:6000],
+                channel_id=channel,
+                thread_ts=None if is_dm else root_ts,
+                is_dm=is_dm,
+                trigger="reaction",
+                client=client,
+            )
+        if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
+            return
+        for chunk in chunk_text(disarm_broadcasts(format_mrkdwn(answer))):
+            await post(client, channel, chunk, thread_ts=None if is_dm else root_ts)
+        if not is_dm and runtime.db:
+            runtime.db.mark_thread(channel, root_ts, owner="bot")
+    except Exception:
+        logger.exception("reaction agent turn failed")
+
+
+async def _reaction_message(
+    client, channel: str, ts: str
+) -> tuple[str, str]:
+    """Return (text, thread root) for the message behind a reaction."""
+    for call in (
+        lambda: client.conversations_history(
+            channel=channel, latest=ts, inclusive=True, limit=1
+        ),
+        lambda: client.conversations_replies(channel=channel, ts=ts, limit=1),
+    ):
+        try:
+            response = await call()
+        except Exception:
+            logger.debug("could not read the reacted message", exc_info=True)
+            continue
+        messages = response.get("messages") or []
+        if not messages:
+            continue
+        message = messages[0]
+        text = (message.get("text") or "").strip()
+        if not text:
+            continue
+        return text, message.get("thread_ts") or message.get("ts") or ts
+    return "", ts
 
 
 async def _handle_dm(event: dict[str, Any], client) -> None:

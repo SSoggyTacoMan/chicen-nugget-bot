@@ -21,18 +21,38 @@
         "usage_hint": "[help|ping|roll|poll|ask|imagine|...]",
         "should_escape": false
       }
+    ],
+    "shortcuts": [
+      {
+        "name": "Explain this",
+        "callback_id": "nugget_explain",
+        "type": "message",
+        "description": "Ask Nugget to explain this message"
+      },
+      {
+        "name": "Summarize thread",
+        "callback_id": "nugget_summarize",
+        "type": "message",
+        "description": "Summarize this thread"
+      }
     ]
   },
   "oauth_config": {
     "scopes": {
       "user": [
         "channels:write",
+        "channels:write.invites",
+        "channels:write.topic",
         "chat:write",
         "files:read",
         "groups:write",
+        "groups:write.invites",
+        "groups:write.topic",
         "mpim:history",
         "mpim:read",
         "mpim:write",
+        "pins:read",
+        "pins:write",
         "reactions:write",
         "search:read",
         "usergroups:read",
@@ -62,6 +82,8 @@
         "mpim:history",
         "mpim:read",
         "mpim:write",
+        "pins:read",
+        "pins:write",
         "reactions:read",
         "reactions:write",
         "team:read",
@@ -80,7 +102,8 @@
         "message.channels",
         "message.groups",
         "message.im",
-        "message.mpim"
+        "message.mpim",
+        "reaction_added"
       ]
     },
     "interactivity": {

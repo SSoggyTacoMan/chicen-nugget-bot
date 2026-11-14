@@ -864,6 +864,128 @@ def test_sandbox_create_exec_files_delete(tmp_path):
     asyncio.run(run())
 
 
+def test_sandbox_background_jobs(tmp_path):
+    import asyncio
+    import json
+
+    from bot.ai.tools import Toolbox
+
+    box = Toolbox(_sandbox_ctx(tmp_path).settings)
+    ctx = _sandbox_ctx(tmp_path)
+
+    async def run():
+        await box.execute("sandbox", {"action": "create", "name": "jobs"}, ctx)
+        started = json.loads(
+            await box.execute(
+                "sandbox",
+                {
+                    "action": "exec",
+                    "name": "jobs",
+                    "command": "echo background-ok",
+                    "background": True,
+                },
+                ctx,
+            )
+        )
+        job_id = started["job_id"]
+        status = {}
+        for _ in range(80):
+            status = json.loads(
+                await box.execute(
+                    "sandbox", {"action": "job", "job_id": job_id}, ctx
+                )
+            )
+            if status["status"] == "done":
+                break
+            await asyncio.sleep(0.05)
+        assert status["status"] == "done"
+        assert status["exit_code"] == 0
+        assert "background-ok" in status["output"]
+
+        listed = json.loads(await box.execute("sandbox", {"action": "jobs"}, ctx))
+        assert any(item["job_id"] == job_id for item in listed["jobs"])
+
+    asyncio.run(run())
+
+
+def test_sandbox_write_edit_and_upload(tmp_path):
+    import asyncio
+
+    from bot.ai.tools import Toolbox
+
+    box = Toolbox(_sandbox_ctx(tmp_path).settings)
+    ctx = _sandbox_ctx(tmp_path)
+
+    async def run():
+        await box.execute("sandbox", {"action": "create", "name": "editor"}, ctx)
+        wrote = await box.execute(
+            "sandbox",
+            {
+                "action": "write",
+                "name": "editor",
+                "path": "src/hello.py",
+                "content": "print('hello')\n",
+            },
+            ctx,
+        )
+        assert "wrote" in wrote
+
+        appended = await box.execute(
+            "sandbox",
+            {
+                "action": "write",
+                "name": "editor",
+                "path": "src/hello.py",
+                "content": "print('again')\n",
+                "append": True,
+            },
+            ctx,
+        )
+        assert "appended" in appended
+
+        edited = await box.execute(
+            "sandbox",
+            {
+                "action": "edit",
+                "name": "editor",
+                "path": "src/hello.py",
+                "find": "hello",
+                "replace": "hi",
+            },
+            ctx,
+        )
+        assert "replaced 1" in edited
+
+        read = await box.execute(
+            "sandbox", {"action": "read", "name": "editor", "path": "src/hello.py"}, ctx
+        )
+        assert "print('hi')" in read
+        assert "print('again')" in read
+
+        upload = await box.execute(
+            "sandbox",
+            {"action": "upload", "name": "editor", "path": "src/hello.py"},
+            ctx,
+        )
+        assert "uploaded hello.py" in upload
+        ctx.client.files_upload_v2.assert_called_once()
+        assert ctx.client.files_upload_v2.call_args[1]["file"].startswith(b"print('hi')")
+
+        escaped = await box.execute(
+            "sandbox",
+            {
+                "action": "write",
+                "name": "editor",
+                "path": "../outside.txt",
+                "content": "nope",
+            },
+            ctx,
+        )
+        assert "escapes the sandbox" in escaped
+
+    asyncio.run(run())
+
+
 def test_sandbox_rejects_escape_non_owner_and_non_dm(tmp_path):
     import asyncio
 

@@ -46,7 +46,7 @@ def test_prompt_keeps_the_persona():
 
 
 def test_every_trigger_has_words():
-    assert set(TRIGGER_TEXT) == {"dm", "mention", "mpim_mention", "named", "thread_followup", "ambient"}
+    assert set(TRIGGER_TEXT) == {"dm", "mention", "mpim_mention", "named", "reaction", "shortcut", "thread_followup", "ambient"}
     for value in TRIGGER_TEXT.values():
         assert value.strip()
 
