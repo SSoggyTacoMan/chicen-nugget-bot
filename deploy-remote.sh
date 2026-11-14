@@ -33,7 +33,7 @@ ssh "${SSH_OPTS[@]}" "${REMOTE}" "cd ${REMOTE_DIR} && \
   .venv/bin/pip install -q --upgrade pip && \
   .venv/bin/pip install -q -r requirements.txt && \
   (.venv/bin/playwright install chromium >/dev/null 2>&1 || true) && \
-  if [ -f data/bot.db ]; then .venv/bin/python -c 'import sqlite3,time; s=sqlite3.connect("data/bot.db"); d=sqlite3.connect("data/bot.db.bak."+str(int(time.time()))); s.backup(d); d.close(); s.close()'; ls -1t data/bot.db.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f; fi && \
+  if [ -f data/bot.db ]; then .venv/bin/python -c 'import sqlite3,time; s=sqlite3.connect(\"data/bot.db\"); d=sqlite3.connect(\"data/bot.db.bak.\"+str(int(time.time()))); s.backup(d); d.close(); s.close()'; ls -1t data/bot.db.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f; fi && \
   echo DEPS_OK && \$PY --version"
 
 echo "==> configuring systemd service"
