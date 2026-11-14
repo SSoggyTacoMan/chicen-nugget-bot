@@ -589,6 +589,12 @@ class Database:
             (model, max(1, limit)),
         )
 
+    def count_memory_vectors(self, model: str) -> int:
+        row = self._one(
+            "SELECT COUNT(*) AS n FROM memory_vectors WHERE model = ?", (model,)
+        )
+        return int((row or {}).get("n") or 0)
+
     # ------------------------------------------------------------------ notes
     def add_note(self, user_id: str, text: str) -> int:
         return self._write(

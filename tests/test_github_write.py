@@ -181,7 +181,7 @@ def test_github_write_push_guard_rejects_secrets_and_large_files(tmp_path):
 
         async def exec(self, name, command, **kwargs):
             if command.startswith("git status"):
-                return ExecResult(0, "?? .env\n M app.py\n", "", False, ".")
+                return ExecResult(0, "?? config/.env\n M app.py\n", "", False, ".")
             return ExecResult(0, "", "", False, ".")
 
     box = Toolbox(MagicMock())

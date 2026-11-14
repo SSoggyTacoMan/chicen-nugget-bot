@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import logging
@@ -69,6 +70,19 @@ async def cmd_doctor(ack, command, client) -> None:
     else:
         lines.append(f"{warn} ai: disabled or missing AI_API_KEY")
 
+    memory = runtime.agent.memory if runtime.agent is not None else None
+    if memory is None or not memory.enabled:
+        lines.append(f"{warn} memory: embeddings off")
+    else:
+        try:
+            vector = await asyncio.wait_for(memory.embed("doctor check"), timeout=8)
+            if vector:
+                lines.append(f"{ok} memory: `{memory.model}` ({len(vector)}d)")
+            else:
+                lines.append(f"{warn} memory: embedding endpoint returned nothing")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"{warn} memory: {exc}")
+
     if importlib.util.find_spec("playwright") is None:
         lines.append(f"{warn} browser: playwright is not installed")
     elif not settings.browser_enabled:
@@ -121,4 +135,8 @@ async def cmd_doctor(ack, command, client) -> None:
             lines.append(f"{warn} github: {exc}")
 
     lines.append(f"{ok} gateway: {'on' if runtime.user_gateway else 'off'}")
+    lines.append(
+        f"{ok if settings.github_watch else warn} github ci watcher: "
+        f"{'on' if settings.github_watch else 'off'}"
+    )
     await post_ephemeral(client, channel, user, "\n".join(lines))

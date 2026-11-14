@@ -2358,7 +2358,7 @@ class Toolbox:
             limit = 8
         results = await runtime.agent.memory.search(ctx.db, query, limit)
         if not results:
-            return "nothing matching that in semantic memory."
+            return await self._tool_recall({"query": query}, ctx)
         return _json(
             [
                 {
@@ -4032,7 +4032,12 @@ class Toolbox:
         bad: list[str] = []
         for path in paths:
             lowered = path.lower()
-            if any(fnmatch.fnmatch(lowered, pattern) for pattern in SECRET_FILE_PATTERNS):
+            base = Path(path).name.lower()
+            if any(
+                fnmatch.fnmatch(lowered, pattern)
+                or fnmatch.fnmatch(base, pattern)
+                for pattern in SECRET_FILE_PATTERNS
+            ):
                 bad.append(f"{path} (secret-looking)")
                 continue
             full = info.path / path

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 import re
@@ -69,6 +70,7 @@ HELP = """*{bot}: everything lives under `/nugget`*
 • `/nugget imagine <prompt> [--wide|--tall|--ratio 4:3]` - image generation
 • `/nugget imageaccess [list|add @user|remove @user]` - admin: who may make images
 • `/nugget budget` - admin: today's ai spend and limits
+• `/nugget memory [status|search|backfill]` - admin: semantic memory
 • `/nugget forget` - wipe stored ai memory (DM or channel)
 
 *tasks*
@@ -941,6 +943,88 @@ async def cmd_todo(ack, command, client) -> None:
 
 
 # ------------------------------------------------------------------- helpers
+async def cmd_memory(ack, command, client) -> None:
+    await ack()
+    user = command.get("user_id")
+    if not runtime.settings.is_admin(user):
+        await _say(client, command, "semantic memory is admin only.", ephemeral=True)
+        return
+    if runtime.agent is None or runtime.db is None:
+        await _say(client, command, "semantic memory is not available.", ephemeral=True)
+        return
+    text = (command.get("text") or "").strip()
+    parts = text.split(maxsplit=1)
+    sub = parts[0].lower() if parts else "status"
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    index = runtime.agent.memory
+
+    if sub in {"status", "info", ""}:
+        count = runtime.db.count_memory_vectors(index.model) if index.model else 0
+        state = "on" if index.enabled else "off"
+        await _say(
+            client,
+            command,
+            f"semantic memory: *{state}* · model `{index.model or 'none'}` · `{count}` turns indexed",
+            ephemeral=True,
+        )
+        return
+
+    if sub == "backfill":
+        if not index.enabled:
+            await _say(client, command, "set `AI_EMBEDDING_MODEL` first.", ephemeral=True)
+            return
+        try:
+            limit = max(1, min(5000, int(arg or 500)))
+        except ValueError:
+            limit = 500
+        await _say(
+            client,
+            command,
+            f"indexing up to {limit} old turns. i'll DM you when it's done.",
+            ephemeral=True,
+        )
+        asyncio.create_task(_backfill_memory(limit, user))
+        return
+
+    if sub in {"search", "find"}:
+        if not arg:
+            await _say(client, command, "usage: `/nugget memory search <query>`", ephemeral=True)
+            return
+        results = await index.search(runtime.db, arg, 8)
+        if not results:
+            await _say(client, command, "nothing matching that in semantic memory.", ephemeral=True)
+            return
+        lines = [f"*memory matches for* `{arg}`"]
+        for item in results:
+            lines.append(
+                f"- `{float(item.get('score') or 0):.2f}` {str(item.get('conversation') or '')[:40]}: "
+                f"{(item.get('text') or '')[:180]}"
+            )
+        await _say(client, command, "\n".join(lines), ephemeral=True)
+        return
+
+    await _say(
+        client,
+        command,
+        "usage: `/nugget memory [status|search <query>|backfill [n]]`",
+        ephemeral=True,
+    )
+
+
+async def _backfill_memory(limit: int, user: str) -> None:
+    try:
+        if runtime.agent is None or runtime.db is None:
+            return
+        indexed = await runtime.agent.memory.backfill(runtime.db, limit)
+        await post(
+            runtime.client,
+            user,
+            f"semantic memory backfill done: indexed {indexed} turn(s).",
+        )
+    except Exception:
+        logger.exception("memory backfill failed")
+
+
 async def _say(client, command: dict[str, Any], text: str, *, ephemeral: bool = True) -> None:
     if ephemeral:
         await post_ephemeral(client, command["channel_id"], command["user_id"], text)

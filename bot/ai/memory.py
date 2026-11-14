@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from openai import AsyncOpenAI
@@ -82,11 +83,13 @@ class MemoryIndex:
         if not self.enabled:
             return 0
         rows = db.messages_without_vectors(self.model, limit)
-        indexed = 0
-        for row in reversed(rows):
-            vector = await self.embed(row.get("text") or "")
+        gate = asyncio.Semaphore(3)
+
+        async def index_row(row: dict) -> int:
+            async with gate:
+                vector = await self.embed(row.get("text") or "")
             if not vector:
-                continue
+                return 0
             db.add_memory_vector(
                 int(row["id"]),
                 str(row["conversation"]),
@@ -96,5 +99,9 @@ class MemoryIndex:
                 self.model,
                 vector,
             )
-            indexed += 1
-        return indexed
+            return 1
+
+        results = await asyncio.gather(
+            *(index_row(row) for row in reversed(rows)), return_exceptions=True
+        )
+        return sum(1 for result in results if result == 1)

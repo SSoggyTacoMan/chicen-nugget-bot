@@ -364,6 +364,7 @@ everything lives under `/nugget`. `/nugget help` is the full list.
 | `/nugget summarize [n]` | ai catch-up for this channel | ai channels |
 | `/nugget imagine <prompt>` | generate an image | admin |
 | `/nugget config` | runtime settings | admin |
+| `/nugget memory` | status, search or backfill semantic memory | admin |
 | `/nugget doctor` | scopes, tokens, sqlite, browser, github, sandbox | admin |
 | `/nugget setup` | connect integrations | admin |
 
@@ -455,6 +456,7 @@ bot/
   user_gateway.py          user websocket, typing, dedup
   ai/
     agent.py               prompt, history, tool loop, model routing
+    memory.py              embeddings and semantic memory
     tools.py               tool registry and implementations
     sandbox.py             workspaces and background jobs
     browser.py             chromium sessions and url guards
@@ -463,6 +465,8 @@ bot/
     agent.py               mention, dm, thread, reaction and group dm handling
     shortcuts.py           message shortcuts
     scheduler.py           reminders, digest, recaps
+    watchers.py            github ci watcher
+    doctor.py              /nugget doctor checks
     welcomer.py, access.py, recaps.py, router.py, commands.py
 prompts/system.md          agent system prompt
 tests/                     pytest suite
