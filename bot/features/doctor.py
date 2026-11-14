@@ -98,7 +98,7 @@ async def cmd_doctor(ack, command, client) -> None:
         from bot.features import retention
 
         lines.append(
-            f"{ok} storage: {retention.storage_report(settings).splitlines()[1]}"
+            f"{ok} storage: {retention.storage_report(settings, runtime.db).splitlines()[1]}"
         )
     except Exception as exc:  # noqa: BLE001
         lines.append(f"{warn} storage: {exc}")
@@ -143,15 +143,21 @@ async def cmd_doctor(ack, command, client) -> None:
             lines.append(f"{warn} github: {exc}")
 
     lines.append(f"{ok} gateway: {'on' if runtime.user_gateway else 'off'}")
-    active_watchers = []
-    if settings.github_watch:
-        active_watchers.append("github ci")
-    if settings.watch_github_notifications:
-        active_watchers.append("github notifications")
-    if settings.watch_email:
-        active_watchers.append("email")
-    if settings.watch_urls:
-        active_watchers.append(f"urls ({len(settings.watch_urls)})")
+    try:
+        from bot.features import watchers
+
+        w = watchers.watcher_config()
+        active_watchers = []
+        if w["github_ci"]:
+            active_watchers.append("github ci")
+        if w["github_notifications"]:
+            active_watchers.append("github notifications")
+        if w["email"]:
+            active_watchers.append("email")
+        if w["urls"]:
+            active_watchers.append(f"urls ({len(w['urls'])})")
+    except Exception:  # noqa: BLE001
+        active_watchers = []
     lines.append(
         f"{ok if active_watchers else warn} watchers: "
         f"{', '.join(active_watchers) if active_watchers else 'off'}"

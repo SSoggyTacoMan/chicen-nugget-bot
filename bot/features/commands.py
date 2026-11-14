@@ -1036,7 +1036,7 @@ async def cmd_storage(ack, command, client) -> None:
     if runtime.db is None:
         await _say(client, command, "database is not available.", ephemeral=True)
         return
-    report = retention.storage_report(runtime.settings)
+    report = retention.storage_report(runtime.settings, runtime.db)
     if (command.get("text") or "").strip().lower() == "prune":
         result = retention.prune_now(runtime.db, runtime.settings)
         report += (

@@ -131,11 +131,17 @@ run `/nugget setup`, or ask the bot to open the setup panel. secrets go into sla
 | github | `/nugget setup github` |
 | email (imap) | `/nugget setup email` |
 | api keys | `/nugget setup apis` |
+| ai and behavior | `/nugget setup ai` |
+| watchers | `/nugget setup watchers` |
+| storage | `/nugget setup storage` |
+| auto-join channels | `/nugget setup channels` |
 | your slack profile | `/nugget setup slack` |
 | status | `/nugget setup status` |
 | remove credentials | `/nugget setup disconnect <name>` |
 
 settings land in sqlite (`data/bot.db`) and override env values. env stays as a fallback for fresh deploys and ci.
+
+the panel also has AI & behavior, watchers, storage and auto-join. those write runtime settings instead of requiring an env edit.
 
 ### google
 

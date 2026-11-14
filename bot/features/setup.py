@@ -48,6 +48,7 @@ INTEGRATION_NAMES: dict[str, str] = {
     "apis": "API keys",
     "slack": "your Slack profile",
 }
+CONFIG_NAMES = {"ai", "watchers", "storage", "channels"}
 
 
 def register(app) -> None:
@@ -59,6 +60,10 @@ def register(app) -> None:
     app.view("setup_github")(on_github_submit)
     app.view("setup_email")(on_email_submit)
     app.view("setup_apis")(on_apis_submit)
+    app.view("setup_ai")(on_ai_submit)
+    app.view("setup_watchers")(on_watchers_submit)
+    app.view("setup_storage")(on_storage_submit)
+    app.view("setup_channels")(on_channels_submit)
     app.view("setup_mac")(on_mac_submit)
     app.view("setup_slack")(on_slack_submit)
 
@@ -139,6 +144,55 @@ def _input(
     }
 
 
+def _checkboxes(
+    block_id: str,
+    label: str,
+    options: list[tuple[str, str]],
+    selected: set[str],
+) -> dict[str, Any]:
+    elements = [
+        {"text": {"type": "plain_text", "text": text}, "value": value}
+        for value, text in options
+    ]
+    element: dict[str, Any] = {
+        "type": "checkboxes",
+        "action_id": "value",
+        "options": elements,
+    }
+    initial = [item for item in elements if item["value"] in selected]
+    if initial:
+        element["initial_options"] = initial
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "optional": True,
+        "label": {"type": "plain_text", "text": label},
+        "element": element,
+    }
+
+
+def _checked(view: dict[str, Any], block_id: str) -> set[str]:
+    values = (view.get("state") or {}).get("values") or {}
+    element = ((values.get(block_id) or {}).get("value") or {})
+    return {
+        str(item.get("value"))
+        for item in (element.get("selected_options") or [])
+        if item.get("value")
+    }
+
+
+def _current(key: str, default: str = "") -> str:
+    raw = runtime.db.kv_get(f"config:{key}") if runtime.db else None
+    return str(raw) if raw not in (None, "") else default
+
+
+def _current_bool(key: str, default: bool = True) -> bool:
+    raw = runtime.db.kv_get(f"config:{key}") if runtime.db else None
+    if raw is None:
+        return default
+    return str(raw).lower() not in {"false", "0", "no", "off"}
+
+
 def _modal(
     callback_id: str, title: str, blocks: list[dict[str, Any]], *, submit: str = "Save"
 ) -> dict[str, Any]:
@@ -214,6 +268,14 @@ async def cmd_setup(ack, command, client) -> None:
         await _disconnect(client, command, parts[1].lower() if len(parts) > 1 else "")
         return
 
+    if action in CONFIG_NAMES:
+        view = _config_modal(action)
+        if not view or not await _open_modal(
+            client, command.get("trigger_id"), view
+        ):
+            await _say(client, command, "couldn't open that setup form. try again in a second.")
+        return
+
     if action not in INTEGRATION_NAMES:
         await _say(client, command, _usage())
         return
@@ -283,6 +345,10 @@ def _usage() -> str:
         "• `/nugget setup email` - IMAP inbox\n"
         "• `/nugget setup mac` - companion bridge\n"
         "• `/nugget setup slack` - posting in your name (optional native token)\n"
+        "• `/nugget setup ai` - models and behavior toggles\n"
+        "• `/nugget setup watchers` - CI, notifications, email, URLs\n"
+        "• `/nugget setup storage` - retention and cleanup\n"
+        "• `/nugget setup channels` - auto-join public channels\n"
         "• `/nugget setup disconnect <name>` - remove stored credentials\n\n"
         "secrets go into Slack modals, never chat. Google uses a desktop OAuth "
         "client and a `http://localhost:9876/oauth2callback` redirect; you paste "
@@ -317,6 +383,8 @@ async def on_setup_open(ack, body, client) -> None:
                 await _dm(client, user_id or "", f"couldn't send the auth link: {message}")
             return
         view = _google_credentials_modal()
+    elif integration in {"ai", "watchers", "storage", "channels"}:
+        view = _config_modal(integration)
     else:
         view = _integration_modal(integration)
     if not view:
@@ -558,6 +626,167 @@ async def _complete_google_code(client, user_id: str, raw: str) -> str:
 
 
 # ------------------------------------------------------------------- other modals
+def _config_modal(integration: str) -> dict[str, Any] | None:
+    settings = runtime.settings
+    if integration == "ai":
+        selected = {
+            key
+            for key, default in (
+                ("recaps", True),
+                ("thread_followups", True),
+                ("ambient_ai", True),
+                ("welcomer", True),
+                ("personal_updates", True),
+            )
+            if _current_bool(key, default)
+        }
+        return _modal(
+            "setup_ai",
+            "AI and behavior",
+            [
+                _note(
+                    "models apply to new turns. leave a field blank to keep it, or enter `-` to fall back to the env default."
+                ),
+                _input("ai_model", "Bot model", initial=_current("ai_model", settings.ai_model)),
+                _input(
+                    "ai_assistant_model",
+                    "Boi model",
+                    initial=_current("ai_assistant_model", settings.ai_assistant_model),
+                ),
+                _input("ai_code_model", "Code model", initial=_current("ai_code_model", settings.ai_code_model or "")),
+                _checkboxes(
+                    "behavior",
+                    "Behavior",
+                    [
+                        ("recaps", "daily recaps"),
+                        ("thread_followups", "unprompted thread replies"),
+                        ("ambient_ai", "ambient replies"),
+                        ("welcomer", "welcomer / onboarding"),
+                        ("personal_updates", "owner digest and recap DMs"),
+                    ],
+                    selected,
+                ),
+            ],
+            submit="Save AI",
+        )
+    if integration == "watchers":
+        from bot.features.watchers import watcher_config
+
+        cfg = watcher_config()
+        selected = {
+            key
+            for key, enabled in (
+                ("watch_github_ci", cfg["github_ci"]),
+                ("watch_github_notifications", cfg["github_notifications"]),
+                ("watch_email", cfg["email"]),
+            )
+            if enabled
+        }
+        return _modal(
+            "setup_watchers",
+            "Watchers",
+            [
+                _note(
+                    "all watchers baseline on first run and honor quiet hours plus the daily cap. email needs `/nugget setup email`."
+                ),
+                _checkboxes(
+                    "watchers",
+                    "Enable",
+                    [
+                        ("watch_github_ci", "failed GitHub Actions runs"),
+                        ("watch_github_notifications", "new GitHub notifications"),
+                        ("watch_email", "new unread email"),
+                    ],
+                    selected,
+                ),
+                _input(
+                    "watch_urls",
+                    "URLs to watch",
+                    placeholder="https://example.com,https://status.example.com",
+                    initial=",".join(cfg["urls"]),
+                    max_length=1500,
+                ),
+                _input(
+                    "watch_github_ci_interval",
+                    "CI interval (seconds)",
+                    initial=str(cfg["github_ci_interval"]),
+                    max_length=6,
+                ),
+                _input(
+                    "watch_github_notifications_interval",
+                    "Notification interval (seconds)",
+                    initial=str(cfg["github_notifications_interval"]),
+                    max_length=6,
+                ),
+                _input(
+                    "watch_email_interval",
+                    "Email interval (seconds)",
+                    initial=str(cfg["email_interval"]),
+                    max_length=6,
+                ),
+                _input(
+                    "watch_url_interval",
+                    "URL interval (seconds)",
+                    initial=str(cfg["url_interval"]),
+                    max_length=6,
+                ),
+            ],
+            submit="Save watchers",
+        )
+    if integration == "storage":
+        from bot.features import retention
+
+        return _modal(
+            "setup_storage",
+            "Storage",
+            [
+                _note(
+                    "`0` disables a retention rule. run `/nugget storage prune` to apply now."
+                ),
+                _input(
+                    "memory_retention_days",
+                    "History retention (days)",
+                    initial=str(retention._cfg_int(runtime.db, "memory_retention_days", settings.memory_retention_days)),
+                    max_length=5,
+                ),
+                _input(
+                    "sandbox_ttl_days",
+                    "Sandbox TTL (days)",
+                    initial=str(retention._cfg_int(runtime.db, "sandbox_ttl_days", settings.sandbox_ttl_days)),
+                    max_length=5,
+                ),
+                _input(
+                    "storage_min_free_gb",
+                    "Low disk warning (GB)",
+                    initial=str(retention._cfg_float(runtime.db, "storage_min_free_gb", settings.storage_min_free_gb)),
+                    max_length=8,
+                ),
+            ],
+            submit="Save storage",
+        )
+    if integration == "channels":
+        return _modal(
+            "setup_channels",
+            "Auto-join channels",
+            [
+                _note(
+                    "comma separated public channel ids. empty joins nothing. private channels still need an invite. enter `-` to clear and fall back to env."
+                ),
+                _input(
+                    "auto_join_channels",
+                    "Channel ids",
+                    placeholder="C0123ABCD,C0456EFGH",
+                    initial=_current(
+                        "auto_join_channels", ",".join(settings.auto_join_channels)
+                    ),
+                    max_length=2000,
+                ),
+            ],
+            submit="Save channels",
+        )
+    return None
+
+
 def _integration_modal(integration: str) -> dict[str, Any] | None:
     if integration == "github":
         github = integrations.github_config(runtime.db, runtime.settings)
@@ -769,6 +998,81 @@ async def on_apis_submit(ack, body, view, client) -> None:
         )
     else:
         await _dm(client, user_id or "", "no API key changes.")
+
+
+async def on_ai_submit(ack, body, view, client) -> None:
+    await ack()
+    user_id = (body.get("user") or {}).get("id")
+    if not _is_admin(user_id):
+        return
+    values = _values(view)
+    for key in (
+        "ai_model",
+        "ai_assistant_model",
+        "ai_code_model",
+    ):
+        raw = values.get(key, "")
+        if not raw:
+            continue
+        _set(key, "" if raw.strip() == "-" else raw.strip())
+    checked = _checked(view, "behavior")
+    for key in ("recaps", "thread_followups", "ambient_ai", "welcomer", "personal_updates"):
+        _set(key, "true" if key in checked else "false")
+    await _dm(client, user_id or "", "saved AI and behavior settings.")
+
+
+async def on_watchers_submit(ack, body, view, client) -> None:
+    await ack()
+    user_id = (body.get("user") or {}).get("id")
+    if not _is_admin(user_id):
+        return
+    values = _values(view)
+    checked = _checked(view, "watchers")
+    for key in ("watch_github_ci", "watch_github_notifications", "watch_email"):
+        _set(key, "true" if key in checked else "false")
+    raw_urls = values.get("watch_urls", "")
+    if raw_urls:
+        _set("watch_urls", "" if raw_urls.strip() == "-" else raw_urls.strip())
+    for key in (
+        "watch_github_ci_interval",
+        "watch_github_notifications_interval",
+        "watch_email_interval",
+        "watch_url_interval",
+    ):
+        raw = values.get(key, "")
+        if raw.isdigit():
+            _set(key, str(max(60, int(raw))))
+    await _dm(client, user_id or "", "saved watcher settings.")
+
+
+async def on_storage_submit(ack, body, view, client) -> None:
+    await ack()
+    user_id = (body.get("user") or {}).get("id")
+    if not _is_admin(user_id):
+        return
+    values = _values(view)
+    for key in ("memory_retention_days", "sandbox_ttl_days"):
+        raw = values.get(key, "")
+        if raw.isdigit():
+            _set(key, str(max(0, int(raw))))
+    raw_free = values.get("storage_min_free_gb", "")
+    try:
+        if raw_free:
+            _set("storage_min_free_gb", str(max(0.0, float(raw_free))))
+    except ValueError:
+        pass
+    await _dm(client, user_id or "", "saved storage retention settings.")
+
+
+async def on_channels_submit(ack, body, view, client) -> None:
+    await ack()
+    user_id = (body.get("user") or {}).get("id")
+    if not _is_admin(user_id):
+        return
+    raw = _values(view).get("auto_join_channels", "")
+    if raw:
+        _set("auto_join_channels", "" if raw.strip() == "-" else raw.strip())
+    await _dm(client, user_id or "", "saved auto-join channels.")
 
 
 async def on_mac_submit(ack, body, view, client) -> None:

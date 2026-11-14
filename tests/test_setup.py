@@ -420,6 +420,17 @@ def test_status_understands_access_token_only(tmp_path):
     assert "access token configured" in text
 
 
+def test_setup_panel_has_advanced_areas():
+    blocks = integrations.setup_panel_blocks()
+    values = {
+        element["value"]
+        for block in blocks
+        if block.get("type") == "actions"
+        for element in block.get("elements") or []
+    }
+    assert {"ai", "watchers", "storage", "channels"} <= values
+
+
 def test_secret_config_writes_are_blocked(tmp_path):
     from bot.ai.tools import Toolbox, ToolContext
 
@@ -451,3 +462,164 @@ def test_secret_config_writes_are_blocked(tmp_path):
     assert "secrets can't be set in chat" in result
     assert "setup github" in result
     assert db.kv_get("config:github_token") is None
+
+
+def _setup_settings(**overrides):
+    settings = SimpleNamespace(
+        ai_model="bot-model",
+        ai_assistant_model="boi-model",
+        ai_code_model="code-model",
+        ai_embedding_model="embed-model",
+        github_watch=False,
+        github_watch_interval=3600,
+        watch_github_notifications=False,
+        watch_github_notifications_interval=600,
+        watch_email=False,
+        watch_email_interval=900,
+        watch_email_limit=5,
+        watch_urls=(),
+        watch_url_interval=300,
+        watch_url_timeout=15,
+        memory_retention_days=180,
+        sandbox_ttl_days=30,
+        storage_min_free_gb=2.0,
+        auto_join_channels=("C1",),
+        is_admin=lambda user_id: user_id == "U_OWNER",
+    )
+    for key, value in overrides.items():
+        setattr(settings, key, value)
+    return settings
+
+
+def _modal_view(values=None, checked=None):
+    state = {
+        block_id: {"value": {"value": value}}
+        for block_id, value in (values or {}).items()
+    }
+    for block_id, selected in (checked or {}).items():
+        state[block_id] = {
+            "value": {"selected_options": [{"value": item} for item in selected]}
+        }
+    return {"state": {"values": state}}
+
+
+def test_advanced_config_modals_reflect_overrides(tmp_path, monkeypatch):
+    from bot.features import setup
+    from bot.runtime import runtime
+
+    db = Database(tmp_path / "config.db")
+    db.init()
+    db.kv_set("config:ai_model", "custom-model")
+    db.kv_set("config:watch_urls", "https://example.com")
+    db.kv_set("config:auto_join_channels", "C9")
+    monkeypatch.setattr(runtime, "db", db)
+    monkeypatch.setattr(runtime, "settings", _setup_settings())
+
+    modals = {
+        name: setup._config_modal(name)
+        for name in ("ai", "watchers", "storage", "channels")
+    }
+    assert modals["ai"]["callback_id"] == "setup_ai"
+    assert modals["watchers"]["callback_id"] == "setup_watchers"
+    assert modals["storage"]["callback_id"] == "setup_storage"
+    assert modals["channels"]["callback_id"] == "setup_channels"
+    assert "custom-model" in json.dumps(modals["ai"])
+    assert "https://example.com" in json.dumps(modals["watchers"])
+    assert "C9" in json.dumps(modals["channels"])
+    assert setup._config_modal("unknown") is None
+
+
+def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
+    from bot.features import setup
+    from bot.runtime import runtime
+
+    db = Database(tmp_path / "submit.db")
+    db.init()
+    monkeypatch.setattr(runtime, "db", db)
+    monkeypatch.setattr(runtime, "settings", _setup_settings())
+
+    class FakeClient:
+        async def chat_postMessage(self, **kwargs):
+            return SimpleNamespace(data={"ok": True})
+
+    client = FakeClient()
+    body = {"user": {"id": "U_OWNER"}}
+
+    async def run():
+        await setup.on_ai_submit(
+            AsyncMock(),
+            body,
+            _modal_view(
+                {"ai_model": "new-model", "ai_code_model": "-"},
+                {"behavior": ["recaps", "ambient_ai"]},
+            ),
+            client,
+        )
+        await setup.on_watchers_submit(
+            AsyncMock(),
+            body,
+            _modal_view(
+                {
+                    "watch_urls": "https://status.example.com",
+                    "watch_email_interval": "30",
+                },
+                {"watchers": ["watch_email"]},
+            ),
+            client,
+        )
+        await setup.on_storage_submit(
+            AsyncMock(),
+            body,
+            _modal_view(
+                {
+                    "memory_retention_days": "90",
+                    "sandbox_ttl_days": "7",
+                    "storage_min_free_gb": "1.5",
+                }
+            ),
+            client,
+        )
+        await setup.on_channels_submit(
+            AsyncMock(),
+            body,
+            _modal_view({"auto_join_channels": "C1,C2"}),
+            client,
+        )
+
+    asyncio.run(run())
+
+    assert db.kv_get("config:ai_model") == "new-model"
+    assert db.kv_get("config:ai_code_model") is None
+    assert db.kv_get("config:recaps") == "true"
+    assert db.kv_get("config:ambient_ai") == "true"
+    assert db.kv_get("config:welcomer") == "false"
+    assert db.kv_get("config:watch_email") == "true"
+    assert db.kv_get("config:watch_github_ci") == "false"
+    assert db.kv_get("config:watch_urls") == "https://status.example.com"
+    assert db.kv_get("config:watch_email_interval") == "60"
+    assert db.kv_get("config:memory_retention_days") == "90"
+    assert db.kv_get("config:sandbox_ttl_days") == "7"
+    assert db.kv_get("config:storage_min_free_gb") == "1.5"
+    assert db.kv_get("config:auto_join_channels") == "C1,C2"
+
+
+def test_advanced_setup_rejects_non_admin(tmp_path, monkeypatch):
+    from bot.features import setup
+    from bot.runtime import runtime
+
+    db = Database(tmp_path / "admin.db")
+    db.init()
+    monkeypatch.setattr(runtime, "db", db)
+    monkeypatch.setattr(runtime, "settings", _setup_settings())
+    client = AsyncMock()
+
+    async def run():
+        await setup.on_storage_submit(
+            AsyncMock(),
+            {"user": {"id": "U_OTHER"}},
+            _modal_view({"memory_retention_days": "5"}),
+            client,
+        )
+
+    asyncio.run(run())
+    assert db.kv_get("config:memory_retention_days") is None

@@ -32,6 +32,64 @@ _last_email = 0.0
 _last_urls = 0.0
 
 
+def _kv_bool(db, key: str, default: bool) -> bool:
+    raw = db.kv_get(f"config:{key}") if db else None
+    if raw is None:
+        return default
+    return str(raw).lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _kv_int(db, key: str, default: int) -> int:
+    raw = db.kv_get(f"config:{key}") if db else None
+    try:
+        return int(raw) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _kv_csv(db, key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = db.kv_get(f"config:{key}") if db else None
+    if raw is None:
+        return default
+    return tuple(item.strip() for item in str(raw).split(",") if item.strip())
+
+
+def watcher_config() -> dict[str, Any]:
+    settings = runtime.settings
+    db = runtime.db
+    return {
+        "github_ci": _kv_bool(db, "watch_github_ci", settings.github_watch),
+        "github_ci_interval": max(
+            60, _kv_int(db, "watch_github_ci_interval", settings.github_watch_interval)
+        ),
+        "github_notifications": _kv_bool(
+            db, "watch_github_notifications", settings.watch_github_notifications
+        ),
+        "github_notifications_interval": max(
+            60,
+            _kv_int(
+                db,
+                "watch_github_notifications_interval",
+                settings.watch_github_notifications_interval,
+            ),
+        ),
+        "email": _kv_bool(db, "watch_email", settings.watch_email),
+        "email_interval": max(
+            60, _kv_int(db, "watch_email_interval", settings.watch_email_interval)
+        ),
+        "email_limit": max(
+            1, min(10, _kv_int(db, "watch_email_limit", settings.watch_email_limit))
+        ),
+        "urls": _kv_csv(db, "watch_urls", settings.watch_urls),
+        "url_interval": max(
+            60, _kv_int(db, "watch_url_interval", settings.watch_url_interval)
+        ),
+        "url_timeout": max(
+            5, _kv_int(db, "watch_url_timeout", settings.watch_url_timeout)
+        ),
+    }
+
+
 async def _notify(text: str) -> bool:
     settings = runtime.settings
     if not settings.owner_user_id or runtime.db is None:
@@ -53,11 +111,11 @@ async def tick() -> None:
 
 async def _github_ci() -> None:
     global _last_ci
-    settings = runtime.settings
-    if not settings.github_watch or not settings.owner_user_id or runtime.db is None:
+    cfg = watcher_config()
+    if not cfg["github_ci"] or not runtime.settings.owner_user_id or runtime.db is None:
         return
     now = time.monotonic()
-    if now - _last_ci < settings.github_watch_interval:
+    if now - _last_ci < cfg["github_ci_interval"]:
         return
     _last_ci = now
 
@@ -100,15 +158,15 @@ async def _github_ci() -> None:
 
 async def _github_notifications() -> None:
     global _last_notifications
-    settings = runtime.settings
+    cfg = watcher_config()
     if (
-        not settings.watch_github_notifications
-        or not settings.owner_user_id
+        not cfg["github_notifications"]
+        or not runtime.settings.owner_user_id
         or runtime.db is None
     ):
         return
     now = time.monotonic()
-    if now - _last_notifications < settings.watch_github_notifications_interval:
+    if now - _last_notifications < cfg["github_notifications_interval"]:
         return
     _last_notifications = now
 
@@ -151,15 +209,15 @@ async def _github_notifications() -> None:
 
 async def _email() -> None:
     global _last_email
-    settings = runtime.settings
-    if not settings.watch_email or not settings.owner_user_id or runtime.db is None:
+    cfg = watcher_config()
+    if not cfg["email"] or not runtime.settings.owner_user_id or runtime.db is None:
         return
     now = time.monotonic()
-    if now - _last_email < settings.watch_email_interval:
+    if now - _last_email < cfg["email_interval"]:
         return
     _last_email = now
 
-    imap = integrations.imap_config(runtime.db, settings)
+    imap = integrations.imap_config(runtime.db, runtime.settings)
     host, user, password = imap["host"], imap["user"], imap["password"]
     if not (host and user and password):
         return
@@ -169,7 +227,7 @@ async def _email() -> None:
         port = 993
     try:
         current, messages = await asyncio.to_thread(
-            _fetch_unseen, host, port, user, password, settings.watch_email_limit
+            _fetch_unseen, host, port, user, password, cfg["email_limit"]
         )
     except Exception:
         logger.debug("email watcher failed", exc_info=True)
@@ -186,7 +244,7 @@ async def _email() -> None:
         f"- *{item['subject'] or '(no subject)'}* from {item['from'] or 'someone'}\n  {item['snippet'][:180]}"
         for item in messages
         if item["uid"] in new
-    ][: settings.watch_email_limit]
+    ][: cfg["email_limit"]]
     if not lines:
         lines = [f"{len(new)} new unread email(s)"]
     elif len(new) > len(lines):
@@ -197,11 +255,11 @@ async def _email() -> None:
 
 async def _urls() -> None:
     global _last_urls
-    settings = runtime.settings
-    if not settings.watch_urls or not settings.owner_user_id or runtime.db is None:
+    cfg = watcher_config()
+    if not cfg["urls"] or not runtime.settings.owner_user_id or runtime.db is None:
         return
     now = time.monotonic()
-    if now - _last_urls < settings.watch_url_interval:
+    if now - _last_urls < cfg["url_interval"]:
         return
     _last_urls = now
 
@@ -212,10 +270,10 @@ async def _urls() -> None:
     except (TypeError, ValueError):
         state = {}
     updated = dict(state)
-    for url in settings.watch_urls:
+    for url in cfg["urls"]:
         if not url.startswith(("http://", "https://")):
             continue
-        up = await _url_up(url, settings.watch_url_timeout)
+        up = await _url_up(url, cfg["url_timeout"])
         if url not in state:
             updated[url] = up
             continue

@@ -54,7 +54,13 @@ async def run() -> None:
     runtime.bot_user_id = auth.get("user_id") or ""
     runtime.bot_id = auth.get("bot_id") or ""
 
-    for channel_id in settings.auto_join_channels:
+    auto_join = settings.auto_join_channels
+    stored_join = db.kv_get("config:auto_join_channels")
+    if stored_join is not None:
+        auto_join = tuple(
+            item.strip() for item in stored_join.split(",") if item.strip()
+        )
+    for channel_id in auto_join:
         if channel_id == "*" or channel_id[:1] not in {"C", "G"}:
             logger.warning(
                 "auto-join expects channel ids, not %r; skipping", channel_id

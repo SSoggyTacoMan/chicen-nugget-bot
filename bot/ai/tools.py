@@ -1522,7 +1522,18 @@ class Toolbox:
                     },
                     "integration": {
                         "type": "string",
-                        "enum": ["google", "mac", "github", "email", "apis", "slack"],
+                        "enum": [
+                            "google",
+                            "mac",
+                            "github",
+                            "email",
+                            "apis",
+                            "slack",
+                            "ai",
+                            "watchers",
+                            "storage",
+                            "channels",
+                        ],
                         "description": "Which integration for action='panel' or 'disconnect'. Omit for all.",
                     },
                 },
@@ -5579,8 +5590,11 @@ class Toolbox:
         if action != "panel":
             return _error("action must be panel, status, or disconnect")
 
-        if integration and integration not in {name for name, _ in integrations.SETUP_INTEGRATIONS}:
-            return _error("integration must be google, mac, github, email, apis, or slack")
+        if integration and integration not in integrations.SETUP_AREAS:
+            areas = ", ".join(name for name, _ in integrations.SETUP_INTEGRATIONS)
+            return _error(
+                f"integration must be {areas}, ai, watchers, storage, channels, or all"
+            )
         blocks = integrations.setup_panel_blocks(integration or None)
         result = await post(
             ctx.client,

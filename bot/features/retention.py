@@ -49,9 +49,27 @@ def _manager(settings: Settings) -> SandboxManager:
     )
 
 
+def _cfg_int(db: Database | None, key: str, default: int) -> int:
+    raw = db.kv_get(f"config:{key}") if db else None
+    try:
+        return int(raw) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _cfg_float(db: Database | None, key: str, default: float) -> float:
+    raw = db.kv_get(f"config:{key}") if db else None
+    try:
+        return float(raw) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
 def prune_now(db: Database, settings: Settings) -> dict[str, object]:
-    counts = db.prune_history(settings.memory_retention_days)
-    removed = _manager(settings).prune_stale(settings.sandbox_ttl_days)
+    retention_days = _cfg_int(db, "memory_retention_days", settings.memory_retention_days)
+    sandbox_days = _cfg_int(db, "sandbox_ttl_days", settings.sandbox_ttl_days)
+    counts = db.prune_history(retention_days)
+    removed = _manager(settings).prune_stale(sandbox_days)
     backups = 0
     cutoff = time.time() - 7 * 86400
     for path in settings.data_dir.glob("bot.db.bak.*"):
@@ -72,7 +90,7 @@ def prune_now(db: Database, settings: Settings) -> dict[str, object]:
     }
 
 
-def storage_report(settings: Settings) -> str:
+def storage_report(settings: Settings, db: Database | None = None) -> str:
     db_path = settings.db_path
     db_size = db_path.stat().st_size if db_path.exists() else 0
     manager = _manager(settings)
@@ -85,6 +103,8 @@ def storage_report(settings: Settings) -> str:
         free = shutil.disk_usage(settings.data_dir).free
     except OSError:
         free = 0
+    retention_days = _cfg_int(db, "memory_retention_days", settings.memory_retention_days)
+    sandbox_days = _cfg_int(db, "sandbox_ttl_days", settings.sandbox_ttl_days)
     return "\n".join(
         [
             "*storage*",
@@ -94,7 +114,7 @@ def storage_report(settings: Settings) -> str:
             f"• browser: {_human(browser_size)}",
             f"• logs: {_human(logs_size)}",
             f"• free disk: {_human(free)}",
-            f"• retention: history {settings.memory_retention_days}d · sandboxes {settings.sandbox_ttl_days}d",
+            f"• retention: history {retention_days}d · sandboxes {sandbox_days}d",
         ]
     )
 
@@ -119,7 +139,8 @@ async def tick() -> None:
         free = shutil.disk_usage(settings.data_dir).free
     except OSError:
         return
-    if free < settings.storage_min_free_gb * 1024**3:
+    min_free = _cfg_float(runtime_db(), "storage_min_free_gb", settings.storage_min_free_gb)
+    if free < min_free * 1024**3:
         logger.warning("low disk: %s free", _human(free))
 
 

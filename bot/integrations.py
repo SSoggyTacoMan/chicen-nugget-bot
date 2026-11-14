@@ -23,6 +23,19 @@ SETUP_INTEGRATIONS: tuple[tuple[str, str], ...] = (
     ("slack", "Slack profile"),
 )
 
+# Runtime settings areas in the setup panel. These open modals that write
+# SQLite overrides instead of storing credentials.
+SETUP_CONFIG_AREAS: tuple[tuple[str, str], ...] = (
+    ("ai", "AI & behavior"),
+    ("watchers", "Watchers"),
+    ("storage", "Storage"),
+    ("channels", "Auto-join"),
+)
+
+SETUP_AREAS: frozenset[str] = frozenset(
+    [name for name, _ in SETUP_INTEGRATIONS] + [name for name, _ in SETUP_CONFIG_AREAS]
+)
+
 # Values that must not be typed into chat, even by an admin. They belong in the
 # setup modals, which are ephemeral Slack forms.
 SECRET_CONFIG_KEYS: frozenset[str] = frozenset(
@@ -230,6 +243,37 @@ def setup_status_text(
     boi_state = (
         "connected" if assistant_identity else "not configured (SLACK_USER_TOKEN in the server env)"
     )
+    watch_bits = []
+    for key, label, default in (
+        (
+            "watch_github_ci",
+            "ci",
+            bool(getattr(settings, "github_watch", False)),
+        ),
+        (
+            "watch_github_notifications",
+            "notifications",
+            bool(getattr(settings, "watch_github_notifications", False)),
+        ),
+        (
+            "watch_email",
+            "email",
+            bool(getattr(settings, "watch_email", False)),
+        ),
+    ):
+        raw = _get(db, key)
+        enabled = default if not raw else raw.lower() in {"1", "true", "yes", "on"}
+        if enabled:
+            watch_bits.append(label)
+    urls_raw = _get(db, "watch_urls")
+    urls = (
+        urls_raw.split(",")
+        if urls_raw is not None
+        else getattr(settings, "watch_urls", ())
+    )
+    if any(str(url).strip() for url in urls):
+        watch_bits.append(f"urls ({len([url for url in urls if str(url).strip()])})")
+    watch_state = ", ".join(watch_bits) if watch_bits else "none"
 
     lines = [
         "*integration status*",
@@ -240,6 +284,7 @@ def setup_status_text(
         f"• *Email (IMAP)*: {email_state}",
         f"• *Boi user account*: {boi_state}",
         f"• *Your Slack profile*: {slack_state}",
+        f"• *Watchers*: {watch_state}",
         "",
         "connect or change these with `/nugget setup`, or ask me to open the setup panel.",
     ]
@@ -309,14 +354,28 @@ def prompt_integration_lines(
     ]
     api_state = ", ".join(connected_apis) if connected_apis else "none"
     watchers = []
-    if settings.github_watch:
+
+    def watcher_on(key: str, default: bool) -> bool:
+        raw = _get(db, key)
+        return default if not raw else raw.lower() in {"1", "true", "yes", "on"}
+
+    if watcher_on("watch_github_ci", bool(getattr(settings, "github_watch", False))):
         watchers.append("github ci")
-    if settings.watch_github_notifications:
+    if watcher_on(
+        "watch_github_notifications",
+        bool(getattr(settings, "watch_github_notifications", False)),
+    ):
         watchers.append("github notifications")
-    if settings.watch_email:
+    if watcher_on("watch_email", bool(getattr(settings, "watch_email", False))):
         watchers.append("email")
-    if settings.watch_urls:
-        watchers.append(f"urls ({len(settings.watch_urls)})")
+    urls_raw = _get(db, "watch_urls")
+    watch_urls = (
+        [item for item in urls_raw.split(",") if item.strip()]
+        if urls_raw is not None
+        else list(getattr(settings, "watch_urls", ()))
+    )
+    if watch_urls:
+        watchers.append(f"urls ({len(watch_urls)})")
     watcher_state = ", ".join(watchers) if watchers else "off"
     return (
         f"- GitHub & Hackatime: {gh_state}\n"
@@ -341,14 +400,18 @@ def setup_panel_blocks(requested: str | None = None) -> list[dict[str, Any]]:
         "email": ("Email", "IMAP inbox and app password"),
         "apis": ("API keys", "Vercel, Cloudflare, Notion, Linear, Sentry"),
         "slack": ("Slack profile", "Post in your own name"),
+        "ai": ("AI & behavior", "Models, recaps, ambient replies"),
+        "watchers": ("Watchers", "CI, notifications, email, URLs"),
+        "storage": ("Storage", "Retention and cleanup"),
+        "channels": ("Auto-join", "Channels to join on boot"),
     }
     if requested and requested in labels:
         title, detail = labels[requested]
         intro = f"*{title} setup* - {detail}. tap the button to open the form."
         keys = (requested,)
     else:
-        intro = "pick an integration. secrets open in a Slack form, never in chat."
-        keys = tuple(key for key, _ in SETUP_INTEGRATIONS)
+        intro = "pick a setup area. secrets open in a Slack form, never in chat."
+        keys = tuple(labels)
     buttons = [
         {
             "type": "button",
@@ -358,9 +421,12 @@ def setup_panel_blocks(requested: str | None = None) -> list[dict[str, Any]]:
         }
         for key in keys
     ]
-    return [
-        {"type": "section", "text": {"type": "mrkdwn", "text": intro}},
-        {"type": "actions", "elements": buttons},
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": intro}}
+    ]
+    for index in range(0, len(buttons), 4):
+        blocks.append({"type": "actions", "elements": buttons[index : index + 4]})
+    blocks.append(
         {
             "type": "context",
             "elements": [
@@ -370,5 +436,6 @@ def setup_panel_blocks(requested: str | None = None) -> list[dict[str, Any]]:
                     "`/nugget setup disconnect <name>` removes stored credentials.",
                 }
             ],
-        },
-    ]
+        }
+    )
+    return blocks
