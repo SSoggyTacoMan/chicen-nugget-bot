@@ -2751,6 +2751,8 @@ def test_public_veto_regex_catches_internal_details():
         "tools on the host: a shell sandbox, git, and the github token"
     )
     assert PRIVATE_DETAIL_RE.search("the vps runs sqlite and a .env file")
+    assert PRIVATE_DETAIL_RE.search("run /nugget setup github to add the token")
+    assert PRIVATE_DETAIL_RE.search("that needs credentials in the oauth flow")
     assert not PRIVATE_DETAIL_RE.search(
         "run the tests before merging and check the diff"
     )

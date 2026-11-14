@@ -351,6 +351,7 @@ class UserGateway:
                     trigger=trigger,
                     jev="",
                     images=images,
+                    public_veto=bool(not is_dm and not is_mpim),
                     client=self.user_client,
                 )
         except Exception:

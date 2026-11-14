@@ -51,7 +51,10 @@ def is_quota_error(exc: Exception) -> bool:
 
 PRIVATE_DETAIL_RE = re.compile(
     r"\b(?:sandbox|shell|tokens?|host|vps|\.env|sqlite|system prompt|"
-    r"api key|openai|anthropic|deepseek|qwen|ssh|repo_url|github token)\b",
+    r"api key|openai|anthropic|deepseek|qwen|ssh|repo_url|github token|"
+    r"credentials?|oauth|missing scope|bot token|user token|env file)\b"
+    r"|/nugget setup\b"
+    r"|\bsetup\s+(?:github|email|slack|google|apis|welcome|fallback|voice|images)\b",
     re.IGNORECASE,
 )
 

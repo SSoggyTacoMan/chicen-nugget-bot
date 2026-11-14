@@ -813,10 +813,7 @@ async def _handle_channel(
                 jev=jev,
                 images=images,
                 context=context,
-                public_veto=bool(
-                    event.get("channel_type") == "channel"
-                    and not settings.is_admin(user_id)
-                ),
+                public_veto=event.get("channel_type") == "channel",
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return False

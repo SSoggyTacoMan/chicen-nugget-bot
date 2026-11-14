@@ -451,7 +451,7 @@ assist = kind is help/feedback, or a question that needs live data/tools
 
 a message aimed at another person never triggers an agent turn unless the bot is also addressed. short follow-ups in a thread where the bot spoke last bypass the gate. `needs_tools` becomes a hint so the model fetches data instead of guessing.
 
-the prompt also gives the model a public-channel veto: it can return `[NO_REPLY]` for messages that were not for it or would overshare. non-admin public replies containing sandbox, token, host, `.env`, sqlite or model details are suppressed before posting.
+the prompt also gives the model a public-channel veto: it can return `[NO_REPLY]` for messages that were not for it or would overshare. public replies containing sandbox, token, host, `.env`, sqlite, setup or model details are suppressed before posting.
 
 mentions and dms skip the gate. errors and timeouts fail closed. `AI_AMBIENT_CHANNELS=*` turns ambient replies on everywhere the bot is a member.
 
