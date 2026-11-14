@@ -2544,3 +2544,56 @@ def test_unsubscribe_gag():
         runtime.bot_user_id = old_bot_user_id
         _last_unsubscribe.clear()
 
+
+
+def test_transcribe_slack_audio_falls_back_to_chat_audio():
+    import asyncio
+    from unittest.mock import MagicMock, patch
+
+    import httpx
+
+    from bot.slack_api import transcribe_slack_audio
+
+    settings = MagicMock()
+    settings.ai_api_key = "test-api-key"
+    settings.ai_base_url = "https://ai.example.com/v1"
+    settings.ai_model = "test-model"
+    event = {
+        "files": [
+            {
+                "name": "voice.wav",
+                "mimetype": "audio/wav",
+                "filetype": "wav",
+                "url_private_download": "https://slack.com/files/voice.wav",
+                "size": 1024,
+            }
+        ]
+    }
+
+    async def fake_audio_http_get(self, url, *args, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.content = b"RIFFfakeaudiobytes"
+        return resp
+
+    async def fake_audio_http_post(self, url, *args, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        if url.endswith("/audio/transcriptions"):
+            resp.status_code = 404
+            resp.json.return_value = {"error": "Not found"}
+        else:
+            resp.status_code = 200
+            resp.json.return_value = {
+                "choices": [{"message": {"content": "fallback transcript"}}]
+            }
+        return resp
+
+    async def run():
+        with (
+            patch.object(httpx.AsyncClient, "get", new=fake_audio_http_get),
+            patch.object(httpx.AsyncClient, "post", new=fake_audio_http_post),
+        ):
+            result = await transcribe_slack_audio(event, "xoxb-token", settings)
+        assert result == ["fallback transcript"]
+
+    asyncio.run(run())
