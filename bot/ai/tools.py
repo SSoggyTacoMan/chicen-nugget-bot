@@ -19,6 +19,7 @@ import logging
 import os
 import random
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -1037,7 +1038,7 @@ class Toolbox:
             ),
             tool(
                 "github_write",
-                "Create PRs and issues, comment, review, close, reopen or merge pull requests. Owner/admin only, DM only. close and merge require confirm=true and an explicit owner request.",
+                "Create PRs and issues, comment, review, close, reopen or merge pull requests, or commit and push a sandbox branch and open a PR. Owner/admin only, DM only. close, merge and push_branch require confirm=true and an explicit owner request.",
                 {
                     "action": {
                         "type": "string",
@@ -1049,8 +1050,25 @@ class Toolbox:
                             "reopen",
                             "merge",
                             "create_issue",
+                            "push_branch",
                         ],
                         "description": "Write action.",
+                    },
+                    "sandbox": {
+                        "type": "string",
+                        "description": "For push_branch: sandbox name containing the repo.",
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "For push_branch: new branch name, e.g. 'boi/fix-login'.",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "For push_branch: commit message.",
+                    },
+                    "open_pr": {
+                        "type": "boolean",
+                        "description": "For push_branch: open a PR after pushing. Default false.",
                     },
                     "repo": {
                         "type": "string",
@@ -3855,6 +3873,116 @@ class Toolbox:
         except Exception as exc:  # noqa: BLE001
             return _error(f"github api error: {exc}")
 
+    async def _push_sandbox_branch(
+        self,
+        args: dict[str, Any],
+        ctx: ToolContext,
+        repo: str,
+        token: str,
+    ) -> str:
+        if not bool(args.get("confirm", False)):
+            return _error(
+                "pushing a branch needs confirm=true and an explicit owner request"
+            )
+        sandbox_name = str(args.get("sandbox") or "").strip()
+        branch = str(args.get("branch") or "").strip()
+        if not sandbox_name:
+            return _error("sandbox is required for push_branch")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9._/-]{1,120}", branch)
+            or ".." in branch
+            or branch.startswith(("/", "."))
+            or branch.endswith(("/", ".lock"))
+            or branch in {"main", "master", "HEAD"}
+        ):
+            return _error("branch must be a safe new branch name, not main/master")
+        message = str(args.get("message") or f"boi: update {branch}").strip()[:500]
+        manager = self._sandbox(ctx)
+        info = manager.get(sandbox_name)
+        sandbox_repo = str(info.repo or "").strip()
+        if sandbox_repo:
+            match = re.search(r"github\.com/([^/\s]+/[^/\s#?]+)", sandbox_repo)
+            if match:
+                sandbox_repo = match.group(1).removesuffix(".git")
+            if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", sandbox_repo):
+                repo = sandbox_repo
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            return _error("repo must be 'owner/repo', or the sandbox must be cloned from a repo")
+
+        status = await manager.exec(sandbox_name, "git status --porcelain", timeout=30)
+        if status.code != 0:
+            return _error(f"sandbox {sandbox_name!r} is not a git repository")
+        if not status.stdout.strip():
+            return _error(f"no changes to commit in sandbox {sandbox_name!r}")
+
+        commit = await manager.exec(
+            sandbox_name,
+            "git add -A && "
+            "git -c user.email=boi@localhost -c user.name='Chicen Nugget Boi' "
+            f"commit -m {shlex.quote(message)}",
+            timeout=60,
+        )
+        if commit.code != 0:
+            return _error(
+                f"git commit failed: {(commit.stderr or commit.stdout)[:800]}"
+            )
+
+        remote = await manager.exec(sandbox_name, "git remote get-url origin", timeout=20)
+        if remote.code != 0:
+            added = await manager.exec(
+                sandbox_name,
+                f"git remote add origin https://github.com/{repo}.git",
+                timeout=20,
+            )
+            if added.code != 0:
+                return _error(f"could not add git remote: {added.stderr[:500]}")
+
+        askpass = info.path / ".tmp" / "git-askpass.sh"
+        manager.write(
+            sandbox_name,
+            ".tmp/git-askpass.sh",
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  *Username*) printf \'%s\\n\' "x-access-token" ;;\n'
+            '  *Password*) printf \'%s\\n\' "$GITHUB_TOKEN" ;;\n'
+            "  *) printf '\\n' ;;\n"
+            "esac\n",
+        )
+        await manager.exec(sandbox_name, "chmod 700 .tmp/git-askpass.sh", timeout=10)
+        try:
+            push = await manager.exec(
+                sandbox_name,
+                "git -c credential.helper= "
+                f"-c core.askPass={shlex.quote(str(askpass))} "
+                f"push origin HEAD:refs/heads/{branch}",
+                timeout=120,
+                extra_env={
+                    "GITHUB_TOKEN": token,
+                    "GIT_ASKPASS": str(askpass),
+                    "GIT_TERMINAL_PROMPT": "0",
+                },
+            )
+        finally:
+            await manager.exec(sandbox_name, "rm -f .tmp/git-askpass.sh", timeout=10)
+        if push.code != 0:
+            return _error(f"git push failed: {(push.stderr or push.stdout)[:1000]}")
+
+        result = f"pushed `{branch}` to `{repo}`."
+        if bool(args.get("open_pr", False)):
+            pr = await self._tool_github_write(
+                {
+                    "action": "create_pr",
+                    "repo": repo,
+                    "title": str(args.get("title") or message),
+                    "head": branch,
+                    "base": str(args.get("base") or ""),
+                    "body": str(args.get("body") or ""),
+                },
+                ctx,
+            )
+            result = f"{result}\n{pr}"
+        return result
+
     async def _tool_github_write(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
             return _error("only the owner/admin can change GitHub")
@@ -3868,6 +3996,8 @@ class Toolbox:
         repo = str(args.get("repo") or github.get("repo") or "").strip()
         if repo.startswith(("http://", "https://")):
             repo = _default_repo(ctx.settings, ctx.db)
+        if action == "push_branch":
+            return await self._push_sandbox_branch(args, ctx, repo, token)
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
             return _error("repo must be 'owner/repo'")
 

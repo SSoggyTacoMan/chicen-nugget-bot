@@ -104,6 +104,69 @@ def test_github_write_creates_pr_and_guards_merge():
         assert fake.calls[-1]["json"]["merge_method"] == "squash"
 
 
+def test_github_write_pushes_sandbox_branch(tmp_path):
+    from bot.ai.sandbox import ExecResult
+
+    class FakeManager:
+        def __init__(self):
+            self.commands = []
+
+        def get(self, name):
+            return SimpleNamespace(path=tmp_path, repo="owner/repo")
+
+        def write(self, name, path, content, **kwargs):
+            self.written = (path, content)
+
+        async def exec(self, name, command, **kwargs):
+            self.commands.append((command, kwargs))
+            if command.startswith("git status"):
+                return ExecResult(0, " M app.py\n", "", False, ".")
+            return ExecResult(0, "", "", False, ".")
+
+    box = Toolbox(MagicMock())
+    ctx = _ctx()
+    ctx.db.kv_get.return_value = ""
+    manager = FakeManager()
+    box._sandbox = MagicMock(return_value=manager)
+
+    async def run():
+        refused = await box.execute(
+            "github_write",
+            {"action": "push_branch", "sandbox": "box", "branch": "boi/fix"},
+            ctx,
+        )
+        assert "confirm=true" in refused
+
+        protected = await box.execute(
+            "github_write",
+            {
+                "action": "push_branch",
+                "sandbox": "box",
+                "branch": "main",
+                "confirm": True,
+            },
+            ctx,
+        )
+        assert "not main/master" in protected
+
+        pushed = await box.execute(
+            "github_write",
+            {
+                "action": "push_branch",
+                "sandbox": "box",
+                "branch": "boi/fix",
+                "message": "fix login",
+                "confirm": True,
+            },
+            ctx,
+        )
+        assert "pushed `boi/fix`" in pushed
+        assert manager.written[0] == ".tmp/git-askpass.sh"
+        assert any("push origin HEAD:refs/heads/boi/fix" in cmd for cmd, _ in manager.commands)
+
+    asyncio.run(run())
+
+
 def test_github_write_requires_dm_and_token():
     box = Toolbox(MagicMock())
     channel_ctx = _ctx(is_dm=False)
