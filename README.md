@@ -13,9 +13,12 @@ Both run in one Python process over Socket Mode. No public URL, no web server, n
 - mentions, name calls ("hey nugget"), DMs, group DMs, thread follow-ups and optional ambient replies, with tool calling and per-user memory
 - workspace search (messages and files) plus channel join, leave, create, topic, invite and pin tools
 - reaction shortcuts and message shortcuts for research, explain and thread summaries
+- persistent code sandboxes with file edits, background jobs, uploads, and branch push to a PR
+- GitHub reads and writes: PRs, issues, comments, reviews, close/reopen, merge, and branch push
 - a second Slack identity for personal assistant work
 - optional API tokens for Vercel, Cloudflare, Notion, Linear, Sentry, Resend, OpenAI and Anthropic
 - headless Chromium for pages that need JavaScript, clicking or forms
+- separate bot, Boi and code models, with fallbacks and runtime switching
 - posting in the owner's name, either as a customized bot message or from their real account
 - jev, a small classifier that decides whether an unaddressed message actually deserves a reply
 - AI images, charts and PowerPoint decks uploaded straight into the conversation
@@ -32,7 +35,7 @@ Slack --socket mode--> bot account (xoxb / xapp) --> features, scheduler, slash 
 
 One process, one database, one toolbox. The bot account owns everything that needs app scopes: events, buttons, slash commands. The user account is just a normal Slack session, so it can see what that user sees, post as itself, and send typing frames Slack renders natively.
 
-The two identities can run different models. They share memory, notes, tasks and settings.
+The two identities can run different models, and tool-heavy turns can escalate to a separate code model. They share memory, notes, tasks and settings.
 
 ### the user account
 
@@ -70,7 +73,7 @@ Boi's token can never post natively as the owner. Slack doesn't let one account 
 3. Install the app and approve the scopes.
 4. In **App Home > Messages Tab**, enable **Allow users to send messages from the Messages tab**.
 
-The manifest sets up Socket Mode, events, interactivity and the single `/nugget` command.
+The manifest sets up Socket Mode, events, interactivity, the `/nugget` command and the message shortcuts. after changing scopes or events, reinstall the app so the existing token gets them.
 
 ### 2. grab the credentials
 
@@ -153,6 +156,8 @@ Run `scripts/mac_companion.py` on the Mac, expose it with a Cloudflare Tunnel or
 
 A GitHub token is optional for public reads. With one you get notifications and a higher rate limit. IMAP works with Gmail and Fastmail app passwords. Use an app password, not your account password.
 
+For GitHub writes, use a fine-grained token with **Contents: write**, **Pull requests: write**, and **Issues: write** (or a classic token with `repo`).
+
 The GitHub token also unlocks `github_write` in DMs: create PRs and issues, comment, review, close, reopen, merge, and push a sandbox branch with `open_pr=true`. `close`, `merge` and `push_branch` need `confirm=true` plus an explicit request from you. Push uses the token through `GIT_ASKPASS`, so it never lands in `.git/config` or the logs.
 
 ### api keys
@@ -178,6 +183,7 @@ Settings live in SQLite and you can change them from chat with the `bot_config` 
 | `weather_location` | default location for weather |
 | `ai_model` | bot app model |
 | `ai_assistant_model` | Boi model |
+| `ai_code_model` | code model for tool-heavy turns |
 
 Plain English works:
 
@@ -199,6 +205,10 @@ AI_API_KEY=sk-hc-v1-...
 AI_BASE_URL=https://ai.hackclub.com/proxy/v1
 AI_MODEL=deepseek/deepseek-v4.1-flash
 AI_FALLBACK_MODEL=anthropic/claude-haiku-5.5
+AI_ASSISTANT_MODEL=anthropic/claude-sonnet-5
+AI_ASSISTANT_FALLBACK_MODEL=anthropic/claude-haiku-5.5
+AI_CODE_MODEL=
+AI_CODE_FALLBACK_MODEL=
 AI_MAX_TOKENS=1200
 AI_HISTORY_LIMIT=24
 AI_CHANNELS=*
@@ -232,7 +242,7 @@ Reaction shortcuts: `:mag:` researches a message, `:thread:` summarizes it, `:pu
 
 ### sandboxes
 
-`sandbox` is the persistent workspace for actual dev work. Create one, clone a repo into it, run commands, and keep reading or searching it across turns. It stays on disk until deleted. `clone_repo` is still there for a quick look and cleans up immediately.
+`sandbox` is the persistent workspace for actual dev work. Create one, clone a repo into it, run commands, edit files, keep reading or searching across turns, and push a branch or upload a result. It stays on disk until deleted. `clone_repo` is still there for a quick look and cleans up immediately.
 
 Owner/admin only, DM only. It is a workspace boundary, not a security boundary: commands run as the same OS user as the bot.
 
@@ -252,7 +262,7 @@ Owner/admin only, DM only. It is a workspace boundary, not a security boundary: 
 | `list` | list all workspaces plus free disk |
 | `delete` | remove the workspace and its metadata. always needs an explicit name |
 
-`exec`, `read`, `list_files`, `search` and `info` default to the most recently updated workspace, so "run it again" works without repeating the name. `delete` never guesses.
+`exec`, `read`, `write`, `edit`, `diff`, `upload`, `list_files`, `search` and `info` default to the most recently updated workspace, so "run it again" works without repeating the name. `delete` never guesses.
 
 Long commands can run in the background:
 
@@ -262,6 +272,15 @@ boi: sandbox job job_id=abc123
 ```
 
 `jobs` lists what is running, and the log tail comes back with `job`. Background jobs are OS processes, so they survive the turn but not a server restart.
+
+When the change is ready and GitHub is connected:
+
+```text
+boi: sandbox diff name=widget
+boi: github_write action=push_branch sandbox=widget branch=boi/fix-login message="fix login redirect" confirm=true open_pr=true title="Fix login redirect"
+```
+
+That commits the sandbox, pushes the branch with the GitHub token through `GIT_ASKPASS`, and opens the PR. `main` and `master` are blocked, force-push is never used, and `push_branch` needs `confirm=true`.
 
 A typical DM goes like this:
 
@@ -525,7 +544,7 @@ AI:
 
 Jev only gates ambient replies for the bot app. Boi DMs and explicit mentions skip it. Both models can be changed at runtime with `/nugget config ai_model ...` and `/nugget config ai_assistant_model ...`.
 
-`AI_CODE_MODEL` is optional. when set, the first sandbox, `github_write`, `browser` or `api_request` tool call switches the rest of that turn to the code model and its fallback. normal chat stays on the identity model. change it with `/nugget config ai_code_model ...`.
+`AI_CODE_MODEL` is optional. when set, a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model and its fallback. normal chat stays on the identity model. change it with `/nugget config ai_code_model ...`.
 
 ## deployment
 
@@ -552,6 +571,10 @@ Secrets never enter the repo. `.env`, `data/` and `logs/` are gitignored.
 | `invalid_auth` on start | stale bot token | reinstall the app and update `SLACK_BOT_TOKEN` |
 | `not_authed` or `missing_scope` | scope or install missing | update scopes and reinstall |
 | posting in your name fails | `chat:write.customize` scope was added but the app was not reinstalled | reinstall the app. no personal token is needed |
+| github writes fail | no token, or token lacks contents/pull requests/issues write | run `/nugget setup github` with the right scopes |
+| browser tool says chromium is missing | playwright package is installed but the binary is not | run `./scripts/install_browser.sh` |
+| code model never runs | `AI_CODE_MODEL` is empty | set `AI_CODE_MODEL` in env or `/nugget config ai_code_model ...` |
+| group DMs are ignored | manifest lacks `mpim:*` scopes or the `message.mpim` event | paste the updated manifest and reinstall |
 | bot ignores mentions | channel not in `AI_CHANNELS`, or the bot was never invited | check `/nugget id` |
 | bot replies to everything | gate disabled or thresholds too low | set `AI_GATE_ENABLED=true` and raise `AI_GATE_MIN_CONFIDENCE` |
 | bot is silent in threads | `thread_followups` off, or the cooldown is active | enable it and lower `AI_THREAD_COOLDOWN` |
