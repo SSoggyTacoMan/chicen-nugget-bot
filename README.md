@@ -194,11 +194,19 @@ mcp servers aren't wired yet. for now it's these presets plus the built-in googl
 
 `AI_CODE_MODEL` is optional. when set, a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
 
-semantic memory uses `AI_EMBEDDING_MODEL` (default `qwen/qwen3-embedding-8b`). new turns are embedded in the background, and `search_memory` searches by meaning. to index old history once:
+semantic memory uses `AI_EMBEDDING_MODEL` (default `qwen/qwen3-embedding-8b`). new turns are embedded in the background, and `search_memory` searches by meaning. to index old history:
+
+```text
+/nugget memory backfill 500
+```
+
+or from the server:
 
 ```bash
 .venv/bin/python scripts/backfill_memory.py 1000
 ```
+
+`/nugget memory status` and `/nugget memory search <query>` are also there.
 
 change them at runtime:
 

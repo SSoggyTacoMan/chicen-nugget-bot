@@ -300,6 +300,38 @@ def test_toolbox_hides_unconnected_integrations():
         assert present in names
 
 
+def test_memory_command_status():
+    from bot.features.commands import cmd_memory
+    from bot.runtime import runtime
+
+    old_agent, old_settings, old_db = runtime.agent, runtime.settings, runtime.db
+    runtime.agent = MagicMock()
+    runtime.agent.memory = MagicMock()
+    runtime.agent.memory.enabled = True
+    runtime.agent.memory.model = "fake-embed"
+    runtime.db = MagicMock()
+    runtime.db.count_memory_vectors.return_value = 7
+    runtime.settings = MagicMock()
+    runtime.settings.is_admin.return_value = True
+
+    async def run():
+        with patch("bot.features.commands._say", AsyncMock()) as mock_say:
+            await cmd_memory(
+                AsyncMock(),
+                {"user_id": "U1", "channel_id": "C1", "text": "status"},
+                AsyncMock(),
+            )
+        text = mock_say.call_args[0][2]
+        assert "semantic memory" in text
+        assert "7" in text
+        assert "fake-embed" in text
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.agent, runtime.settings, runtime.db = old_agent, old_settings, old_db
+
+
 def test_doctor_rejects_non_admins():
     from bot.features.doctor import cmd_doctor
     from bot.runtime import runtime

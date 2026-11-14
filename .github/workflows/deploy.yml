@@ -139,7 +139,7 @@ jobs:
               .venv/bin/pip install -q -r requirements.txt
               .venv/bin/playwright install chromium >/dev/null 2>&1 || true
               if [ -f data/bot.db ]; then
-                cp data/bot.db data/bot.db.bak.$(date +%s)
+                .venv/bin/python -c "import sqlite3; s=sqlite3.connect('data/bot.db'); d=sqlite3.connect('data/bot.db.bak.$(date +%s)'); s.backup(d); d.close(); s.close()"
                 ls -1t data/bot.db.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f
               fi
               systemctl restart $SERVICE_NAME
