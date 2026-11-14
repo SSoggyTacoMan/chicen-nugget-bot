@@ -59,6 +59,8 @@ HELP = """*{bot}: everything lives under `/nugget`*
 
 *reminders*
 • `/nugget reminder 10m stretch` - DM reminder
+• `/nugget timer 10m stretch` - countdown timer
+• `/nugget alarm daily 07:30 wake up` - daily alarm
 • `/nugget reminder tomorrow 09:00 standup`
 • `/nugget reminder #general daily 09:00 good morning` - admin only
 • `/nugget reminder weekly mon 18:00 weekly recap`
@@ -72,6 +74,7 @@ HELP = """*{bot}: everything lives under `/nugget`*
 • `/nugget summarize [n]` - ai catch-up for this channel
 • `/nugget imagine <prompt> [--wide|--tall|--ratio 4:3]` - image generation
 • `/nugget speak <text>` - generate a voice clip with qwen3 tts
+• `/nugget huddle` - summarize the last huddle with slack ai notes
 • `/nugget imageaccess [list|add @user|remove @user]` - admin: who may make images
 • `/nugget budget` - admin: today's ai spend and limits
 • `/nugget memory [status|search|backfill]` - admin: semantic memory

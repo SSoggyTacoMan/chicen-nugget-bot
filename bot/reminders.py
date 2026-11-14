@@ -56,9 +56,12 @@ def create_reminder(
     }
 
 
-def confirmation_text(reminder: dict, tz: ZoneInfo, target: str) -> str:
+def confirmation_text(
+    reminder: dict, tz: ZoneInfo, target: str, kind: str = "reminder"
+) -> str:
+    label = {"timer": "timer", "alarm": "alarm"}.get(kind, "reminder")
     return (
-        f"ok, reminder *#{reminder['id']}* set for "
+        f"ok, {label} *#{reminder['id']}* set for "
         f"*{format_when(reminder['next_run'], tz)}* ({describe_recurrence(reminder['recurrence'])}) "
         f"→ {target_label(target)}"
     )

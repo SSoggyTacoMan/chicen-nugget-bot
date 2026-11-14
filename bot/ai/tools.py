@@ -557,6 +557,45 @@ class Toolbox:
                 ["when", "text"],
             ),
             tool(
+                "timer",
+                "Set a countdown timer in the owner's DMs. Use for 'timer for 10 minutes', 'remind me in 20m', or pomodoro-style short timers.",
+                {
+                    "duration": {
+                        "type": "string",
+                        "description": "Countdown length, e.g. '10m', '90s', '2h'.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "What the timer is for. Default 'timer'.",
+                    },
+                },
+                ["duration"],
+            ),
+            tool(
+                "alarm",
+                "Set a daily or weekly alarm in the owner's DMs. Use for 'wake me at 07:30', 'every day at 9', or 'mondays at 18:00'.",
+                {
+                    "time": {
+                        "type": "string",
+                        "description": "Clock time in HH:MM, e.g. '07:30' or '18:00'.",
+                    },
+                    "repeat": {
+                        "type": "string",
+                        "enum": ["daily", "weekly"],
+                        "description": "Repeat daily or weekly. Default daily.",
+                    },
+                    "day": {
+                        "type": "string",
+                        "description": "For weekly alarms: mon, tue, wed, thu, fri, sat, sun.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "What the alarm is for. Default 'alarm'.",
+                    },
+                },
+                ["time"],
+            ),
+            tool(
                 "list_reminders",
                 "List active reminders. Owner/admin only.",
                 {"all": {"type": "boolean", "description": "List every user's reminders instead of just yours."}},
@@ -1690,6 +1729,9 @@ class Toolbox:
         if not _need_owner(ctx):
             return _error("only the owner/admin can create reminders")
         tz = tzinfo()
+        kind = str(args.get("kind") or "reminder").lower().strip()
+        if kind not in {"reminder", "timer", "alarm"}:
+            kind = "reminder"
         raw_when = str(args.get("when") or "").strip()
         raw_text = str(args.get("text") or "").strip()
 
@@ -1733,10 +1775,39 @@ class Toolbox:
             parsed=parsed,
             text=text,
             tz=tz,
+            kind=kind,
         )
         if not reminder:
             return _error(f"reminder limit reached ({self.settings.max_reminders} active)")
-        return confirmation_text(reminder, tz, target)
+        return confirmation_text(reminder, tz, target, kind=kind)
+
+    async def _tool_timer(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        duration = str(args.get("duration") or "").strip()
+        if not duration:
+            return _error("duration is required, e.g. '10m' or '90s'")
+        label = str(args.get("label") or "timer").strip() or "timer"
+        return await self._tool_remind(
+            {"when": duration, "text": label, "target": "dm", "kind": "timer"},
+            ctx,
+        )
+
+    async def _tool_alarm(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        time_raw = str(args.get("time") or "").strip()
+        if not time_raw:
+            return _error("time is required, e.g. '07:30'")
+        repeat = str(args.get("repeat") or "daily").lower().strip()
+        label = str(args.get("label") or "alarm").strip() or "alarm"
+        if repeat == "weekly":
+            day = str(args.get("day") or "").strip().lower()
+            if not day:
+                return _error("weekly alarms need a day, e.g. mon or friday")
+            when = f"weekly {day} {time_raw}"
+        else:
+            when = f"daily {time_raw}"
+        return await self._tool_remind(
+            {"when": when, "text": label, "target": "dm", "kind": "alarm"},
+            ctx,
+        )
 
     async def _tool_list_reminders(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):

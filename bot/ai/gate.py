@@ -208,6 +208,7 @@ class Gate:
         p_spam = spam.probability if spam else 0.0
         p_needs_tools = needs_tools.probability if needs_tools else 0.0
         recipient_choice = recipient.choice if recipient and recipient.choice else "everyone"
+        kind_choice = kind.choice if kind and kind.choice else "other"
         p_recipient_bot = (recipient.probabilities.get("bot", 0.0) if recipient else 0.0)
 
         directed = p_addressed >= self.settings.ai_gate_addressed_confidence
@@ -217,7 +218,18 @@ class Gate:
         # Ambient messages must be aimed at the bot (or answer a bot turn).
         # Thread follow-ups can still be helpful without a direct mention.
         if require_addressed:
-            reply = not spammy and aimed
+            assist = kind_choice in {"help", "feedback"} or (
+                kind_choice == "question" and p_needs_tools >= 0.6
+            )
+            reply = not spammy and (
+                aimed
+                or (
+                    assist
+                    and helpful
+                    and p_should >= 0.7
+                    and recipient_choice != "someone_else"
+                )
+            )
         else:
             # Never spend an agent turn on a message aimed at someone else unless the
             # speaker is clearly directing it at the bot too.
@@ -231,7 +243,7 @@ class Gate:
             addressed=p_addressed,
             spam=p_spam,
             needs_tools=p_needs_tools,
-            kind=kind.choice if kind and kind.choice else "other",
+            kind=kind_choice,
             kind_confidence=kind.confidence if kind else 0.0,
             recipient=recipient_choice,
             recipient_bot=p_recipient_bot,

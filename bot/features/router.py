@@ -43,6 +43,7 @@ from bot.features.commands import (
     cmd_whois,
 )
 from bot.features.doctor import cmd_doctor
+from bot.features.huddles import cmd_huddle
 from bot.features.nuggets import cmd_nugget
 from bot.features.polls import cmd_poll, cmd_pollclose
 from bot.features.recaps import cmd_recap
@@ -69,6 +70,8 @@ SUBCOMMANDS: dict[str, Handler] = {
     "pending": cmd_pending,
     "reminder": cmd_remind,
     "remind": cmd_remind,
+    "timer": cmd_remind,
+    "alarm": cmd_remind,
     "schedule": cmd_schedule,
     "reminders": cmd_reminders,
     "cancel": cmd_cancel,
@@ -102,6 +105,8 @@ SUBCOMMANDS: dict[str, Handler] = {
     "forget": cmd_forget,
     "memory": cmd_memory,
     "imagine": cmd_imagine,
+    "huddle": cmd_huddle,
+    "huddles": cmd_huddle,
     "speak": cmd_speak,
     "say": cmd_speak,
     "tts": cmd_speak,

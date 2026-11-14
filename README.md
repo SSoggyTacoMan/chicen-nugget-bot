@@ -174,6 +174,17 @@ if tts is off, check `TTS_MODEL`, `AI_API_KEY` and `TTS_VOICE`.
 
 the cost field only affects the bot's internal `/nugget budget`, not the provider's bill. runtime choices override `IMAGINE_MODEL` / `IMAGINE_FALLBACK_MODEL` / `AI_IMAGE_COST_USD`.
 
+### huddles
+
+slack has no public api to start or join a huddle. the bot can read the post-huddle AI transcript instead:
+
+- `/nugget huddle` reads the latest huddle with AI notes in the current channel and summarizes it privately.
+- it uses the same `xoxc`/`xoxd` web session as boi (`SLACK_WEB_TOKEN` / `SLACK_WEB_COOKIE`, or `SLACK_USER_TOKEN` / `SLACK_USER_COOKIE`).
+- it only works when someone turned on slack AI notes for that huddle. no notes means no transcript.
+- the endpoint is undocumented and can break if slack changes it.
+
+live joining is not supported: slack does not expose huddle audio to apps, and bot users cannot join huddles.
+
 ### google
 
 google uses a desktop oauth client so it works on a headless vps:
@@ -434,11 +445,14 @@ everything lives under `/nugget`. `/nugget help` is the full list.
 | `/nugget id` | ids and flags for this channel | anyone |
 | `/nugget access` | open the tier-2 request modal | anyone |
 | `/nugget reminder <when> <text>` | create a reminder | anyone |
+| `/nugget timer <duration> [label]` | countdown timer | anyone |
+| `/nugget alarm daily <HH:MM> [label]` | daily alarm | anyone |
 | `/nugget poll "q" "a" "b"` | live button poll | anyone |
 | `/nugget ask <question>` | one-shot ai answer | ai channels |
 | `/nugget summarize [n]` | ai catch-up for this channel | ai channels |
 | `/nugget imagine <prompt>` | generate an image | admin |
 | `/nugget speak <text>` | generate a qwen3 voice clip | admin |
+| `/nugget huddle` | summarize the last huddle with slack ai notes | admin |
 | `/nugget config` | runtime settings | admin |
 | `/nugget memory` | status, search or backfill semantic memory | admin |
 | `/nugget storage` | data usage, free disk, optional prune | admin |

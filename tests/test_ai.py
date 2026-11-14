@@ -2326,6 +2326,14 @@ def test_personal_operator_tools(tmp_path):
         rem3 = await box.execute("remind", {"when": "in 85m", "text": "ping"}, ctx_owner)
         assert "reminder *#" in rem3
 
+        timer = await box.execute("timer", {"duration": "10m", "label": "tea"}, ctx_owner)
+        assert "timer *#" in timer
+
+        alarm = await box.execute(
+            "alarm", {"time": "07:30", "repeat": "daily", "label": "wake up"}, ctx_owner
+        )
+        assert "alarm *#" in alarm
+
         # 10. bot_config list shows per-channel recaps
         await box.execute("bot_config", {"action": "set", "key": "recaps", "channel": "C999", "value": "off"}, ctx_owner)
         cfg_list = await box.execute("bot_config", {"action": "list"}, ctx_owner)

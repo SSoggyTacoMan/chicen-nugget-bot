@@ -157,6 +157,20 @@ def test_ambient_requires_addressed():
     )
     assert not followup.reply
 
+    help_request = decide(
+        answers(should=0.9, kind="help", recipient="everyone"),
+        text="can someone help me debug this?",
+        require_addressed=True,
+    )
+    assert help_request.reply
+
+    live_question = decide(
+        answers(should=0.9, kind="question", needs_tools=0.8, recipient="everyone"),
+        text="is the server down?",
+        require_addressed=True,
+    )
+    assert live_question.reply
+
 
 def test_threshold_is_configurable():
     result = decide(answers(should=0.45), text="can someone review my pr", ai_gate_min_confidence=0.4)
