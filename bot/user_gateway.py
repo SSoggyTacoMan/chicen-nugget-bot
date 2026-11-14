@@ -21,6 +21,7 @@ from bot.ai.limits import user_retry_after
 from bot.runtime import runtime
 from bot.slack_api import fetch_slack_images, transcribe_slack_audio
 from bot.utils.text import (
+    asks_for_silence,
     chunk_text,
     disarm_broadcasts,
     format_mrkdwn,
@@ -319,6 +320,8 @@ class UserGateway:
         if not clean_text and images:
             clean_text = "What is in this image?"
         if not clean_text and not images:
+            return
+        if asks_for_silence(clean_text):
             return
 
         trigger = "dm" if is_dm else ("mpim_mention" if is_mpim else "mention")

@@ -206,6 +206,40 @@ def test_user_gateway_mpim_mention():
     asyncio.run(run())
 
 
+def test_user_gateway_honors_explicit_no_reply():
+    async def run():
+        mock_client = AsyncMock()
+        gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
+        mock_agent = AsyncMock()
+        mock_agent.reply = AsyncMock(return_value="got it.")
+        runtime.agent = mock_agent
+
+        old_settings = runtime.settings
+        mock_settings = MagicMock()
+        mock_settings.owner_user_id = "U_OWNER"
+        mock_settings.is_admin.return_value = False
+        mock_settings.ai_enabled = True
+        runtime.settings = mock_settings
+
+        event = {
+            "type": "message",
+            "channel": "D_TEST",
+            "user": "U_OWNER",
+            "text": "pls dont respond to this chicken",
+            "ts": "120.000",
+        }
+
+        try:
+            with patch("bot.user_gateway.fetch_slack_images", AsyncMock(return_value=[])):
+                await gw._handle_event(event)
+            mock_agent.reply.assert_not_called()
+            mock_client.chat_postMessage.assert_not_called()
+        finally:
+            runtime.settings = old_settings
+
+    asyncio.run(run())
+
+
 def test_user_gateway_handle_dm_success():
     async def run():
         mock_client = AsyncMock()

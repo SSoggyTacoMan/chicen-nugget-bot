@@ -1303,6 +1303,44 @@ def test_bot_mpim_mentions_and_thread_followups(tmp_path):
         runtime.bot_user_id, runtime.user_id = old_bot, old_user
 
 
+def test_bot_honors_explicit_no_reply():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.features.agent import _handle_channel
+    from bot.runtime import runtime
+
+    old_agent, old_settings = runtime.agent, runtime.settings
+    runtime.agent = MagicMock()
+    runtime.agent.reply = AsyncMock(return_value="got it.")
+    runtime.settings = MagicMock()
+    runtime.settings.ai_enabled = True
+    client = AsyncMock()
+
+    async def run():
+        with patch("bot.features.agent.react", AsyncMock()) as mock_react, \
+             patch("bot.features.agent.post", AsyncMock()) as mock_post:
+            posted = await _handle_channel(
+                {
+                    "channel": "C1",
+                    "user": "U1",
+                    "ts": "1.0",
+                },
+                client,
+                text="pls dont respond to this chicken",
+                trigger="mention",
+            )
+        assert posted is False
+        runtime.agent.reply.assert_not_called()
+        mock_react.assert_not_called()
+        mock_post.assert_not_called()
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.agent, runtime.settings = old_agent, old_settings
+
+
 def test_bot_dm_threads_stay_in_thread():
     import asyncio
     from unittest.mock import AsyncMock, MagicMock, patch
