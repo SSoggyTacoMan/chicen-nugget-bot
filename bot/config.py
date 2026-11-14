@@ -105,6 +105,7 @@ class Settings:
     ai_fallback_model: str | None
     ai_assistant_model: str
     ai_assistant_fast_model: str | None
+    ai_assistant_fast_fallback_model: str | None
     ai_assistant_fallback_model: str | None
     ai_code_model: str | None
     ai_code_fallback_model: str | None
@@ -378,6 +379,10 @@ def load_settings() -> Settings:
             "AI_ASSISTANT_FAST_MODEL", "anthropic/claude-haiku-5.5"
         )
         or None,
+        ai_assistant_fast_fallback_model=_str(
+            "AI_ASSISTANT_FAST_FALLBACK_MODEL", "openai/gpt-6-luna"
+        )
+        or None,
         ai_assistant_fallback_model=_str(
             "AI_ASSISTANT_FALLBACK_MODEL", "openai/gpt-6.1-sol"
         )
@@ -536,6 +541,38 @@ def _valid_hhmm(value: str) -> bool:
         return 0 <= int(hour) <= 23 and 0 <= int(minute) <= 59
     except (TypeError, ValueError):
         return False
+
+
+def secure_runtime_paths(settings: Settings | None = None) -> None:
+    """Tighten permissions on local secrets (best effort, POSIX only).
+
+    The bot stores Slack cookies, GitHub/IMAP/Google tokens and API keys in a
+    local SQLite file. Default umasks leave those world-readable on multi-user
+    hosts, so narrow them here and keep new files private via the caller's
+    umask.
+    """
+    import os
+
+    current = settings or globals()["settings"]
+    files = [
+        current.db_path,
+        current.db_path.with_name(current.db_path.name + "-wal"),
+        current.db_path.with_name(current.db_path.name + "-shm"),
+        BASE_DIR / ".env",
+    ]
+    dirs = [
+        current.data_dir,
+        current.log_dir,
+        current.sandbox_dir,
+        current.browser_dir,
+    ]
+    for path, mode in [(item, 0o600) for item in files] + [(item, 0o700) for item in dirs]:
+        try:
+            if path.exists():
+                os.chmod(path, mode)
+        except OSError:
+            continue
+
 
 
 settings = load_settings()

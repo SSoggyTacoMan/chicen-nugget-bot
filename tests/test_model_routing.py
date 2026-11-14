@@ -13,6 +13,7 @@ def test_code_model_routing_uses_code_model_after_code_tools():
     settings.ai_fallback_model = None
     settings.ai_assistant_model = "boi-chat"
     settings.ai_assistant_fast_model = "boi-fast"
+    settings.ai_assistant_fast_fallback_model = "boi-fast-fallback"
     settings.ai_assistant_fallback_model = None
     settings.ai_code_model = "code-model"
     settings.ai_code_fallback_model = "code-fallback"
@@ -39,6 +40,7 @@ def test_code_model_routing_uses_code_model_after_code_tools():
     assert agent._models_for(True) == ["boi-chat", "bot-chat"]
     assert agent._models_for(True, fast=True) == [
         "boi-fast",
+        "boi-fast-fallback",
         "boi-chat",
         "bot-chat",
     ]
@@ -65,6 +67,7 @@ def test_simple_chat_detection(tmp_path):
     settings.ai_fallback_model = None
     settings.ai_assistant_model = "boi-chat"
     settings.ai_assistant_fast_model = "boi-fast"
+    settings.ai_assistant_fast_fallback_model = "boi-fast-fallback"
     settings.ai_assistant_fallback_model = None
     settings.ai_code_model = None
     settings.ai_code_fallback_model = None

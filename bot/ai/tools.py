@@ -20,6 +20,7 @@ import os
 import random
 import re
 import shlex
+import signal
 import sys
 import tempfile
 import time
@@ -1229,7 +1230,7 @@ class Toolbox:
             ),
             tool(
                 "run_code",
-                "Execute a Python code snippet in a sandboxed subprocess and return stdout/stderr. Owner/admin only.",
+                "Execute a short Python snippet and return stdout/stderr. Runs as the bot's OS user with no filesystem or network isolation, so treat it as shell access. Owner/admin only, DMs only.",
                 {"code": {"type": "string", "description": "Python 3 code to execute."}},
                 ["code"],
             ),
@@ -1939,21 +1940,22 @@ class Toolbox:
             return _error("query is required")
         client = ctx.bot_client or ctx.client
         q_lower = query.lower()
+        include_email = _need_owner(ctx)
         if q_lower in {"me", "myself", "self"} and ctx.user_id:
             user = await user_info(client, ctx.user_id)
-            return _json(self._user_summary(user)) if user else _error("no user with that id")
+            return _json(self._user_summary(user, include_email=True)) if user else _error("no user with that id")
         if q_lower == "owner" and ctx.settings.owner_user_id:
             user = await user_info(client, ctx.settings.owner_user_id)
-            return _json(self._user_summary(user)) if user else _error("no user with that id")
+            return _json(self._user_summary(user, include_email=include_email)) if user else _error("no user with that id")
         user_id = extract_id(query, "@")
         if user_id:
             user = await user_info(client, user_id)
-            return _json(self._user_summary(user)) if user else _error("no user with that id")
-        if "@" in query and "." in query:
+            return _json(self._user_summary(user, include_email=include_email)) if user else _error("no user with that id")
+        if include_email and "@" in query and "." in query:
             try:
                 response = await client.users_lookupByEmail(email=query)
                 user = response.get("user")
-                return _json(self._user_summary(user)) if user else _error("no user with that email")
+                return _json(self._user_summary(user, include_email=True)) if user else _error("no user with that email")
             except Exception:  # noqa: BLE001 - fall through to a name search
                 pass
         needle = query.lstrip("@").lower()
@@ -1968,30 +1970,34 @@ class Toolbox:
                     user.get("real_name"),
                     profile.get("display_name"),
                     profile.get("real_name"),
-                    profile.get("email"),
+                    profile.get("email") if include_email else "",
                 )
             ).lower()
             if needle in haystack:
-                matches.append(self._user_summary(user))
+                matches.append(self._user_summary(user, include_email=include_email))
         if not matches:
             return "no users matched that."
         return _json(matches[:8])
 
-    def _user_summary(self, user: dict[str, Any] | None) -> dict[str, Any]:
+    def _user_summary(
+        self, user: dict[str, Any] | None, *, include_email: bool = False
+    ) -> dict[str, Any]:
         if not user:
             return {}
         profile = user.get("profile") or {}
-        return {
+        summary = {
             "id": user.get("id"),
             "name": user.get("name"),
             "real_name": user.get("real_name"),
             "display_name": profile.get("display_name"),
             "title": profile.get("title"),
-            "email": profile.get("email"),
             "is_bot": user.get("is_bot"),
             "tz": user.get("tz"),
             "deleted": user.get("deleted"),
         }
+        if include_email:
+            summary["email"] = profile.get("email")
+        return summary
 
     async def _tool_lookup_channel(self, args: dict[str, Any], ctx: ToolContext) -> str:
         query = str(args.get("query") or "").strip()
@@ -3990,6 +3996,10 @@ class Toolbox:
             return _error(f"failed to fetch hackatime stats: {exc}")
 
     async def _tool_github_info(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            # The configured token can read private repos and notifications, so
+            # this must never be callable by a guest in a shared channel.
+            return _error("only the owner/admin can inspect github")
         action = str(args.get("action") or "repo").lower().strip()
         github = integrations.github_config(ctx.db, ctx.settings)
         target = str(args.get("target") or _default_repo(ctx.settings, ctx.db)).strip()
@@ -4500,6 +4510,7 @@ class Toolbox:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=tempfile.gettempdir(),
+                start_new_session=True,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=5.0)
             stdout = stdout_bytes.decode(errors="replace").strip()
@@ -4511,9 +4522,12 @@ class Toolbox:
             return output[:MAX_TOOL_RESULT]
         except TimeoutError:
             try:
-                proc.kill()
-            except Exception:
-                pass
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
             return _error("code execution timed out after 5.0 seconds")
         except Exception as exc:  # noqa: BLE001
             return _error(f"execution failed: {exc}")
@@ -5167,6 +5181,7 @@ class Toolbox:
             "assistant_model": "ai_assistant_model",
             "boi_model": "ai_assistant_model",
             "boi_fast_model": "ai_assistant_fast_model",
+            "boi_fast_fallback_model": "ai_assistant_fast_fallback_model",
             "fast_model": "ai_assistant_fast_model",
             "boi_fallback_model": "ai_assistant_fallback_model",
             "code_model": "ai_code_model",
@@ -5215,6 +5230,7 @@ class Toolbox:
             "ai_fallback_model",
             "ai_assistant_model",
             "ai_assistant_fast_model",
+            "ai_assistant_fast_fallback_model",
             "ai_assistant_fallback_model",
             "ai_code_model",
             "ai_code_fallback_model",
@@ -5377,6 +5393,7 @@ class Toolbox:
                 "ai_fallback_model",
                 "ai_assistant_model",
                 "ai_assistant_fast_model",
+            "ai_assistant_fast_fallback_model",
                 "ai_assistant_fallback_model",
                 "ai_code_model",
                 "ai_code_fallback_model",

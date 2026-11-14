@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Mapping
 from contextlib import suppress
@@ -17,7 +18,7 @@ from bot.ai.budget import Budget
 from bot.ai.gate import Gate
 from bot.ai.limits import RateLimiter
 from bot.ai.providers import fallback_provider
-from bot.config import settings
+from bot.config import secure_runtime_paths, settings
 from bot.db import Database
 from bot.features import access, scheduler
 from bot.handlers import register
@@ -31,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 async def run() -> None:
     setup_logging()
+    # New files (db, WAL, logs, sandboxes) should never be group/world readable.
+    with suppress(OSError):
+        os.umask(0o077)
     problems = settings.missing_required()
     if problems:
         raise SystemExit(
@@ -40,6 +44,7 @@ async def run() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db = Database(settings.db_path)
     db.init()
+    secure_runtime_paths(settings)
     runtime.db = db
     runtime.settings = settings
     runtime.started_at = time.time()
@@ -155,7 +160,7 @@ async def run() -> None:
                 budget=runtime.budget,
             )
             logger.info(
-                "ai agent enabled with bot model %s%s; Boi model %s%s; quick model %s",
+                "ai agent enabled with bot model %s%s; Boi model %s%s; quick model %s%s",
                 settings.ai_model,
                 f" (fallback {settings.ai_fallback_model})" if settings.ai_fallback_model else "",
                 settings.ai_assistant_model,
@@ -163,6 +168,11 @@ async def run() -> None:
                 if settings.ai_assistant_fallback_model
                 else "",
                 settings.ai_assistant_fast_model or "off",
+                (
+                    f" (fallback {settings.ai_assistant_fast_fallback_model})"
+                    if settings.ai_assistant_fast_fallback_model
+                    else ""
+                ),
             )
             logger.info(
                 "code model %s%s; tts %s with voice %s",

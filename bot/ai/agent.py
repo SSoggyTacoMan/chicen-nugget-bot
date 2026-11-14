@@ -485,6 +485,16 @@ class Agent:
             value = getattr(self.settings, "ai_assistant_fast_model", None)
         return value if isinstance(value, str) and value.strip() else None
 
+    def _fast_fallback_model(self) -> str | None:
+        value = (
+            self.db.kv_get("config:ai_assistant_fast_fallback_model")
+            if self.db
+            else None
+        )
+        if not value:
+            value = getattr(self.settings, "ai_assistant_fast_fallback_model", None)
+        return value if isinstance(value, str) and value.strip() else None
+
     def _simple_chat(self, text: str, *, images: list[str] | None = None) -> bool:
         clean = (text or "").strip()
         if not clean or images or "[Voice message]" in clean:
@@ -517,6 +527,7 @@ class Agent:
         bot_model, bot_fallback, assistant_model, assistant_fallback = self._model_settings()
         code_model, code_fallback = self._code_model_settings()
         fast_model = self._fast_model()
+        fast_fallback = self._fast_fallback_model()
         if code and code_model:
             if is_user_identity:
                 candidates = [
@@ -532,6 +543,7 @@ class Agent:
         elif is_user_identity and fast and fast_model:
             candidates = [
                 fast_model,
+                fast_fallback,
                 assistant_model,
                 assistant_fallback,
                 bot_model,

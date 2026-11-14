@@ -475,6 +475,7 @@ def _setup_settings(**overrides):
         ai_model="bot-model",
         ai_assistant_model="boi-model",
         ai_assistant_fast_model="boi-fast",
+        ai_assistant_fast_fallback_model="boi-fast-fallback",
         ai_code_model="code-model",
         ai_embedding_model="embed-model",
         github_watch=False,

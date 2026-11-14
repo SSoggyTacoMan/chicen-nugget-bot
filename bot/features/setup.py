@@ -639,7 +639,13 @@ async def _complete_google_code(client, user_id: str, raw: str) -> str:
 
     if runtime.db:
         expected = runtime.db.kv_get("config:google_oauth_state")
-        if state and expected and state != expected:
+        if not state:
+            return (
+                "that didn't include the OAuth state parameter. paste the full URL "
+                "from your browser's address bar, then run `/nugget setup google` "
+                "again if it keeps failing."
+            )
+        if not expected or not secrets.compare_digest(state, expected):
             return "that authorization link is from an older setup attempt. run `/nugget setup google` again."
 
     creds = google_credentials(runtime.db, runtime.settings)
@@ -723,6 +729,14 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                     initial=_current(
                         "ai_assistant_fast_model",
                         settings.ai_assistant_fast_model or "",
+                    ),
+                ),
+                _input(
+                    "ai_assistant_fast_fallback_model",
+                    "Boi quick-chat fallback",
+                    initial=_current(
+                        "ai_assistant_fast_fallback_model",
+                        settings.ai_assistant_fast_fallback_model or "",
                     ),
                 ),
                 _input("ai_code_model", "Code model", initial=_current("ai_code_model", settings.ai_code_model or "")),
@@ -1323,6 +1337,7 @@ async def on_ai_submit(ack, body, view, client) -> None:
         "ai_model",
         "ai_assistant_model",
         "ai_assistant_fast_model",
+        "ai_assistant_fast_fallback_model",
         "ai_code_model",
     ):
         raw = values.get(key, "")
