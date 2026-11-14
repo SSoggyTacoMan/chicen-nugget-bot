@@ -247,6 +247,7 @@ class SandboxManager:
         *,
         cwd: str | None = None,
         timeout: int | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> ExecResult:
         info = self.get(name)
         command = (command or "").strip()
@@ -277,6 +278,14 @@ class SandboxManager:
                 "CI": "1",
             }
         )
+        if extra_env:
+            env.update(
+                {
+                    str(key): str(value)
+                    for key, value in extra_env.items()
+                    if key not in {"HOME", "TMPDIR"}
+                }
+            )
         (info.path / ".tmp").mkdir(exist_ok=True)
 
         shell = shutil.which("bash") or shutil.which("sh") or "/bin/sh"

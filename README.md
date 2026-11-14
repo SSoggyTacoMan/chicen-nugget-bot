@@ -153,7 +153,7 @@ Run `scripts/mac_companion.py` on the Mac, expose it with a Cloudflare Tunnel or
 
 A GitHub token is optional for public reads. With one you get notifications and a higher rate limit. IMAP works with Gmail and Fastmail app passwords. Use an app password, not your account password.
 
-The GitHub token also unlocks `github_write` in DMs: create PRs and issues, comment, review, close, reopen and merge. `close` and `merge` need `confirm=true` plus an explicit request from you.
+The GitHub token also unlocks `github_write` in DMs: create PRs and issues, comment, review, close, reopen, merge, and push a sandbox branch with `open_pr=true`. `close`, `merge` and `push_branch` need `confirm=true` plus an explicit request from you. Push uses the token through `GIT_ASKPASS`, so it never lands in `.git/config` or the logs.
 
 ### api keys
 
