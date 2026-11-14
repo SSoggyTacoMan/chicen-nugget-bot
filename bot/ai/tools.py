@@ -921,7 +921,7 @@ class Toolbox:
                     },
                     "voice": {
                         "type": "string",
-                        "description": "Optional preset voice: Serena, Aiden, Dylan, Eric, Ono_anna, Ryan, Sohee, Uncle_fu or Vivian. Defaults to setup.",
+                        "description": "Optional preset voice: Aiden or Ryan (English), Serena/Vivian/Dylan/Eric/Uncle_fu (Chinese), Ono_anna (Japanese), Sohee (Korean). Defaults to setup.",
                     },
                     "language": {
                         "type": "string",

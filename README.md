@@ -227,10 +227,10 @@ mcp servers aren't wired yet. for now it's these presets plus the built-in googl
 | job | default | fallback |
 |---|---|---|
 | bot chat | `deepseek/deepseek-v4.1-flash` | `anthropic/claude-haiku-5.5` |
-| boi chat | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-5.5` |
-| code turns | `AI_CODE_MODEL` (empty) | `AI_CODE_FALLBACK_MODEL` |
+| boi chat | `anthropic/claude-sonnet-5.5` | `anthropic/claude-sonnet-5` |
+| code turns | `anthropic/claude-sonnet-5.5` | `anthropic/claude-sonnet-5` |
 
-`AI_CODE_MODEL` is optional. when set, a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
+`AI_CODE_MODEL` is set by default. a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
 
 semantic memory uses `AI_EMBEDDING_MODEL` (default `qwen/qwen3-embedding-8b`). new turns are embedded in the background, and `search_memory` searches by meaning. to index old history:
 
@@ -489,7 +489,7 @@ editing `.env` directly on the server is temporary. the next deploy rewrites it 
 | posting in your name fails | reinstall the app with `chat:write.customize`; no personal token needed |
 | github writes fail | add a token with contents/pull requests/issues write via `/nugget setup github` |
 | browser says chromium is missing | run `./scripts/install_browser.sh` |
-| code model never runs | set `AI_CODE_MODEL` in env or with `/nugget config ai_code_model ...` |
+| code model never runs | check `AI_CODE_MODEL` in env or `/nugget config ai_code_model ...` |
 | group dms are ignored | manifest needs `mpim:*` scopes and `message.mpim`; reinstall |
 | bot ignores mentions | check `AI_CHANNELS` and whether it's in the channel |
 | user account keeps disconnecting | refresh `SLACK_USER_TOKEN` and `SLACK_USER_COOKIE` |

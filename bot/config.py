@@ -350,12 +350,18 @@ def load_settings() -> Settings:
         ai_base_url=_str("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
         ai_model=_str("AI_MODEL", "deepseek/deepseek-v4.1-flash"),
         ai_fallback_model=_str("AI_FALLBACK_MODEL", "anthropic/claude-haiku-5.5") or None,
-        ai_assistant_model=_str("AI_ASSISTANT_MODEL", "anthropic/claude-sonnet-5"),
+        ai_assistant_model=_str("AI_ASSISTANT_MODEL", "anthropic/claude-sonnet-5.5")
+        or "anthropic/claude-sonnet-5.5",
         ai_assistant_fallback_model=_str(
-            "AI_ASSISTANT_FALLBACK_MODEL", "anthropic/claude-haiku-5.5"
-        ) or None,
-        ai_code_model=_str("AI_CODE_MODEL") or None,
-        ai_code_fallback_model=_str("AI_CODE_FALLBACK_MODEL") or None,
+            "AI_ASSISTANT_FALLBACK_MODEL", "anthropic/claude-sonnet-5"
+        )
+        or "anthropic/claude-sonnet-5",
+        ai_code_model=_str("AI_CODE_MODEL", "anthropic/claude-sonnet-5.5")
+        or "anthropic/claude-sonnet-5.5",
+        ai_code_fallback_model=_str(
+            "AI_CODE_FALLBACK_MODEL", "anthropic/claude-sonnet-5"
+        )
+        or "anthropic/claude-sonnet-5",
         ai_embedding_model=_str("AI_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b") or None,
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),
         ai_history_limit=_int("AI_HISTORY_LIMIT", 24),
@@ -411,7 +417,7 @@ def load_settings() -> Settings:
         imagine_fallback_model=_str("IMAGINE_FALLBACK_MODEL", "google/gemini-2.5-flash-image") or None,
         image_user_ids=frozenset(_list("IMAGE_ALLOWED_USER_IDS")),
         tts_model=_str("TTS_MODEL", "qwen/qwen3-tts") or None,
-        tts_voice=_str("TTS_VOICE", "Serena") or "Serena",
+        tts_voice=_str("TTS_VOICE", "Aiden") or "Aiden",
         tts_language=_str("TTS_LANGUAGE", "English") or "English",
         tts_style=_str("TTS_STYLE") or None,
         tts_max_chars=max(50, min(1500, _int("TTS_MAX_CHARS", 500))),

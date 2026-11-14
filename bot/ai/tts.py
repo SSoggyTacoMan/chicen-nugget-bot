@@ -23,15 +23,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "qwen/qwen3-tts"
 
 VOICES: tuple[tuple[str, str], ...] = (
-    ("Serena", "Serena - warm, default"),
-    ("Aiden", "Aiden"),
-    ("Dylan", "Dylan"),
-    ("Eric", "Eric"),
-    ("Ono_anna", "Ono Anna"),
-    ("Ryan", "Ryan"),
-    ("Sohee", "Sohee"),
-    ("Uncle_fu", "Uncle Fu"),
-    ("Vivian", "Vivian"),
+    ("Aiden", "Aiden - English male (default)"),
+    ("Ryan", "Ryan - English male"),
+    ("Serena", "Serena - Chinese female"),
+    ("Vivian", "Vivian - Chinese female"),
+    ("Dylan", "Dylan - Chinese male (Beijing)"),
+    ("Eric", "Eric - Chinese male (Sichuan)"),
+    ("Uncle_fu", "Uncle Fu - Chinese male"),
+    ("Ono_anna", "Ono Anna - Japanese female"),
+    ("Sohee", "Sohee - Korean female"),
 )
 
 LANGUAGES: tuple[tuple[str, str], ...] = (
@@ -86,9 +86,9 @@ def voice_config(settings: Settings, db: Database | None = None) -> VoiceConfig:
             return default
 
     model = raw("tts_model") or setting_text("tts_model", DEFAULT_MODEL)
-    voice = raw("tts_voice") or setting_text("tts_voice", "Serena")
+    voice = raw("tts_voice") or setting_text("tts_voice", "Aiden")
     if voice not in _VOICE_VALUES:
-        voice = "Serena"
+        voice = "Aiden"
     language = raw("tts_language") or setting_text("tts_language", "English")
     if language not in _LANGUAGE_VALUES:
         language = "auto"
@@ -182,7 +182,7 @@ async def synthesize(
 
     speaker = (voice or cfg.voice).strip()
     if speaker not in _VOICE_VALUES:
-        speaker = "Serena"
+        speaker = "Aiden"
     lang = (language or cfg.language).strip()
     if lang not in _LANGUAGE_VALUES:
         lang = "auto"

@@ -11,7 +11,7 @@ def _settings(**overrides):
         "ai_api_key": "test-key",
         "ai_base_url": "https://ai.example/proxy/v1",
         "tts_model": "qwen/qwen3-tts",
-        "tts_voice": "Serena",
+        "tts_voice": "Aiden",
         "tts_language": "English",
         "tts_style": None,
         "tts_max_chars": 500,
@@ -149,7 +149,7 @@ def test_synthesize_falls_back_for_unknown_voice_and_language(monkeypatch):
     asyncio.run(
         tts.synthesize("hello", _settings(), voice="Nope", language="Klingon")
     )
-    assert client.post_json["input"]["speaker"] == "Serena"
+    assert client.post_json["input"]["speaker"] == "Aiden"
     assert client.post_json["input"]["language"] == "auto"
 
 
@@ -158,7 +158,7 @@ def test_voice_config_prefers_db_over_env(tmp_path):
 
     db = Database(tmp_path / "tts.db")
     db.init()
-    settings = _settings(tts_voice="Serena", tts_language="English", tts_max_chars=500)
+    settings = _settings(tts_voice="Aiden", tts_language="English", tts_max_chars=500)
 
     base = tts.voice_config(settings, db)
     assert base.model == "qwen/qwen3-tts"

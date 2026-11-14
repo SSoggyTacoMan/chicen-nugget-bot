@@ -485,7 +485,7 @@ def _setup_settings(**overrides):
         storage_min_free_gb=2.0,
         auto_join_channels=("C1",),
         tts_model="qwen/qwen3-tts",
-        tts_voice="Serena",
+        tts_voice="Aiden",
         tts_language="English",
         tts_style=None,
         tts_max_chars=500,
