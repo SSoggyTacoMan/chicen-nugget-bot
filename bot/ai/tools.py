@@ -5393,7 +5393,7 @@ class Toolbox:
                 "ai_fallback_model",
                 "ai_assistant_model",
                 "ai_assistant_fast_model",
-            "ai_assistant_fast_fallback_model",
+                "ai_assistant_fast_fallback_model",
                 "ai_assistant_fallback_model",
                 "ai_code_model",
                 "ai_code_fallback_model",
