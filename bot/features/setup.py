@@ -48,7 +48,7 @@ INTEGRATION_NAMES: dict[str, str] = {
     "apis": "API keys",
     "slack": "your Slack profile",
 }
-CONFIG_NAMES = {"ai", "voice", "images", "watchers", "storage", "channels"}
+CONFIG_NAMES = {"ai", "voice", "images", "fallback", "watchers", "storage", "channels"}
 
 
 def register(app) -> None:
@@ -63,6 +63,7 @@ def register(app) -> None:
     app.view("setup_ai")(on_ai_submit)
     app.view("setup_voice")(on_voice_submit)
     app.view("setup_images")(on_images_submit)
+    app.view("setup_fallback_ai")(on_fallback_ai_submit)
     app.view("setup_watchers")(on_watchers_submit)
     app.view("setup_storage")(on_storage_submit)
     app.view("setup_channels")(on_channels_submit)
@@ -385,6 +386,7 @@ def _usage() -> str:
         "• `/nugget setup ai` - models and behavior toggles\n"
         "• `/nugget setup voice` - qwen3 tts voice, language and style\n"
         "• `/nugget setup images` - nano banana model, fallback and budget cost\n"
+        "• `/nugget setup fallback` - 9router key and model for empty HCAI quota\n"
         "• `/nugget setup watchers` - CI, notifications, email, URLs\n"
         "• `/nugget setup storage` - retention and cleanup\n"
         "• `/nugget setup channels` - auto-join public channels\n"
@@ -422,7 +424,7 @@ async def on_setup_open(ack, body, client) -> None:
                 await _dm(client, user_id or "", f"couldn't send the auth link: {message}")
             return
         view = _google_credentials_modal()
-    elif integration in {"ai", "voice", "images", "watchers", "storage", "channels"}:
+    elif integration in {"ai", "voice", "images", "fallback", "watchers", "storage", "channels"}:
         view = _config_modal(integration)
     else:
         view = _integration_modal(integration)
@@ -796,6 +798,35 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                 ),
             ],
             submit="Save images",
+        )
+    if integration == "fallback":
+        return _modal(
+            "setup_fallback_ai",
+            "Fallback AI",
+            [
+                _note(
+                    "used only when hack club ai returns a quota/payment error. 9router is text-only here; voice, images and memory search still need HCAI quota. get the key from your 9router config."
+                ),
+                _input(
+                    "ai_router_base_url",
+                    "9router base URL",
+                    initial=_current("ai_router_base_url", settings.ai_router_base_url),
+                    max_length=300,
+                ),
+                _input(
+                    "ai_router_model",
+                    "Fallback model",
+                    initial=_current("ai_router_model", settings.ai_router_model),
+                    max_length=200,
+                ),
+                _input(
+                    "ai_router_api_key",
+                    "9router API key",
+                    placeholder="paste the key; blank keeps the current one",
+                    max_length=300,
+                ),
+            ],
+            submit="Save fallback",
         )
     if integration == "watchers":
         from bot.features.watchers import watcher_config
@@ -1201,6 +1232,22 @@ async def on_images_submit(ack, body, view, client) -> None:
     except ValueError:
         pass
     await _dm(client, user_id or "", "saved image settings.")
+
+
+async def on_fallback_ai_submit(ack, body, view, client) -> None:
+    await ack()
+    user_id = (body.get("user") or {}).get("id")
+    if not _is_admin(user_id):
+        return
+    values = _values(view)
+    for key in ("ai_router_base_url", "ai_router_model"):
+        raw = values.get(key, "")
+        if raw:
+            _set(key, "" if raw.strip() == "-" else raw.strip())
+    api_key = values.get("ai_router_api_key", "")
+    if api_key:
+        _set("ai_router_api_key", "" if api_key.strip() == "-" else api_key.strip())
+    await _dm(client, user_id or "", "saved fallback ai settings.")
 
 
 async def on_watchers_submit(ack, body, view, client) -> None:

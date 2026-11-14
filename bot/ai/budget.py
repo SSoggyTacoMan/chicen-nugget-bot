@@ -62,6 +62,7 @@ PRICES: dict[str, Price] = {
     "perplexity/sonar-pro": Price(3.00, 15.00),
     "jev-latest": Price(0.042, 0.0),
     "jev-": Price(0.042, 0.0),
+    "kgw/kilo-auto/free": Price(0.0, 0.0),
 }
 
 # If we don't know a model, assume it's expensive. Under-counting is how a

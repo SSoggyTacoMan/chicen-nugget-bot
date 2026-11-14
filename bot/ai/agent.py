@@ -14,8 +14,9 @@ from slack_sdk.web.async_client import AsyncWebClient
 from bot import integrations
 from bot.ai import images as image_settings
 from bot.ai import tts
-from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens
+from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens, utc_day
 from bot.ai.memory import MemoryIndex
+from bot.ai.providers import FallbackProvider, fallback_provider
 from bot.ai.tools import Toolbox, ToolContext, format_now, get_user_memory_prompt
 from bot.config import Settings
 from bot.db import Database
@@ -30,6 +31,34 @@ PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system.md"
 PROMPT_DIGEST_KEY = "persona_digest"
 MAX_TOOL_ROUNDS = 6
 MAX_TOOL_RESULT = 7000
+
+
+def is_quota_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "402",
+            "payment required",
+            "insufficient_quota",
+            "quota",
+            "spending limit",
+            "daily limit",
+            "daily budget",
+        )
+    )
+
+
+class QuotaExhausted(RuntimeError):
+    """The primary quota is empty and the fallback could not answer either."""
+
+    def __init__(self, primary: str, fallback: str | None = None) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        detail = f"primary: {primary}"
+        if fallback:
+            detail += f"; fallback: {fallback}"
+        super().__init__(detail)
 CODE_TOOLS = {
     "sandbox",
     "github_write",
@@ -108,6 +137,8 @@ class Agent:
             timeout=60.0,
             max_retries=1,
         )
+        self._fallback_client: AsyncOpenAI | None = None
+        self._fallback_sig: tuple[str, str, str] | None = None
         self.toolbox = Toolbox(settings, db)
         self.memory = MemoryIndex(settings, self.llm)
         self._embedding_tasks: set[asyncio.Task] = set()
@@ -274,15 +305,17 @@ class Agent:
 
         answer = ""
         code_mode = bool(CODE_HINT_RE.search(text or ""))
+        used_fallback = False
         try:
             for _ in range(MAX_TOOL_ROUNDS):
-                response = await self._chat(
+                response, provider = await self._chat(
                     messages,
                     tools=True,
                     user_id=user_id,
                     is_user_identity=is_user_identity,
                     code=code_mode,
                 )
+                used_fallback = used_fallback or provider == "fallback"
                 message = response.choices[0].message
                 tool_calls = message.tool_calls or []
                 if tool_calls:
@@ -333,6 +366,11 @@ class Agent:
             )
 
         answer = format_mrkdwn(answer)
+        if used_fallback and answer.strip() not in {"", "[NO_REPLY]", "NO_REPLY"}:
+            answer = (
+                f"{answer}\n\n_(hack club ai quota empty · 9router free fallback · "
+                "resets 00:00 UTC)_"
+            )
 
         if answer and answer.strip() not in {"[NO_REPLY]", "NO_REPLY"}:
             message_id = self.db.add_message(
@@ -367,7 +405,7 @@ class Agent:
             {"role": "user", "content": text[: self.settings.ai_max_context_chars]},
         ]
         try:
-            response = await self._chat(
+            response, provider = await self._chat(
                 messages,
                 tools=False,
                 temperature=temperature,
@@ -375,6 +413,11 @@ class Agent:
                 user_id=user_id,
             )
             raw = (response.choices[0].message.content or "").strip()
+            if provider == "fallback" and raw:
+                raw = (
+                    f"{raw}\n\n_(hack club ai quota empty · 9router free fallback · "
+                    "resets 00:00 UTC)_"
+                )
             return format_mrkdwn(raw) or "i blanked. try again?"
         except BudgetExceeded as exc:
             logger.warning("ai budget exhausted: %s", exc)
@@ -439,6 +482,50 @@ class Agent:
                 models.append(model)
         return models or [bot_model]
 
+    def _fallback(self) -> tuple[AsyncOpenAI, FallbackProvider] | None:
+        provider = fallback_provider(self.settings, self.db)
+        if provider is None:
+            return None
+        signature = (provider.base_url, provider.api_key, provider.model)
+        if self._fallback_client is None or self._fallback_sig != signature:
+            self._fallback_client = AsyncOpenAI(
+                api_key=provider.api_key,
+                base_url=provider.base_url,
+                timeout=60.0,
+                max_retries=1,
+            )
+            self._fallback_sig = signature
+        return self._fallback_client, provider
+
+    def _quota_empty(self) -> bool:
+        return bool(
+            self.db and self.db.kv_get(f"quota:hcai:{utc_day()}")
+        )
+
+    def _mark_quota_empty(self) -> None:
+        if self.db:
+            self.db.kv_set(f"quota:hcai:{utc_day()}", "empty")
+
+    async def _notify_quota_once(self, provider: FallbackProvider) -> None:
+        if not self.db:
+            return
+        key = f"quota:hcai:notified:{utc_day()}"
+        if self.db.kv_get(key):
+            return
+        self.db.kv_set(key, "1")
+        text = (
+            "hack club ai quota is empty for today. "
+            f"i'm on the 9router fallback (`{provider.model}`), so replies may be slower "
+            "and tool use is off. it resets at 00:00 UTC. voice, images and memory "
+            "search need HCAI quota."
+        )
+        try:
+            await self.client.chat_postMessage(
+                channel=self.settings.owner_user_id, text=text
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not send quota notice: %s", exc)
+
     async def _chat(
         self,
         messages: list[dict[str, Any]],
@@ -449,7 +536,7 @@ class Agent:
         user_id: str | None = None,
         is_user_identity: bool = False,
         code: bool = False,
-    ):
+    ) -> tuple[Any, str]:
         models = self._models_for(is_user_identity, code=code)
 
         kwargs: dict[str, Any] = {
@@ -461,36 +548,102 @@ class Agent:
             kwargs["tools"] = self.toolbox.definitions
             kwargs["tool_choice"] = "auto"
 
+        fallback = self._fallback()
+        quota_error: Exception | None = None
+        providers: list[tuple[str, AsyncOpenAI, list[str]]] = []
+        if not self._quota_empty():
+            providers.append(("primary", self.llm, models))
+        else:
+            quota_error = RuntimeError("hack club ai quota is empty")
+        if fallback is not None:
+            providers.append(("fallback", fallback[0], [fallback[1].model]))
+        if not providers:
+            raise QuotaExhausted(
+                "hack club ai quota is empty", "no fallback key configured"
+            )
+
         last_error: Exception | None = None
-        for index, model in enumerate(models):
-            if self.budget is not None:
-                status = self.budget.status()
-                if status.exhausted:
-                    raise BudgetExceeded(status)
-                if user_id and self.budget.user_exhausted(user_id):
-                    raise BudgetExceeded(self.budget.user_status(user_id), scope="user")
-            try:
-                response = await self.llm.chat.completions.create(model=model, **kwargs)
-                message = response.choices[0].message
-                if index:
-                    logger.info("ai answered with fallback model %s", model)
-                self._record_usage(model, messages, message, response, user_id=user_id)
-                if not (message.content or "").strip() and not (message.tool_calls or []):
-                    raise RuntimeError("empty response")
-                return response
-            except BudgetExceeded:
-                raise
-            except Exception as exc:
-                last_error = exc
-                if index + 1 < len(models):
-                    logger.warning(
-                        "model %s failed (%s); trying fallback %s",
-                        model,
-                        str(exc)[:160],
-                        models[index + 1],
+        for provider_name, client, provider_models in providers:
+            if provider_name == "fallback" and quota_error is None:
+                continue
+            provider_kwargs = dict(kwargs)
+            provider_messages = messages
+            if provider_name == "fallback":
+                provider_kwargs.pop("tools", None)
+                provider_kwargs.pop("tool_choice", None)
+                provider_messages = messages + [
+                    {
+                        "role": "system",
+                        "content": (
+                            "The primary ai quota is empty. You are the free fallback "
+                            "model and have no tools. Answer briefly from the context "
+                            "you already have. Do not claim to use tools."
+                        ),
+                    }
+                ]
+                provider_kwargs["messages"] = provider_messages
+
+            for index, model in enumerate(provider_models):
+                if self.budget is not None:
+                    status = self.budget.status()
+                    if status.exhausted:
+                        raise BudgetExceeded(status)
+                    if user_id and self.budget.user_exhausted(user_id):
+                        raise BudgetExceeded(
+                            self.budget.user_status(user_id), scope="user"
+                        )
+                try:
+                    response = await client.chat.completions.create(
+                        model=model, **provider_kwargs
                     )
-                    continue
-                raise
+                    message = response.choices[0].message
+                    if index:
+                        logger.info("ai answered with fallback model %s", model)
+                    if provider_name == "fallback":
+                        logger.warning(
+                            "ai answered with %s fallback %s", provider_name, model
+                        )
+                    self._record_usage(
+                        model,
+                        provider_messages,
+                        message,
+                        response,
+                        user_id=user_id,
+                    )
+                    if not (message.content or "").strip() and not (
+                        message.tool_calls or []
+                    ):
+                        raise RuntimeError("empty response")
+                    if provider_name == "fallback" and fallback is not None:
+                        self._mark_quota_empty()
+                        await self._notify_quota_once(fallback[1])
+                    return response, provider_name
+                except BudgetExceeded:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - provider errors are retried
+                    last_error = exc
+                    if provider_name == "primary" and is_quota_error(exc):
+                        quota_error = exc
+                        self._mark_quota_empty()
+                        logger.warning(
+                            "primary ai quota exhausted: %s", str(exc)[:160]
+                        )
+                        break
+                    if index + 1 < len(provider_models):
+                        logger.warning(
+                            "model %s failed (%s); trying fallback %s",
+                            model,
+                            str(exc)[:160],
+                            provider_models[index + 1],
+                        )
+                        continue
+                    break
+
+        if quota_error is not None:
+            raise QuotaExhausted(
+                str(quota_error)[:160],
+                str(last_error)[:160] if last_error else None,
+            )
         raise last_error or RuntimeError("no ai model configured")
 
     def _record_usage(self, model, messages, message, response, user_id: str | None = None) -> None:
@@ -536,6 +689,18 @@ class Agent:
     def _friendly_error(self, exc: Exception, model: str | None = None) -> str:
         text = str(exc)
         lower = text.lower()
+        if isinstance(exc, QuotaExhausted):
+            if exc.fallback:
+                return (
+                    "hack club ai quota is empty for today, and the 9router fallback "
+                    "also failed. voice, images and memory search need hacai quota. "
+                    "it resets at 00:00 UTC."
+                )
+            return (
+                "hack club ai quota is empty for today. add a 9router fallback key "
+                "with `/nugget setup fallback`, or wait until 00:00 UTC. voice, "
+                "images and memory search need hacai quota."
+            )
         if "402" in text or "payment required" in lower or "spending limit" in lower or "budget" in lower:
             return "my hack club ai daily budget is used up. it resets at 00:00 UTC."
         if "api key" in lower or "401" in text or "unauthorized" in lower:

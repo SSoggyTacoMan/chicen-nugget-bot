@@ -10,6 +10,8 @@ import time
 from typing import Any
 
 from bot import image_access, integrations
+from bot.ai.budget import utc_day
+from bot.ai.providers import fallback_provider
 from bot.features import retention
 from bot.features.stats import (
     build_digest,
@@ -457,6 +459,16 @@ async def cmd_budget(ack, command, client) -> None:
         f"• context: *{settings.ai_max_context_chars:,}* chars per request",
         f"• models: `{settings.ai_model}` → `{settings.ai_fallback_model or 'no fallback'}`",
     ]
+    router = fallback_provider(settings, runtime.db)
+    if runtime.db.kv_get(f"quota:hcai:{utc_day()}"):
+        lines.append(
+            f"• hacai quota: *empty today* · 9router fallback "
+            f"`{router.model if router else 'not configured'}`"
+        )
+    elif router:
+        lines.append(f"• 9router fallback: `{router.model}` ready")
+    else:
+        lines.append("• 9router fallback: not configured (`/nugget setup fallback`)")
 
     rows = runtime.db.ai_usage(status.day, user_id=user)
     if rows:

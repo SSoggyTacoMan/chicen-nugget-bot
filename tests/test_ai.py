@@ -434,7 +434,7 @@ def test_agent_reply_with_images(tmp_path):
         choice.message.content = "I see a cute dog!"
         choice.message.tool_calls = []
         res.choices = [choice]
-        return res
+        return res, "primary"
 
     agent._chat = fake_chat
 
@@ -1835,7 +1835,7 @@ def test_agent_active_identity_injection(tmp_path):
         choice.message.tool_calls = []
         res = MagicMock()
         res.choices = [choice]
-        return res
+        return res, "primary"
 
     agent._chat = fake_chat
 
@@ -2047,7 +2047,7 @@ def test_forget_tool_and_memory_injection(tmp_path):
             choice.message.content = "ok"
             choice.message.tool_calls = []
             res.choices = [choice]
-            return res
+            return res, "primary"
 
         agent._chat = fake_chat
 

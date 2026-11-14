@@ -149,6 +149,12 @@ def test_setup_modals_do_not_prefill_secrets():
     assert google_modal["callback_id"] == "setup_google_credentials"
     assert "http://localhost:9876/oauth2callback" in json.dumps(google_modal)
 
+    fallback_modal = setup._config_modal("fallback")
+    assert fallback_modal is not None
+    for block in fallback_modal["blocks"]:
+        if block.get("block_id") == "ai_router_api_key":
+            assert "initial_value" not in (block.get("element") or {})
+
 
 def test_setup_merge_semantics():
     from bot.features.setup import _merge
@@ -428,7 +434,7 @@ def test_setup_panel_has_advanced_areas():
         if block.get("type") == "actions"
         for element in block.get("elements") or []
     }
-    assert {"ai", "voice", "images", "watchers", "storage", "channels"} <= values
+    assert {"ai", "voice", "images", "fallback", "watchers", "storage", "channels"} <= values
 
 
 def test_secret_config_writes_are_blocked(tmp_path):
@@ -495,6 +501,9 @@ def _setup_settings(**overrides):
         imagine_model="google/gemini-3.1-flash-image",
         imagine_fallback_model="google/gemini-2.5-flash-image",
         ai_image_cost_usd=0.04,
+        ai_router_base_url="https://router.ssoggy.me/v1",
+        ai_router_model="kgw/kilo-auto/free",
+        ai_router_api_key=None,
         is_admin=lambda user_id: user_id == "U_OWNER",
     )
     for key, value in overrides.items():
@@ -529,11 +538,12 @@ def test_advanced_config_modals_reflect_overrides(tmp_path, monkeypatch):
 
     modals = {
         name: setup._config_modal(name)
-        for name in ("ai", "voice", "images", "watchers", "storage", "channels")
+        for name in ("ai", "voice", "images", "fallback", "watchers", "storage", "channels")
     }
     assert modals["ai"]["callback_id"] == "setup_ai"
     assert modals["voice"]["callback_id"] == "setup_voice"
     assert modals["images"]["callback_id"] == "setup_images"
+    assert modals["fallback"]["callback_id"] == "setup_fallback_ai"
     assert modals["watchers"]["callback_id"] == "setup_watchers"
     assert modals["storage"]["callback_id"] == "setup_storage"
     assert modals["channels"]["callback_id"] == "setup_channels"
@@ -620,6 +630,18 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
             },
             client,
         )
+        await setup.on_fallback_ai_submit(
+            AsyncMock(),
+            body,
+            _modal_view(
+                {
+                    "ai_router_base_url": "https://router.example/v1",
+                    "ai_router_model": "kgw/kilo-auto/free",
+                    "ai_router_api_key": "test-router-key",
+                }
+            ),
+            client,
+        )
         await setup.on_watchers_submit(
             AsyncMock(),
             body,
@@ -674,6 +696,9 @@ def test_advanced_config_submissions_write_overrides(tmp_path, monkeypatch):
         == "google/gemini-3.1-flash-lite-image"
     )
     assert db.kv_get("config:imagine_cost_usd") == "0.06"
+    assert db.kv_get("config:ai_router_base_url") == "https://router.example/v1"
+    assert db.kv_get("config:ai_router_model") == "kgw/kilo-auto/free"
+    assert db.kv_get("config:ai_router_api_key") == "test-router-key"
     assert db.kv_get("config:watch_email") == "true"
     assert db.kv_get("config:watch_github_ci") == "false"
     assert db.kv_get("config:watch_urls") == "https://status.example.com"

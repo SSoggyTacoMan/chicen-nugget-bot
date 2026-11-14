@@ -16,6 +16,7 @@ from bot.ai.agent import Agent
 from bot.ai.budget import Budget
 from bot.ai.gate import Gate
 from bot.ai.limits import RateLimiter
+from bot.ai.providers import fallback_provider
 from bot.config import settings
 from bot.db import Database
 from bot.features import access, scheduler
@@ -183,6 +184,11 @@ async def run() -> None:
                 f" (fallback {settings.transcribe_fallback_model})"
                 if settings.transcribe_fallback_model
                 else "",
+            )
+            router = fallback_provider(settings, db)
+            logger.info(
+                "9router fallback %s",
+                f"{router.model} at {router.base_url}" if router else "off (no key)",
             )
             status = runtime.budget.status()
             global_stop = (

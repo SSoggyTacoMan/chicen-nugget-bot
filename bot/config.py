@@ -110,6 +110,9 @@ class Settings:
     ai_embedding_model: str | None
     transcribe_model: str
     transcribe_fallback_model: str | None
+    ai_router_base_url: str
+    ai_router_api_key: str | None
+    ai_router_model: str
     ai_max_tokens: int
     ai_history_limit: int
     ai_channels: frozenset[str]
@@ -238,6 +241,14 @@ class Settings:
     @property
     def ai_enabled(self) -> bool:
         return bool(self.ai_api_key)
+
+    @property
+    def ai_router_enabled(self) -> bool:
+        return bool(
+            self.ai_router_api_key
+            and self.ai_router_base_url
+            and self.ai_router_model
+        )
 
     @property
     def imagine_enabled(self) -> bool:
@@ -371,6 +382,13 @@ def load_settings() -> Settings:
             "TRANSCRIBE_FALLBACK_MODEL", "google/gemini-2.5-flash"
         )
         or "google/gemini-2.5-flash",
+        ai_router_base_url=_str(
+            "AI_ROUTER_BASE_URL", "https://router.ssoggy.me/v1"
+        )
+        or "https://router.ssoggy.me/v1",
+        ai_router_api_key=_str("AI_ROUTER_API_KEY") or None,
+        ai_router_model=_str("AI_ROUTER_MODEL", "kgw/kilo-auto/free")
+        or "kgw/kilo-auto/free",
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),
         ai_history_limit=_int("AI_HISTORY_LIMIT", 24),
         ai_channels=frozenset(_list("AI_CHANNELS", ("*",))),

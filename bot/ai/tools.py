@@ -1556,6 +1556,7 @@ class Toolbox:
                             "ai",
                             "voice",
                             "images",
+                            "fallback",
                             "watchers",
                             "storage",
                             "channels",
@@ -5682,7 +5683,7 @@ class Toolbox:
         if integration and integration not in integrations.SETUP_AREAS:
             areas = ", ".join(name for name, _ in integrations.SETUP_INTEGRATIONS)
             return _error(
-                f"integration must be {areas}, ai, voice, images, watchers, storage, channels, or all"
+                f"integration must be {areas}, ai, voice, images, fallback, watchers, storage, channels, or all"
             )
         blocks = integrations.setup_panel_blocks(integration or None)
         result = await post(

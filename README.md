@@ -134,6 +134,7 @@ run `/nugget setup`, or ask the bot to open the setup panel. secrets go into sla
 | ai and behavior | `/nugget setup ai` |
 | voice | `/nugget setup voice` |
 | images | `/nugget setup images` |
+| fallback ai | `/nugget setup fallback` |
 | watchers | `/nugget setup watchers` |
 | storage | `/nugget setup storage` |
 | auto-join channels | `/nugget setup channels` |
@@ -143,7 +144,7 @@ run `/nugget setup`, or ask the bot to open the setup panel. secrets go into sla
 
 settings land in sqlite (`data/bot.db`) and override env values. env stays as a fallback for fresh deploys and ci.
 
-the panel also has AI & behavior, voice, images, watchers, storage and auto-join. those write runtime settings instead of requiring an env edit.
+the panel also has AI & behavior, voice, images, fallback ai, watchers, storage and auto-join. those write runtime settings instead of requiring an env edit.
 
 ### voice
 
@@ -245,6 +246,12 @@ mcp servers aren't wired yet. for now it's these presets plus the built-in googl
 | code turns | `anthropic/claude-sonnet-5.5` | `openai/gpt-5.5` |
 
 `AI_CODE_MODEL` is set by default. a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
+
+### quota fallback
+
+when hack club ai returns a quota or payment error, the bot marks the UTC day as empty, DMs the owner once, and switches to the 9router fallback (`AI_ROUTER_MODEL`, default `kgw/kilo-auto/free`). the fallback is text-only with tools disabled, so voice, images and memory search still need HCAI quota. it resets at 00:00 UTC.
+
+set the 9router key with `/nugget setup fallback` or `AI_ROUTER_API_KEY`. the key is stored in SQLite, never in chat or git.
 
 semantic memory uses `AI_EMBEDDING_MODEL` (default `qwen/qwen3-embedding-8b`). new turns are embedded in the background, and `search_memory` searches by meaning. to index old history:
 

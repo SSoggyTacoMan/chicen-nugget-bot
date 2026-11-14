@@ -29,6 +29,7 @@ SETUP_CONFIG_AREAS: tuple[tuple[str, str], ...] = (
     ("ai", "AI & behavior"),
     ("voice", "Voice"),
     ("images", "Images"),
+    ("fallback", "Fallback AI"),
     ("watchers", "Watchers"),
     ("storage", "Storage"),
     ("channels", "Auto-join"),
@@ -50,6 +51,7 @@ SECRET_CONFIG_KEYS: frozenset[str] = frozenset(
         "imap_password",
         "slack_owner_token",
         "slack_owner_cookie",
+        "ai_router_api_key",
     }
     | {f"api_token:{name}" for name in API_SERVICES}
 )
@@ -63,6 +65,7 @@ SECRET_SETUP_TARGET: dict[str, str] = {
     "imap_password": "email",
     "slack_owner_token": "slack",
     "slack_owner_cookie": "slack",
+    "ai_router_api_key": "fallback",
     **{f"api_token:{name}": "apis" for name in API_SERVICES},
 }
 
@@ -383,6 +386,7 @@ def setup_panel_blocks(requested: str | None = None) -> list[dict[str, Any]]:
         "ai": ("AI & behavior", "Models, recaps, ambient replies"),
         "voice": ("Voice", "Qwen3 TTS voice, language and style"),
         "images": ("Images", "Nano Banana model, fallback and cost"),
+        "fallback": ("Fallback AI", "9router key for when HCAI quota is empty"),
         "watchers": ("Watchers", "CI, notifications, email, URLs"),
         "storage": ("Storage", "Retention and cleanup"),
         "channels": ("Auto-join", "Channels to join on boot"),

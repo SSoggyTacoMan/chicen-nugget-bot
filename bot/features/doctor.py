@@ -83,6 +83,20 @@ async def cmd_doctor(ack, command, client) -> None:
     except Exception as exc:  # noqa: BLE001
         lines.append(f"{warn} voice: {exc}")
 
+    try:
+        from bot.ai.budget import utc_day
+        from bot.ai.providers import fallback_provider
+
+        router = fallback_provider(settings, runtime.db)
+        if router:
+            lines.append(f"{ok} fallback ai: `{router.model}` at `{router.base_url}`")
+        else:
+            lines.append(f"{warn} fallback ai: not configured")
+        if runtime.db and runtime.db.kv_get(f"quota:hcai:{utc_day()}"):
+            lines.append(f"{warn} hacai quota: empty today (fallback active)")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"{warn} fallback ai: {exc}")
+
     memory = runtime.agent.memory if runtime.agent is not None else None
     if memory is None or not memory.enabled:
         lines.append(f"{warn} memory: embeddings off")
