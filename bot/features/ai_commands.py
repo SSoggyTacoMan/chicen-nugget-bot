@@ -307,6 +307,11 @@ async def cmd_speak(ack, command, client) -> None:
     text = (command.get("text") or "").strip()
     settings = runtime.settings
     cfg = tts.voice_config(settings, runtime.db)
+    if user != settings.owner_user_id and not settings.is_admin(user):
+        await post_ephemeral(
+            client, channel, user, "voice clips are admin-only right now."
+        )
+        return
     if not settings.ai_api_key or not cfg.model:
         await post_ephemeral(
             client,
