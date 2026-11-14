@@ -148,6 +148,14 @@ class Settings:
     browser_dir: Path
     github_watch: bool
     github_watch_interval: int
+    watch_github_notifications: bool
+    watch_github_notifications_interval: int
+    watch_email: bool
+    watch_email_interval: int
+    watch_email_limit: int
+    watch_urls: tuple[str, ...]
+    watch_url_interval: int
+    watch_url_timeout: int
     imagine_model: str | None
     imagine_fallback_model: str | None
     image_user_ids: frozenset[str]
@@ -379,6 +387,16 @@ def load_settings() -> Settings:
         browser_dir=browser_dir,
         github_watch=_bool("WATCH_GITHUB_CI", False),
         github_watch_interval=max(60, _int("WATCH_GITHUB_CI_INTERVAL", 120)),
+        watch_github_notifications=_bool("WATCH_GITHUB_NOTIFICATIONS", False),
+        watch_github_notifications_interval=max(
+            60, _int("WATCH_GITHUB_NOTIFICATIONS_INTERVAL", 180)
+        ),
+        watch_email=_bool("WATCH_EMAIL", False),
+        watch_email_interval=max(60, _int("WATCH_EMAIL_INTERVAL", 300)),
+        watch_email_limit=max(1, min(10, _int("WATCH_EMAIL_LIMIT", 3))),
+        watch_urls=tuple(_list("WATCH_URLS")),
+        watch_url_interval=max(60, _int("WATCH_URL_INTERVAL", 300)),
+        watch_url_timeout=max(5, _int("WATCH_URL_TIMEOUT", 15)),
         imagine_model=_str("IMAGINE_MODEL", "google/gemini-3.1-flash-image") or None,
         imagine_fallback_model=_str("IMAGINE_FALLBACK_MODEL", "google/gemini-2.5-flash-image") or None,
         image_user_ids=frozenset(_list("IMAGE_ALLOWED_USER_IDS")),

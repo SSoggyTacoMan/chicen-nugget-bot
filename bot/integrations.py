@@ -308,9 +308,20 @@ def prompt_integration_lines(
         if present
     ]
     api_state = ", ".join(connected_apis) if connected_apis else "none"
+    watchers = []
+    if settings.github_watch:
+        watchers.append("github ci")
+    if settings.watch_github_notifications:
+        watchers.append("github notifications")
+    if settings.watch_email:
+        watchers.append("email")
+    if settings.watch_urls:
+        watchers.append(f"urls ({len(settings.watch_urls)})")
+    watcher_state = ", ".join(watchers) if watchers else "off"
     return (
         f"- GitHub & Hackatime: {gh_state}\n"
         f"- Extra APIs (generic api_request): {api_state}\n"
+        f"- Watchers: {watcher_state}\n"
         f"- Google Workspace (Calendar, Gmail, Drive): {google_state}\n"
         f"- Mac companion link (volume, apps, clipboard, lock/sleep, shell): {mac_state}\n"
         f"- Email (IMAP): {email_state}\n"

@@ -143,8 +143,17 @@ async def cmd_doctor(ack, command, client) -> None:
             lines.append(f"{warn} github: {exc}")
 
     lines.append(f"{ok} gateway: {'on' if runtime.user_gateway else 'off'}")
+    active_watchers = []
+    if settings.github_watch:
+        active_watchers.append("github ci")
+    if settings.watch_github_notifications:
+        active_watchers.append("github notifications")
+    if settings.watch_email:
+        active_watchers.append("email")
+    if settings.watch_urls:
+        active_watchers.append(f"urls ({len(settings.watch_urls)})")
     lines.append(
-        f"{ok if settings.github_watch else warn} github ci watcher: "
-        f"{'on' if settings.github_watch else 'off'}"
+        f"{ok if active_watchers else warn} watchers: "
+        f"{', '.join(active_watchers) if active_watchers else 'off'}"
     )
     await post_ephemeral(client, channel, user, "\n".join(lines))

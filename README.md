@@ -14,7 +14,7 @@ they share one sqlite database, one toolbox and one memory. socket mode only, so
 - reaction shortcuts and message shortcuts for research, explain and thread summaries
 - persistent code sandboxes with file edits, background jobs, uploads and branch push
 - github reads and writes: prs, issues, comments, reviews, close/reopen, merge and push
-- optional GitHub Actions watcher that DMs you when a run fails
+- optional watchers: GitHub Actions failures, GitHub notifications, new email and URL uptime
 - headless chromium for pages that need javascript, clicking or forms
 - optional api tokens for vercel, cloudflare, notion, linear, sentry, resend, openai and anthropic
 - separate bot, boi and code models, with fallbacks and runtime switching
@@ -171,6 +171,24 @@ for writes, use a fine-grained token with **contents: write**, **pull requests: 
 `close`, `merge` and `push_branch` require `confirm=true` and an explicit request from the owner. push blocks `main`/`master`, never force-pushes, and sends the token through `git askpass` so it doesn't land in `.git/config` or logs.
 
 set `WATCH_GITHUB_CI=true` and the scheduler will DM you when a new Actions run fails in the configured repo. quiet hours and `PROACTIVE_DAILY_CAP` apply.
+
+### watchers
+
+all watchers are opt-in, baseline on first run, dedupe by id/uid, and honor quiet hours plus the daily cap.
+
+```dotenv
+WATCH_GITHUB_CI=true
+WATCH_GITHUB_NOTIFICATIONS=true
+WATCH_EMAIL=true
+WATCH_URLS=https://example.com,https://status.example.com
+```
+
+- GitHub CI: new failed Actions runs.
+- GitHub notifications: new unread notifications.
+- Email: new unread IMAP mail with subject/from/snippet.
+- URLs: DMs when a URL goes down or comes back.
+
+intervals are separate: `WATCH_GITHUB_CI_INTERVAL`, `WATCH_GITHUB_NOTIFICATIONS_INTERVAL`, `WATCH_EMAIL_INTERVAL`, `WATCH_URL_INTERVAL`. email watcher needs `/nugget setup email`; GitHub ones need `/nugget setup github`.
 
 ### email
 
