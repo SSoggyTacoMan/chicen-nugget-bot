@@ -145,3 +145,24 @@ def test_quota_notice_is_sent_once_per_day(tmp_path):
     asyncio.run(run())
     agent.client.chat_postMessage.assert_awaited_once()
     assert db.kv_get(f"quota:hcai:notified:{utc_day()}") == "1"
+
+
+def test_fallback_provider_prefers_db_over_env(tmp_path):
+    from bot.ai.providers import fallback_provider
+
+    db = Database(tmp_path / "router.db")
+    db.init()
+    settings = _settings(tmp_path)
+    provider = fallback_provider(settings, db)
+    assert provider is not None
+    assert provider.api_key == "fallback-key"
+    assert provider.model == "kgw/kilo-auto/free"
+
+    db.kv_set("config:ai_router_api_key", "db-key")
+    db.kv_set("config:ai_router_model", "db-model")
+    db.kv_set("config:ai_router_base_url", "https://db.example/v1")
+    provider = fallback_provider(settings, db)
+    assert provider is not None
+    assert provider.api_key == "db-key"
+    assert provider.model == "db-model"
+    assert provider.base_url == "https://db.example/v1"
