@@ -137,6 +137,9 @@ class Settings:
     sandbox_max_workspaces: int
     sandbox_exec_timeout: int
     sandbox_max_exec_timeout: int
+    sandbox_ttl_days: int
+    memory_retention_days: int
+    storage_min_free_gb: float
     browser_enabled: bool
     browser_headless: bool
     browser_timeout: int
@@ -365,6 +368,9 @@ def load_settings() -> Settings:
         sandbox_max_workspaces=max(1, _int("SANDBOX_MAX_WORKSPACES", 20)),
         sandbox_exec_timeout=max(5, _int("SANDBOX_EXEC_TIMEOUT", 120)),
         sandbox_max_exec_timeout=max(5, _int("SANDBOX_MAX_EXEC_TIMEOUT", 600)),
+        sandbox_ttl_days=max(0, _int("SANDBOX_TTL_DAYS", 30)),
+        memory_retention_days=max(0, _int("MEMORY_RETENTION_DAYS", 180)),
+        storage_min_free_gb=max(0.0, _float("STORAGE_MIN_FREE_GB", 1.0)),
         browser_enabled=_bool("BROWSER_ENABLED", True),
         browser_headless=_bool("BROWSER_HEADLESS", True),
         browser_timeout=max(5, _int("BROWSER_TIMEOUT", 30)),

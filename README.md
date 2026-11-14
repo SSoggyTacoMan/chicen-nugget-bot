@@ -283,6 +283,12 @@ SANDBOX_EXEC_TIMEOUT=120
 SANDBOX_MAX_EXEC_TIMEOUT=600
 ```
 
+### storage
+
+`/nugget storage` shows data, db, sandbox, browser and log sizes plus free disk. `/nugget storage prune` runs retention now.
+
+retention defaults: conversation history and vectors older than 180 days (`MEMORY_RETENTION_DAYS`), sandboxes unused for 30 days (`SANDBOX_TTL_DAYS`), old job logs after 7 days, and sqlite backups after 7 days. logs already rotate at 2 MB with three backups. `0` disables a retention setting.
+
 ### browser
 
 `browser` is a real headless chromium session for pages `fetch_url` can't handle. open a public page, read the rendered text, click, fill forms, press keys, wait for elements, go back/forward/reload and upload a screenshot.
@@ -373,6 +379,7 @@ everything lives under `/nugget`. `/nugget help` is the full list.
 | `/nugget imagine <prompt>` | generate an image | admin |
 | `/nugget config` | runtime settings | admin |
 | `/nugget memory` | status, search or backfill semantic memory | admin |
+| `/nugget storage` | data usage, free disk, optional prune | admin |
 | `/nugget doctor` | scopes, tokens, sqlite, browser, github, sandbox | admin |
 | `/nugget setup` | connect integrations | admin |
 
@@ -474,6 +481,7 @@ bot/
     shortcuts.py           message shortcuts
     scheduler.py           reminders, digest, recaps
     watchers.py            github ci watcher
+    retention.py           storage cleanup
     doctor.py              /nugget doctor checks
     welcomer.py, access.py, recaps.py, router.py, commands.py
 prompts/system.md          agent system prompt

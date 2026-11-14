@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from bot import image_access, integrations
+from bot.features import retention
 from bot.features.stats import (
     build_digest,
     collect_system_diagnostics,
@@ -81,6 +82,7 @@ HELP = """*{bot}: everything lives under `/nugget`*
 
 *developer & admin*
 • `/nugget sysinfo` - admin: host diagnostics (RAM, CPU, disk, commit)
+• `/nugget storage [prune]` - admin: data usage and retention cleanup
 • `/nugget doctor` - admin: scopes, boi, ai, browser, sandbox, github, sqlite
 • `/nugget config` - view or change runtime settings (recaps, tier2, admin_channel, welcomer, etc.)
 • `/nugget stats` - admin workspace stats
@@ -1023,6 +1025,27 @@ async def _backfill_memory(limit: int, user: str) -> None:
         )
     except Exception:
         logger.exception("memory backfill failed")
+
+
+async def cmd_storage(ack, command, client) -> None:
+    await ack()
+    user = command.get("user_id")
+    if not runtime.settings.is_admin(user):
+        await _say(client, command, "storage is admin only.", ephemeral=True)
+        return
+    if runtime.db is None:
+        await _say(client, command, "database is not available.", ephemeral=True)
+        return
+    report = retention.storage_report(runtime.settings)
+    if (command.get("text") or "").strip().lower() == "prune":
+        result = retention.prune_now(runtime.db, runtime.settings)
+        report += (
+            f"\n• pruned: {result['messages']} messages, {result['vectors']} vectors, "
+            f"{result['sandboxes']} sandboxes, {result['backups']} backups"
+        )
+    else:
+        report += "\n_`/nugget storage prune` to clear old history and stale sandboxes now_"
+    await _say(client, command, report, ephemeral=True)
 
 
 async def _say(client, command: dict[str, Any], text: str, *, ephemeral: bool = True) -> None:

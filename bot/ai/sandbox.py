@@ -584,6 +584,26 @@ class SandboxManager:
         jobs.sort(key=lambda item: float(item.get("started") or 0), reverse=True)
         return jobs[:20]
 
+    def prune_stale(self, days: int) -> list[str]:
+        if days <= 0:
+            return []
+        cutoff = time.time() - days * 86400
+        running = {
+            str(job.get("sandbox"))
+            for job in self.list_jobs()
+            if job.get("status") == "running"
+        }
+        removed: list[str] = []
+        for info in self.list():
+            if info.name in running or info.updated >= cutoff:
+                continue
+            try:
+                self.delete(info.name)
+                removed.append(info.name)
+            except SandboxError:
+                continue
+        return removed
+
     # ----------------------------------------------------------------- files
     def _resolve_in(self, root: Path, rel_path: str) -> Path:
         rel = (rel_path or "").strip().lstrip("/")

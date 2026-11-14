@@ -505,6 +505,28 @@ class Database:
         self._execute("DELETE FROM memory_vectors")
         return self._execute("DELETE FROM messages")
 
+    def prune_history(self, days: int) -> dict[str, int]:
+        if days <= 0:
+            return {"messages": 0, "vectors": 0, "usage": 0}
+        cutoff = iso(utcnow() - timedelta(days=days))
+        messages = self._execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
+        vectors = self._execute(
+            "DELETE FROM memory_vectors WHERE created_at < ? "
+            "OR message_id NOT IN (SELECT id FROM messages)",
+            (cutoff,),
+        )
+        usage = self._execute("DELETE FROM ai_usage WHERE created_at < ?", (cutoff,))
+        return {"messages": messages, "vectors": vectors, "usage": usage}
+
+    def vacuum(self) -> None:
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                conn.execute("VACUUM")
+                conn.commit()
+            finally:
+                conn.close()
+
     def add_memory_vector(
         self,
         message_id: int,

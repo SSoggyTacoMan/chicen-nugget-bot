@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from types import SimpleNamespace
 
 from bot.ai.memory import MemoryIndex
-from bot.db import Database
+from bot.db import Database, iso, utcnow
 
 
 class FakeEmbeddings:
@@ -64,3 +65,19 @@ def test_memory_index_embeds_and_searches(tmp_path):
         assert hits and hits[0]["message_id"] == message_id
 
     asyncio.run(run())
+
+
+def test_prune_history_clears_old_messages_and_vectors(tmp_path):
+    db = Database(str(tmp_path / "prune.db"))
+    db.init()
+    old_message = db.add_message("dm:U1", "user", "U1", "old deploy notes")
+    new_message = db.add_message("dm:U1", "user", "U1", "new notes")
+    old_time = iso(utcnow() - timedelta(days=400))
+    db._execute("UPDATE messages SET created_at = ? WHERE id = ?", (old_time, old_message))
+    db.add_memory_vector(old_message, "dm:U1", "user", "U1", "old deploy notes", "m", [1, 0])
+    db.add_memory_vector(new_message, "dm:U1", "user", "U1", "new notes", "m", [0, 1])
+
+    counts = db.prune_history(180)
+    assert counts["messages"] == 1
+    assert counts["vectors"] == 1
+    assert db.count_memory_vectors("m") == 1

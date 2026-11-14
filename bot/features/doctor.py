@@ -94,6 +94,14 @@ async def cmd_doctor(ack, command, client) -> None:
     lines.append(
         f"{ok if sandbox.exists() else warn} sandbox: host path `{sandbox}`"
     )
+    try:
+        from bot.features import retention
+
+        lines.append(
+            f"{ok} storage: {retention.storage_report(settings).splitlines()[1]}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"{warn} storage: {exc}")
 
     github = integrations.github_config(runtime.db, settings)
     token = (github.get("token") or "").strip()
