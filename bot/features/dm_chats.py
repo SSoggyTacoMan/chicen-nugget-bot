@@ -22,7 +22,7 @@ from typing import Any
 
 from bot.db import iso, utcnow
 from bot.runtime import runtime
-from bot.slack_api import error_code, post, post_ephemeral
+from bot.slack_api import error_code, message_text, post, post_ephemeral
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +336,7 @@ async def route_dm(event: dict[str, Any]) -> DMRoute | None:
     user_id = event.get("user") or ""
     channel = event.get("channel") or ""
     ts = event.get("ts") or ""
-    text = (event.get("text") or "").strip()
+    text = message_text(event).strip()
     thread_ts = event.get("thread_ts") or None
     if not user_id or not channel or not ts:
         return None
