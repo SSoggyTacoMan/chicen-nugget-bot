@@ -57,6 +57,10 @@ _UNSUBSCRIBE_COOLDOWN = 15.0
 _UNSUBSCRIBE_WORDS = {"unsubscribe", "unsub"}
 _REACTION_COOLDOWN = 30.0
 _last_reaction: dict[tuple[str, str, str, str], float] = {}
+# Default for a cooldown map miss. `time.monotonic()` counts from boot, so on a
+# freshly started host 0.0 would look like "just replied" and silence the first
+# follow-up, reaction or ambient reply for the whole cooldown window.
+_NEVER = float("-inf")
 _NAME_TTL = 6 * 3600.0
 _NAME_CACHE_MAX = 2000
 _NAME_ADDRESS = (
@@ -261,7 +265,7 @@ async def on_reaction_added(event: dict[str, Any], client) -> None:
 
     now = time.monotonic()
     key = (channel, ts, reaction, user_id)
-    if now - _last_reaction.get(key, 0.0) < _REACTION_COOLDOWN:
+    if now - _last_reaction.get(key, _NEVER) < _REACTION_COOLDOWN:
         return
     _last_reaction[key] = now
 
@@ -553,7 +557,7 @@ async def _handle_unsubscribe(event: dict[str, Any], client) -> bool:
 
     key = (channel, thread_ts)
     now = time.monotonic()
-    if now - _last_unsubscribe.get(key, 0.0) < _UNSUBSCRIBE_COOLDOWN:
+    if now - _last_unsubscribe.get(key, _NEVER) < _UNSUBSCRIBE_COOLDOWN:
         return True
     _last_unsubscribe[key] = now
     await post(
@@ -670,7 +674,7 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
         isinstance(cooldown, (int, float))
         and cooldown > 0
         and not explicitly_named
-        and time.monotonic() - _last_thread.get(key, 0.0) < cooldown
+        and time.monotonic() - _last_thread.get(key, _NEVER) < cooldown
     ):
         logger.info("thread followup cooldown in %s (%ss)", channel, cooldown)
         return
@@ -798,7 +802,7 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
         return
 
     cooldown = settings.ai_ambient_cooldown
-    last = _last_ambient.get(channel, 0.0)
+    last = _last_ambient.get(channel, _NEVER)
     if cooldown and time.monotonic() - last < cooldown:
         return
 

@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 # (channel, thread_ts) -> monotonic time of boi's last unprompted thread reply.
 _last_thread: dict[tuple[str, str], float] = {}
 _THREAD_TRACKING_MAX = 500
+# A missing entry must not look like "just replied" on a freshly booted host,
+# where time.monotonic() is small.
+_NEVER = float("-inf")
 
 
 def _prune_tracking() -> None:
@@ -493,7 +496,7 @@ class UserGateway:
             isinstance(cooldown, (int, float))
             and cooldown > 0
             and not named
-            and time.monotonic() - _last_thread.get(key, 0.0) < cooldown
+            and time.monotonic() - _last_thread.get(key, _NEVER) < cooldown
         ):
             logger.info("boi thread followup cooled down in %s", channel)
             return None

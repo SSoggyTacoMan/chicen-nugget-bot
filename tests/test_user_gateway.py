@@ -598,6 +598,53 @@ def test_user_gateway_followup_steps_back_when_bot_spoke_last(tmp_path):
     asyncio.run(run())
 
 
+def test_user_gateway_followup_not_blocked_on_fresh_host(tmp_path):
+    from bot.db import Database
+
+    async def run():
+        db = Database(str(tmp_path / "gw_fresh_boot.db"))
+        db.init()
+        db.mark_thread("C_TEST", "520.000", owner="user")
+        _last_thread.clear()
+
+        event, replies = _followup_thread(
+            [
+                {"user": "U_ALT", "text": "what's the situation?", "ts": "520.000"},
+                {"user": "U_OWNER", "text": "can you check this build error for me", "ts": "520.002"},
+            ]
+        )
+        mock_client = AsyncMock()
+        mock_client.conversations_replies = AsyncMock(return_value=replies)
+        gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
+        mock_agent = AsyncMock()
+        mock_agent.reply = AsyncMock(return_value="on it")
+        runtime.agent = mock_agent
+
+        old_db, old_user_client, old_settings = runtime.db, runtime.user_client, runtime.settings
+        runtime.db = db
+        runtime.user_client = None
+        mock_settings = MagicMock()
+        mock_settings.ai_enabled = True
+        mock_settings.ai_allowed.return_value = True
+        mock_settings.ai_thread_cooldown = 120
+        runtime.settings = mock_settings
+
+        try:
+            # A host that booted 5 seconds ago: monotonic() is tiny, so an unseen
+            # thread must not be mistaken for one that just replied.
+            with patch("bot.user_gateway.time.monotonic", return_value=5.0), \
+                 patch("bot.user_gateway.fetch_slack_images", AsyncMock(return_value=[])):
+                await gw._handle_event(event)
+            mock_agent.reply.assert_called_once()
+        finally:
+            _last_thread.clear()
+            runtime.db = old_db
+            runtime.user_client = old_user_client
+            runtime.settings = old_settings
+
+    asyncio.run(run())
+
+
 def test_user_gateway_mention_gets_channel_context():
     async def run():
         mock_client = AsyncMock()
