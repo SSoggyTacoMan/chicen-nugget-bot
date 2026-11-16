@@ -271,6 +271,58 @@ def test_cmd_secret_posts_to_the_bot_dm(env):
     assert env.is_secret_thread("U_OWNER", "9.0") is True
 
 
+def test_secret_chat_can_start_under_a_users_message(env):
+    client = MagicMock()
+    client.chat_postMessage = AsyncMock(return_value=SimpleNamespace(data={"ts": "5.1"}))
+    client.chat_postEphemeral = AsyncMock(return_value=SimpleNamespace(data={}))
+
+    asyncio.run(
+        dm_chats.start_secret_chat(
+            client, "D_BOT", "U_OWNER", "rust", root_ts="5.0"
+        )
+    )
+
+    posted = client.chat_postMessage.await_args.kwargs
+    assert posted["thread_ts"] == "5.0"
+    assert posted["channel"] == "D_BOT"
+    assert env.is_secret_thread("U_OWNER", "5.0") is True
+    assert env.active_dm_chat("U_OWNER") == "5.0"
+
+
+def test_quote_into_thread_is_discreet(env):
+    client = MagicMock()
+    client.chat_postMessage = AsyncMock(return_value=SimpleNamespace(data={"ts": "5.2"}))
+
+    asyncio.run(
+        dm_chats.quote_into_thread(client, "D_BOT", "5.0", "hello\nsecret thing")
+    )
+
+    posted = client.chat_postMessage.await_args.kwargs
+    assert posted["channel"] == "D_BOT"
+    assert posted["thread_ts"] == "5.0"
+    assert posted["text"] == dm_chats.SECRET_PREVIEW
+    assert posted["blocks"][0]["text"]["text"] == "> hello\n> secret thing"
+
+
+def test_handle_dm_plain_secret_start_threads_on_the_message(env):
+    from unittest.mock import patch
+
+    from bot.features.agent import _handle_dm
+
+    old_agent = runtime.agent
+    runtime.agent = MagicMock()
+    client = AsyncMock()
+    try:
+        with patch(
+            "bot.features.agent.dm_chats.start_secret_chat", AsyncMock()
+        ) as start:
+            asyncio.run(_handle_dm(_event("start a secret chat about rust", "5.0"), client))
+        assert start.await_args.args[3] == "about rust"
+        assert start.await_args.kwargs["root_ts"] == "5.0"
+    finally:
+        runtime.agent = old_agent
+
+
 def test_secret_tools_are_read_only(db):
     toolbox = Toolbox(SimpleNamespace(secret_chat_tools="web"), db)
     names = {

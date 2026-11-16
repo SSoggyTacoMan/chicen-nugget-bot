@@ -391,7 +391,13 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
     if intent is not None:
         action, title = intent
         if action == "start":
-            await dm_chats.start_secret_chat(client, event["channel"], user_id, title)
+            await dm_chats.start_secret_chat(
+                client,
+                event["channel"],
+                user_id,
+                title,
+                root_ts=event.get("thread_ts") or event.get("ts"),
+            )
         elif not await dm_chats.end_active_secret(
             client, event["channel"], user_id, burn=action == "burn"
         ):
@@ -423,6 +429,12 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
     discreet = bool(
         secret is not None and getattr(settings, "secret_chat_discreet", True)
     )
+    if secret is not None and route is not None and route.redirected:
+        # The message was typed in the main DM but belongs in the secret
+        # thread. Slack cannot move it, so quote it there for a complete read.
+        await dm_chats.quote_into_thread(
+            client, event["channel"], reply_thread_ts, route.text
+        )
     if (
         route is not None
         and route.redirected

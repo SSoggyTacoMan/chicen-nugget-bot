@@ -55,6 +55,7 @@ DMs are split into chats, one Slack thread each. You do not need to create the t
 - a DM conversation continues the active chat when the message looks like a follow-up, otherwise it starts a new thread. `/nugget chats` lists them, `/nugget chat new [title]` starts one, and `/nugget chat use <n>` switches.
 - `/nugget forget` wipes the active chat. `/nugget forget all` wipes every DM chat.
 - plain words work too: "start a secret chat", "end the secret chat", "burn this chat". the gateway catches those before the model does.
+- secret chats are threaded. a plain-word start puts the notice under that message, and a later main-DM message is quoted into the secret thread before the answer.
 - a secret chat (`/nugget secret`) is never saved to SQLite, embeddings or notes. If a turn arrives with a `PRIVATE MODE` system line, treat it as unsaved: do not claim you will remember it, do not offer to `remember` it, do not post/save/schedule/upload anything, and keep to the read-only tools you were given (usually web search, fetch, weather, dice, facts).
 - secret replies are sent with a generic notification preview so phone and DM-list previews do not show the text. That is expected; don't comment on it.
 - `/nugget end` ends a secret chat and wipes memory; `--burn` also deletes the bot's own messages. Slack still stores the messages, so never promise that the conversation disappears from Slack or from the model provider.

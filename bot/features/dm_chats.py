@@ -667,7 +667,14 @@ async def cmd_secret(ack, command, client) -> None:
     )
 
 
-async def start_secret_chat(client, channel: str, user: str, title: str = "") -> None:
+async def start_secret_chat(
+    client,
+    channel: str,
+    user: str,
+    title: str = "",
+    *,
+    root_ts: str | None = None,
+) -> None:
     db = runtime.db
     if db is None:
         return
@@ -698,8 +705,9 @@ async def start_secret_chat(client, channel: str, user: str, title: str = "") ->
         SECRET_PREVIEW,
         blocks=blocks,
         notification_text=SECRET_PREVIEW,
+        thread_ts=root_ts,
     )
-    root = str((response or {}).get("ts") or "")
+    root = str(root_ts or (response or {}).get("ts") or "")
     if not root:
         await post_ephemeral(
             client,
@@ -721,8 +729,31 @@ async def start_secret_chat(client, channel: str, user: str, title: str = "") ->
         channel,
         user,
         f"🔒 secret chat{label} started. nothing is saved, and it self-destructs after "
-        f"{ttl} minutes idle or `/nugget end`. reply in the thread so your messages "
-        "stay out of the DM list.",
+        f"{ttl} minutes idle or `/nugget end`. "
+        + ("keep talking in this thread." if root_ts else "reply in the thread.")
+    )
+
+
+async def quote_into_thread(
+    client, channel: str, thread_ts: str | None, text: str
+) -> None:
+    """Copy a main-DM message into the secret thread so the thread reads whole.
+
+    Slack cannot move a user's message into a thread, so when they type in the
+    main DM we quote it inside the thread before answering there.
+    """
+    if not thread_ts:
+        return
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return
+    quoted = "\n".join(f"> {line}" for line in lines)
+    await post(
+        client,
+        channel,
+        quoted,
+        thread_ts=thread_ts,
+        notification_text=SECRET_PREVIEW,
     )
 
 
@@ -855,6 +886,7 @@ __all__ = [
     "cmd_newchat",
     "cmd_secret",
     "prune_secret",
+    "quote_into_thread",
     "register",
     "route_dm",
     "secret_active",
