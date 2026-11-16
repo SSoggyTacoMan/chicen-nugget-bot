@@ -348,7 +348,7 @@ DMs used to be one endless conversation. Now each DM chat is its own thread, roo
 
 `/nugget secret [title]` starts a chat that is not saved. Plain words work too: "start a secret chat", "end the secret chat", "burn this chat".
 
-- it is a thread. saying "start a secret chat" uses that message as the thread root; a later main-DM message is quoted into the thread before the answer, because Slack cannot move a user's message into a thread.
+- it is a thread, started by the bot. saying "start a secret chat" uses that message as the root; `/nugget secret` posts its own root and immediately replies in the thread. a later main-DM message is quoted into the thread before the answer, because Slack cannot move a user's message into a thread.
 - no rows in `messages`, no embeddings, no memory/notes in the prompt. Turns live in process memory (`SECRET_CHAT_TTL_MINUTES`, default 120) and a restart forgets them.
 - the only thing on disk is a marker row `dm_secret_threads (user_id, thread_ts, expires_at)` that lasts until you end the chat. It stores no content; it stops a restart from silently treating an old secret thread as a normal, saved chat.
 - tools are read-only: `SECRET_CHAT_TOOLS=web` (default) allows `search_web`, `fetch_url`, `get_weather`, `roll_dice` and `nugget_fact`; `none` disables tools. Nothing can post, save, schedule, email or upload.

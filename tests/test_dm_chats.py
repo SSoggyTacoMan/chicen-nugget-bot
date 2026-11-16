@@ -265,9 +265,16 @@ def test_cmd_secret_posts_to_the_bot_dm(env):
 
     asyncio.run(cmd_secret(AsyncMock(), command, client))
 
-    posted = client.chat_postMessage.await_args.kwargs
-    assert posted["channel"] == "D_BOT"
-    assert posted["text"] == dm_chats.SECRET_PREVIEW
+    calls = client.chat_postMessage.await_args_list
+    assert len(calls) == 2
+    root, opener = calls[0].kwargs, calls[1].kwargs
+    assert root["channel"] == "D_BOT"
+    assert root["text"] == dm_chats.SECRET_PREVIEW
+    assert "thread_ts" not in root or root["thread_ts"] is None
+    # The bot starts the thread itself instead of waiting for a reply.
+    assert opener["channel"] == "D_BOT"
+    assert opener["thread_ts"] == "9.0"
+    assert opener["text"] == dm_chats.SECRET_REPLY_PREVIEW
     assert env.is_secret_thread("U_OWNER", "9.0") is True
 
 

@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 SECRET_ROOT = (
     "🔒 *secret chat*\n"
     "nothing in this thread is saved to my database, and I won't remember it "
-    "later. reply here so even your own messages stay out of the main DM list."
+    "later. talk here and I'll keep it in memory only."
 )
 SECRET_PREVIEW = "🔒 secret chat"
 SECRET_REPLY_PREVIEW = "🔒 secret chat reply"
@@ -61,6 +61,7 @@ _SECRET_BURN_RE = re.compile(
     r"^\s*burn\s+(?:this|the|our)\s+(?:secret\s+)?(?:chat|thread|conversation)\b",
     re.IGNORECASE,
 )
+_NUGGET_PREFIX_RE = re.compile(r"^\s*(?:/nugget|nugget)\b\s*[:,]?\s*", re.IGNORECASE)
 _CONTINUE_RE = re.compile(
     r"^\s*(?:continue|same\s+chat|go\s+on|keep\s+going|more)\b[:,]?\s*",
     re.IGNORECASE,
@@ -238,6 +239,23 @@ def secret_intent(text: str) -> tuple[str, str] | None:
     cleaned = (text or "").strip()
     if not cleaned:
         return None
+    prefixed = False
+    match = _NUGGET_PREFIX_RE.match(cleaned)
+    if match:
+        cleaned = cleaned[match.end() :].strip()
+        prefixed = True
+        if not cleaned:
+            return None
+    if prefixed and cleaned.lower() in {"secret", "incognito"}:
+        return ("start", "")
+    if prefixed and cleaned.lower().startswith(("secret ", "incognito ")):
+        tail = re.sub(
+            r"^(?:chat|thread|conversation)\b[:,]?\s*",
+            "",
+            cleaned.split(None, 1)[1].strip(),
+            flags=re.IGNORECASE,
+        )
+        return ("start", _title(tail))
     if _SECRET_BURN_RE.match(cleaned):
         return ("burn", "")
     if _SECRET_END_RE.match(cleaned):
@@ -667,19 +685,9 @@ async def cmd_secret(ack, command, client) -> None:
     )
 
 
-async def start_secret_chat(
-    client,
-    channel: str,
-    user: str,
-    title: str = "",
-    *,
-    root_ts: str | None = None,
-) -> None:
-    db = runtime.db
-    if db is None:
-        return
-    blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": SECRET_ROOT}},
+def _secret_blocks(text: str) -> list[dict[str, Any]]:
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
         {
             "type": "actions",
             "elements": [
@@ -699,15 +707,35 @@ async def start_secret_chat(
             ],
         },
     ]
-    response = await post(
-        client,
-        channel,
-        SECRET_PREVIEW,
-        blocks=blocks,
-        notification_text=SECRET_PREVIEW,
-        thread_ts=root_ts,
-    )
-    root = str(root_ts or (response or {}).get("ts") or "")
+
+
+async def start_secret_chat(
+    client,
+    channel: str,
+    user: str,
+    title: str = "",
+    *,
+    root_ts: str | None = None,
+) -> None:
+    """Create a secret chat and start its thread immediately.
+
+    With ``root_ts`` (a plain-word start) the thread hangs under that message.
+    Without it (a slash command has no message) the bot posts its own root in
+    the DM and then replies in the thread, so the thread exists right away
+    instead of waiting for the user to open one.
+    """
+    db = runtime.db
+    if db is None:
+        return
+    root = str(root_ts or "")
+    if not root:
+        response = await post(
+            client,
+            channel,
+            SECRET_PREVIEW,
+            notification_text=SECRET_PREVIEW,
+        )
+        root = str((response or {}).get("ts") or "")
     if not root:
         await post_ephemeral(
             client,
@@ -717,20 +745,30 @@ async def start_secret_chat(
             "(not Boi's) and i'll keep it there.",
         )
         return
+
+    label = f" *{_title(title)}*" if title else ""
+    opener = f"{SECRET_ROOT}{label}\n\nwhat's up?"
+    await post(
+        client,
+        channel,
+        opener,
+        blocks=_secret_blocks(opener),
+        notification_text=SECRET_REPLY_PREVIEW,
+        thread_ts=root,
+    )
+
     ttl = max(5, int(getattr(runtime.settings, "secret_chat_ttl_minutes", 120)))
     db.mark_secret_thread(
         user, root, expires_at=iso(utcnow() + timedelta(minutes=ttl))
     )
     db.set_active_dm_chat(user, root)
     secret_chat(user, root, create=True)
-    label = f" *{_title(title)}*" if title else ""
     await post_ephemeral(
         client,
         channel,
         user,
         f"🔒 secret chat{label} started. nothing is saved, and it self-destructs after "
-        f"{ttl} minutes idle or `/nugget end`. "
-        + ("keep talking in this thread." if root_ts else "reply in the thread.")
+        f"{ttl} minutes idle or `/nugget end`. the thread is open above.",
     )
 
 
