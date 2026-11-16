@@ -346,7 +346,7 @@ DMs used to be one endless conversation. Now each DM chat is its own thread, roo
 - `/nugget forget` wipes the active chat; `/nugget forget all` wipes every DM chat.
 - `DM_CHATS=false` restores the old single-timeline DM behavior. Secret chats still work and stay secret.
 
-`/nugget secret [title]` starts a chat that is not saved:
+`/nugget secret [title]` starts a chat that is not saved. Plain words work too: "start a secret chat", "end the secret chat", "burn this chat".
 
 - no rows in `messages`, no embeddings, no memory/notes in the prompt. Turns live in process memory (`SECRET_CHAT_TTL_MINUTES`, default 120) and a restart forgets them.
 - the only thing on disk is a marker row `dm_secret_threads (user_id, thread_ts, expires_at)` that lasts until you end the chat. It stores no content; it stops a restart from silently treating an old secret thread as a normal, saved chat.

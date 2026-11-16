@@ -46,6 +46,21 @@ _NEW_CHAT_RE = re.compile(
     r"(?:chat|thread|topic|conversation)\b[:,]?\s*",
     re.IGNORECASE,
 )
+_SECRET_START_RE = re.compile(
+    r"^\s*(?:(?:can\s+we|let'?s|i\s+want\s+to|i\s+wanna|please)\s+)?"
+    r"(?:(?:start|begin|open|new|make|create|do)\s+)?"
+    r"(?:a\s+|an\s+|my\s+)?secret\s+(?:chat|thread|conversation)\b[:,]?\s*",
+    re.IGNORECASE,
+)
+_SECRET_END_RE = re.compile(
+    r"^\s*(?:end|close|stop|finish)\s+(?:the\s+|this\s+|my\s+)?secret\s+"
+    r"(?:chat|thread|conversation)\b",
+    re.IGNORECASE,
+)
+_SECRET_BURN_RE = re.compile(
+    r"^\s*burn\s+(?:this|the|our)\s+(?:secret\s+)?(?:chat|thread|conversation)\b",
+    re.IGNORECASE,
+)
 _CONTINUE_RE = re.compile(
     r"^\s*(?:continue|same\s+chat|go\s+on|keep\s+going|more)\b[:,]?\s*",
     re.IGNORECASE,
@@ -216,6 +231,21 @@ def split_new_chat(text: str) -> tuple[bool, str]:
         return False, (text or "").strip()
     rest = (text or "")[match.end() :].strip()
     return True, rest
+
+
+def secret_intent(text: str) -> tuple[str, str] | None:
+    """Plain-word secret chat controls, so nobody needs the slash command."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    if _SECRET_BURN_RE.match(cleaned):
+        return ("burn", "")
+    if _SECRET_END_RE.match(cleaned):
+        return ("end", "")
+    match = _SECRET_START_RE.match(cleaned)
+    if match:
+        return ("start", _title(cleaned[match.end() :].strip()))
+    return None
 
 
 async def _same_chat_with_jev(text: str, recent: list[str]) -> bool:
@@ -455,6 +485,24 @@ async def _dm_only(client, command, what: str = "this") -> bool:
     return False
 
 
+async def bot_dm(client, user: str, fallback: str) -> str:
+    """The bot app's own DM with this user, never Boi's DM.
+
+    Slash commands are handled by the bot app even when they are typed in a
+    DM with the Boi user account. The bot app is not a member of that DM, so
+    chat.postMessage fails there. conversations.open resolves the DM that
+    actually belongs to this token.
+    """
+    try:
+        opened = await client.conversations_open(users=user)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("could not open the bot DM for %s: %s", user, error_code(exc))
+        return fallback
+    data = opened.data if hasattr(opened, "data") else opened
+    channel = ((data or {}).get("channel") or {}).get("id") if isinstance(data, dict) else None
+    return str(channel or fallback)
+
+
 async def _list_chats(client, channel: str, user: str) -> None:
     db = runtime.db
     rows = db.dm_chats(user, 15) if db else []
@@ -478,15 +526,17 @@ async def cmd_chats(ack, command, client) -> None:
     await ack()
     if not await _dm_only(client, command, "chat history"):
         return
-    await _list_chats(client, command["channel_id"], command["user_id"])
+    user = command["user_id"]
+    channel = await bot_dm(client, user, command["channel_id"])
+    await _list_chats(client, channel, user)
 
 
 async def cmd_chat(ack, command, client) -> None:
     await ack()
     if not await _dm_only(client, command):
         return
-    channel = command["channel_id"]
     user = command["user_id"]
+    channel = await bot_dm(client, user, command["channel_id"])
     sub, _, rest = (command.get("text") or "").strip().partition(" ")
     sub = sub.lower()
     rest = rest.strip()
@@ -520,10 +570,12 @@ async def cmd_newchat(ack, command, client) -> None:
     await ack()
     if not await _dm_only(client, command):
         return
+    user = command["user_id"]
+    channel = await bot_dm(client, user, command["channel_id"])
     await start_new_chat(
         client,
-        command["channel_id"],
-        command["user_id"],
+        channel,
+        user,
         (command.get("text") or "").strip(),
     )
 
@@ -602,13 +654,15 @@ async def cmd_secret(ack, command, client) -> None:
     await ack()
     if not await _dm_only(client, command, "secret chat"):
         return
+    user = command["user_id"]
+    channel = await bot_dm(client, user, command["channel_id"])
     if not getattr(runtime.settings, "secret_chats", True):
-        await post_ephemeral(client, command["channel_id"], command["user_id"], "secret chats are turned off.")
+        await post_ephemeral(client, channel, user, "secret chats are turned off.")
         return
     await start_secret_chat(
         client,
-        command["channel_id"],
-        command["user_id"],
+        channel,
+        user,
         (command.get("text") or "").strip(),
     )
 
@@ -647,7 +701,13 @@ async def start_secret_chat(client, channel: str, user: str, title: str = "") ->
     )
     root = str((response or {}).get("ts") or "")
     if not root:
-        await post_ephemeral(client, channel, user, "couldn't start a secret chat. try again?")
+        await post_ephemeral(
+            client,
+            channel,
+            user,
+            "couldn't post in this DM. run `/nugget secret` in my own DM "
+            "(not Boi's) and i'll keep it there.",
+        )
         return
     ttl = max(5, int(getattr(runtime.settings, "secret_chat_ttl_minutes", 120)))
     db.mark_secret_thread(
@@ -666,23 +726,32 @@ async def start_secret_chat(client, channel: str, user: str, title: str = "") ->
     )
 
 
+async def end_active_secret(
+    client, channel: str, user: str, *, burn: bool = False
+) -> bool:
+    db = runtime.db
+    if db is None:
+        return False
+    thread_ts = db.active_dm_chat(user)
+    if not thread_ts or not db.is_secret_thread(user, thread_ts):
+        rows = db.secret_threads(user)
+        thread_ts = str(rows[0]["thread_ts"]) if rows else None
+    if not thread_ts:
+        return False
+    await _end_secret(client, channel, user, thread_ts, burn=burn)
+    return True
+
+
 async def cmd_end(ack, command, client) -> None:
     await ack()
     if not await _dm_only(client, command, "secret chat"):
         return
-    channel = command["channel_id"]
     user = command["user_id"]
+    channel = await bot_dm(client, user, command["channel_id"])
     text = (command.get("text") or "").lower()
     burn = "--burn" in text or "burn" in text.split()
-    db = runtime.db
-    thread_ts = db.active_dm_chat(user) if db else None
-    if not thread_ts or not db.is_secret_thread(user, thread_ts):
-        rows = db.secret_threads(user) if db else []
-        thread_ts = str(rows[0]["thread_ts"]) if rows else None
-    if not thread_ts:
+    if not await end_active_secret(client, channel, user, burn=burn):
         await post_ephemeral(client, channel, user, "no secret chat is active.")
-        return
-    await _end_secret(client, channel, user, thread_ts, burn=burn)
 
 
 async def _end_secret(

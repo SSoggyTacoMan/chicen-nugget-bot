@@ -387,6 +387,16 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
         return
     if not text and images:
         text = "Describe or look at this image."
+    intent = dm_chats.secret_intent(text)
+    if intent is not None:
+        action, title = intent
+        if action == "start":
+            await dm_chats.start_secret_chat(client, event["channel"], user_id, title)
+        elif not await dm_chats.end_active_secret(
+            client, event["channel"], user_id, burn=action == "burn"
+        ):
+            await post(client, event["channel"], "no secret chat is active.")
+        return
     if asks_for_silence(text) or is_ignored_message(text):
         return
     retry = user_retry_after(user_id)

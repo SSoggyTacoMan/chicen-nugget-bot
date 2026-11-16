@@ -111,6 +111,20 @@ def test_split_new_chat_prefix():
     assert dm_chats.split_new_chat("hello there") == (False, "hello there")
 
 
+def test_secret_intent_plain_words():
+    assert dm_chats.secret_intent("start a secret chat about rust") == (
+        "start",
+        "about rust",
+    )
+    assert dm_chats.secret_intent("secret chat") == ("start", "")
+    assert dm_chats.secret_intent("can we do a secret chat") == ("start", "")
+    assert dm_chats.secret_intent("end the secret chat") == ("end", "")
+    assert dm_chats.secret_intent("close this secret chat") == ("end", "")
+    assert dm_chats.secret_intent("burn this chat") == ("burn", "")
+    assert dm_chats.secret_intent("the secret chat feature is cool") is None
+    assert dm_chats.secret_intent("hello") is None
+
+
 def test_first_dm_starts_a_thread(env):
     route = _route(_event("hello", "1.0"))
     assert route.conversation == "dm:U_OWNER:1.0"
@@ -221,6 +235,40 @@ def test_secret_store_ttl_prune(env):
     chat.last_used = 0.0
     dm_chats.prune_secret(now=10_000_000.0)
     assert dm_chats.secret_chat("U_OWNER", "7.0") is None
+
+
+def test_bot_dm_opens_the_bot_conversation():
+    client = MagicMock()
+    client.conversations_open = AsyncMock(
+        return_value=SimpleNamespace(data={"channel": {"id": "D_BOT"}})
+    )
+    assert asyncio.run(dm_chats.bot_dm(client, "U_OWNER", "D_BOI")) == "D_BOT"
+    client.conversations_open.assert_awaited_once_with(users="U_OWNER")
+
+
+def test_bot_dm_falls_back_when_open_fails():
+    client = MagicMock()
+    client.conversations_open = AsyncMock(side_effect=RuntimeError("missing_scope"))
+    assert asyncio.run(dm_chats.bot_dm(client, "U_OWNER", "D_BOI")) == "D_BOI"
+
+
+def test_cmd_secret_posts_to_the_bot_dm(env):
+    from bot.features.dm_chats import cmd_secret
+
+    client = MagicMock()
+    client.conversations_open = AsyncMock(
+        return_value=SimpleNamespace(data={"channel": {"id": "D_BOT"}})
+    )
+    client.chat_postMessage = AsyncMock(return_value=SimpleNamespace(data={"ts": "9.0"}))
+    client.chat_postEphemeral = AsyncMock(return_value=SimpleNamespace(data={}))
+    command = {"channel_id": "D_BOI", "user_id": "U_OWNER", "text": "thoughts"}
+
+    asyncio.run(cmd_secret(AsyncMock(), command, client))
+
+    posted = client.chat_postMessage.await_args.kwargs
+    assert posted["channel"] == "D_BOT"
+    assert posted["text"] == dm_chats.SECRET_PREVIEW
+    assert env.is_secret_thread("U_OWNER", "9.0") is True
 
 
 def test_secret_tools_are_read_only(db):
