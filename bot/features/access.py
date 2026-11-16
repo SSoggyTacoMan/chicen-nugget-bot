@@ -1,4 +1,8 @@
-"""Tier 2 access requests: modal -> admin approval -> private channel invite."""
+"""Tier 2 access requests: modal -> admin approval -> private channel invite.
+
+The request/approval flow is adapted from NovaBot's channel requests
+(https://github.com/aelithron/novabot-slack).
+"""
 
 from __future__ import annotations
 
@@ -330,7 +334,10 @@ async def _notify_admins(client, request_id: int, user_id: str, reason: str) -> 
     fallback = f"tier 2 access request #{request_id} from <@{user_id}>: {escape_mrkdwn(reason) or 'no reason given'}"
     blocks = _request_blocks(request)
     adm_chan = admin_channel_id()
-    targets = [adm_chan] if adm_chan else (sorted(settings.admin_user_ids) or ([settings.owner_user_id] if settings.owner_user_id else []))
+    targets = [adm_chan] if adm_chan else (
+        sorted(settings.admin_user_ids | settings.moderator_user_ids)
+        or ([settings.owner_user_id] if settings.owner_user_id else [])
+    )
     first: tuple[str, str] | None = None
     for target in targets:
         result = await post(client, target, fallback, blocks=blocks)
@@ -370,8 +377,8 @@ async def _decision_blocks(
 async def on_approve(ack, body, client) -> None:
     await ack()
     admin_id = (body.get("user") or {}).get("id")
-    if not runtime.settings.is_admin(admin_id):
-        await _ephemeral_to(body, client, "only admins can approve access requests.")
+    if not runtime.settings.can_moderate(admin_id):
+        await _ephemeral_to(body, client, "only moderators/admins can approve access requests.")
         return
     request_id = _action_value(body)
     request = runtime.db.access_request(request_id) if request_id else None
@@ -409,8 +416,8 @@ async def on_approve(ack, body, client) -> None:
 async def on_deny(ack, body, client) -> None:
     await ack()
     admin_id = (body.get("user") or {}).get("id")
-    if not runtime.settings.is_admin(admin_id):
-        await _ephemeral_to(body, client, "only admins can deny access requests.")
+    if not runtime.settings.can_moderate(admin_id):
+        await _ephemeral_to(body, client, "only moderators/admins can deny access requests.")
         return
     request_id = _action_value(body)
     request = runtime.db.access_request(request_id) if request_id else None
@@ -468,7 +475,7 @@ async def on_deny_submit(ack, body, view, client) -> None:
     except json.JSONDecodeError:
         return
     admin_id = metadata.get("admin") or (body.get("user") or {}).get("id")
-    if not runtime.settings.is_admin(admin_id):
+    if not runtime.settings.can_moderate(admin_id):
         return
     request_id = metadata.get("id")
     request = runtime.db.access_request(int(request_id)) if request_id else None
@@ -509,8 +516,8 @@ async def cmd_accesspanel(ack, command, client) -> None:
     await ack()
     user_id = command.get("user_id")
     channel_id = command.get("channel_id")
-    if not runtime.settings.is_admin(user_id):
-        await post_ephemeral(client, channel_id, user_id, "only admins can post the access panel.")
+    if not runtime.settings.can_moderate(user_id):
+        await post_ephemeral(client, channel_id, user_id, "only moderators/admins can post the access panel.")
         return
     target = _first_channel_arg(command.get("text", ""))
     panel_channel = target or runtime.settings.access_panel_channel_id or channel_id
@@ -527,8 +534,8 @@ async def cmd_pending(ack, command, client) -> None:
     await ack()
     user_id = command.get("user_id")
     channel_id = command.get("channel_id")
-    if not runtime.settings.is_admin(user_id):
-        await post_ephemeral(client, channel_id, user_id, "only admins can see pending requests.")
+    if not runtime.settings.can_moderate(user_id):
+        await post_ephemeral(client, channel_id, user_id, "only moderators/admins can see pending requests.")
         return
     rows = runtime.db.pending_access()
     if not rows:

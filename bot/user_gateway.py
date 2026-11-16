@@ -3,12 +3,16 @@
 Maintains a client WebSocket connection to Slack for:
 1. Real-time typing indicators in DMs and threads ("User is typing...").
 2. Direct message handling and explicit mentions for the personal AI assistant identity.
+
+The "own slack account, always online, typing indicator" pattern is inspired by
+noodle (https://github.com/MatthiasLubbertsen/noodle).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import urllib.parse
 from collections import deque
 from contextlib import asynccontextmanager, suppress
@@ -18,6 +22,7 @@ import aiohttp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from bot.ai.limits import user_retry_after
+from bot.features.followup import BOI_RE, conversation_lines, looks_like_followup
 from bot.runtime import runtime
 from bot.slack_api import fetch_slack_images, transcribe_slack_audio
 from bot.utils.text import (
@@ -32,6 +37,25 @@ from bot.utils.text import (
 )
 
 logger = logging.getLogger(__name__)
+
+# (channel, thread_ts) -> monotonic time of boi's last unprompted thread reply.
+_last_thread: dict[tuple[str, str], float] = {}
+_THREAD_TRACKING_MAX = 500
+
+
+def _prune_tracking() -> None:
+    """Drop stale cooldowns so a long-running process doesn't grow forever."""
+    if len(_last_thread) <= _THREAD_TRACKING_MAX:
+        return
+    cutoff = time.monotonic() - 3600.0
+    for key, stamp in list(_last_thread.items()):
+        if stamp < cutoff:
+            _last_thread.pop(key, None)
+
+
+def _looks_named(text: str) -> bool:
+    """True when a message addresses boi by name instead of @mentioning it."""
+    return bool(BOI_RE.search(text or ""))
 
 
 class UserGateway:
@@ -256,7 +280,7 @@ class UserGateway:
 
         channel = event.get("channel") or ""
         text = (event.get("text") or "").strip()
-        if has_owner_signature(text):
+        if has_owner_signature(text) and sender_id == runtime.settings.owner_user_id:
             return
         if is_ignored_message(text):
             return
@@ -271,13 +295,19 @@ class UserGateway:
             None if (is_dm or is_mpim) and not thread_ts else root_ts
         )
 
-        if not (is_dm or is_mention):
-            return
-
         settings = runtime.settings
         # If bot account was explicitly tagged, let the bot account handle it
         if runtime.bot_user_id and f"<@{runtime.bot_user_id}>" in text:
             return
+
+        if not (is_dm or is_mention):
+            followup_lines = await self._thread_followup(event, is_mpim=is_mpim)
+            if followup_lines is None:
+                return
+            followup = True
+        else:
+            followup = False
+            followup_lines = None
 
         # Permission check
         if is_dm:
@@ -294,7 +324,9 @@ class UserGateway:
 
         retry = user_retry_after(sender_id)
         if retry:
-            if self.user_client:
+            # A follow-up that trips the rate limit just stays quiet, like the
+            # bot app does; only asked-for replies get the nudge.
+            if not followup and self.user_client:
                 with suppress(Exception):
                     await self.user_client.chat_postMessage(
                         channel=channel,
@@ -329,12 +361,30 @@ class UserGateway:
             return
 
         trigger = "dm" if is_dm else ("mpim_mention" if is_mpim else "mention")
+        if followup:
+            trigger = "thread_followup"
         if is_dm:
             conv_key = f"user_dm:{sender_id}"
         elif is_mpim:
             conv_key = f"user_mpim:{channel}"
         else:
             conv_key = f"user_ch:{channel}:{root_ts}"
+
+        context_lines = followup_lines
+        if context_lines is None and not is_dm:
+            # Mentions can be one word ("advice?"), so hand the model the
+            # messages they are answering.
+            read, _humans, _last = await conversation_lines(
+                self.user_client,
+                channel,
+                thread_ts=thread_ts,
+                current_ts=event.get("ts"),
+                agent_user_id=self.user_id or runtime.user_id or "",
+                limit=20 if thread_ts else 12,
+                keep=4,
+            )
+            context_lines = read
+        context = "\n".join((context_lines or [])[-4:])
         try:
             async with (
                 runtime.lock(conv_key),
@@ -351,6 +401,7 @@ class UserGateway:
                     trigger=trigger,
                     jev="",
                     images=images,
+                    context=context,
                     public_veto=bool(not is_dm and not is_mpim),
                     client=self.user_client,
                 )
@@ -383,3 +434,68 @@ class UserGateway:
                         await asyncio.sleep(delay)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("failed to post user reply to %s: %s", channel, exc)
+        if followup and thread_ts:
+            _last_thread[(channel, thread_ts)] = time.monotonic()
+            _prune_tracking()
+
+    async def _thread_followup(
+        self, event: dict[str, Any], *, is_mpim: bool
+    ) -> list[str] | None:
+        """Keep an unmentioned thread reply flowing after boi already answered.
+
+        Returns the thread's recent lines when the message reads as addressed to
+        boi, or None when it should stay quiet. This mirrors the bot app's
+        `_handle_thread_continuation`, which only ever looks at its own threads.
+        """
+        settings = runtime.settings
+        channel = event.get("channel") or ""
+        thread_ts = event.get("thread_ts")
+        ts = event.get("ts")
+        text = (event.get("text") or "").strip()
+        if not channel or not thread_ts or not ts or thread_ts == ts or not text:
+            return None
+        if is_mpim:
+            return None  # group DMs stay mention-only
+        if not settings.ai_allowed(channel):
+            return None
+        db = runtime.db
+        if db is None or not db.is_thread(channel, thread_ts, owner="user"):
+            return None
+        if db.kv_get("config:thread_followups") == "false":
+            return None
+        lines, humans, boi_last = await conversation_lines(
+            self.user_client,
+            channel,
+            thread_ts=thread_ts,
+            current_ts=ts,
+            agent_user_id=self.user_id or runtime.user_id or "",
+        )
+        named = _looks_named(text)
+        if (
+            not boi_last
+            and not named
+            and db.is_thread(channel, thread_ts, owner="bot")
+        ):
+            # The bot app spoke last in a thread both identities joined, so the
+            # follow-up belongs to it instead of doubling up.
+            return None
+        if not looks_like_followup(
+            text=text,
+            bot_last=boi_last,
+            humans=humans,
+            has_images=bool(event.get("files")),
+            named=named,
+        ):
+            return None
+        cooldown = settings.ai_thread_cooldown
+        key = (channel, thread_ts)
+        if (
+            isinstance(cooldown, (int, float))
+            and cooldown > 0
+            and not named
+            and time.monotonic() - _last_thread.get(key, 0.0) < cooldown
+        ):
+            logger.info("boi thread followup cooled down in %s", channel)
+            return None
+        logger.info("boi following up in %s/%s", channel, thread_ts)
+        return lines

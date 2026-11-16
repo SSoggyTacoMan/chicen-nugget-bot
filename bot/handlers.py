@@ -2,7 +2,18 @@ from __future__ import annotations
 
 import logging
 
-from bot.features import access, agent, polls, recaps, router, setup, shortcuts, threads, welcomer
+from bot.features import (
+    access,
+    agent,
+    dm_chats,
+    polls,
+    recaps,
+    router,
+    setup,
+    shortcuts,
+    threads,
+    welcomer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +31,7 @@ def register(app) -> None:
     setup.register(app)
     router.register(app)
     shortcuts.register(app)
+    dm_chats.register(app)
 
     app.error(_on_error)
 

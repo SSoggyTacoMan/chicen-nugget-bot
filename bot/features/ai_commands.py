@@ -198,12 +198,42 @@ async def cmd_forget(ack, command, client) -> None:
     user = command["user_id"]
     settings = runtime.settings
     if channel.startswith("D"):
-        cleared = runtime.db.clear_history(f"dm:{user}")
+        from bot.features import dm_chats
+
+        db = runtime.db
+        target = (command.get("text") or "").strip().lower()
+        if target in {"all", "*", "everything"}:
+            cleared = db.clear_history_prefix(f"dm:{user}")
+            cleared += dm_chats.clear_all_secret(user)
+            for row in db.secret_threads(user, limit=100):
+                db.unmark_secret_thread(user, str(row["thread_ts"]))
+            db.set_active_dm_chat(user, None)
+            await post_ephemeral(
+                client,
+                channel,
+                user,
+                f"wiped *{cleared}* stored turns from every DM chat. notes are untouched. :broom:",
+            )
+            return
+        active = db.active_dm_chat(user)
+        if active and db.is_secret_thread(user, active):
+            cleared = dm_chats.clear_secret(user, active)
+            await post_ephemeral(
+                client,
+                channel,
+                user,
+                f"wiped *{cleared}* in-memory turns from this secret chat. "
+                "it is still active; `/nugget end` also closes it.",
+            )
+            return
+        conversation = f"dm:{user}:{active}" if active else f"dm:{user}"
+        cleared = db.clear_history(conversation)
+        label = "this chat" if active else "our DM"
         await post_ephemeral(
             client,
             channel,
             user,
-            f"wiped *{cleared}* stored turns from our DM. notes are untouched. :broom:",
+            f"wiped *{cleared}* stored turns from {label}. notes are untouched. :broom:",
         )
         return
     if not settings.is_admin(user):

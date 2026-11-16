@@ -202,6 +202,7 @@ class Agent:
         context: str = "",
         public_veto: bool = False,
         client: AsyncWebClient | None = None,
+        secret: Any | None = None,
     ) -> str:
         """Run one agent turn (with tools) and persist both sides of it."""
         if not self.settings.ai_enabled:
@@ -235,15 +236,23 @@ class Agent:
             image_settings.imagine_config(self.settings, self.db).model or "none"
         )
         fast_model = self._fast_model() or "none"
-        history = self.db.history(conversation, self.settings.ai_history_limit)
+        history = (
+            secret.history(self.settings.ai_history_limit)
+            if secret is not None
+            else self.db.history(conversation, self.settings.ai_history_limit)
+        )
         role = "owner" if user_id == self.settings.owner_user_id else "guest"
         location = await self._location(
             channel_id, is_dm, is_mpim=is_mpim, client=active_client
         )
         memory = (
-            get_user_memory_prompt(self.db, self.settings, user_id)
-            if (role == "owner" or self.settings.is_admin(user_id))
-            else "none"
+            "none"
+            if secret is not None
+            else (
+                get_user_memory_prompt(self.db, self.settings, user_id)
+                if (role == "owner" or self.settings.is_admin(user_id))
+                else "none"
+            )
         )
         integrations_text = integrations.prompt_integration_lines(
             self.db,
@@ -263,6 +272,10 @@ class Agent:
             .replace("{user_id}", user_id)
             .replace("{is_owner}", "yes" if role == "owner" else "no")
             .replace("{is_admin}", "yes" if self.settings.is_admin(user_id) else "no")
+            .replace(
+                "{is_moderator}",
+                "yes" if self.settings.is_moderator(user_id) else "no",
+            )
             .replace("{owner_id}", self.settings.owner_user_id)
             .replace("{location}", location)
             .replace("{trigger}", TRIGGER_TEXT.get(trigger, TRIGGER_TEXT["mention"]))
@@ -286,6 +299,10 @@ class Agent:
         )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+        if secret is not None:
+            from bot.features.dm_chats import SECRET_SYSTEM
+
+            messages.append({"role": "system", "content": SECRET_SYSTEM})
         messages.extend(fit_history(history, text, self.settings.ai_max_context_chars))
         if images:
             user_content: list[dict[str, Any]] = [
@@ -295,24 +312,30 @@ class Agent:
                 user_content.append({"type": "image_url", "image_url": {"url": img}})
             messages.append({"role": "user", "content": user_content})
             stored_text = text if not images else f"{text} [image attached]".strip()
-            message_id = self.db.add_message(conversation, "user", user_id, stored_text)
-            self._remember(
-                message_id=message_id,
-                conversation=conversation,
-                role="user",
-                user_id=user_id,
-                text=stored_text,
-            )
+            if secret is not None:
+                secret.add("user", user_id, stored_text)
+            else:
+                message_id = self.db.add_message(conversation, "user", user_id, stored_text)
+                self._remember(
+                    message_id=message_id,
+                    conversation=conversation,
+                    role="user",
+                    user_id=user_id,
+                    text=stored_text,
+                )
         else:
             messages.append({"role": "user", "content": text[: self.settings.ai_max_context_chars]})
-            message_id = self.db.add_message(conversation, "user", user_id, text)
-            self._remember(
-                message_id=message_id,
-                conversation=conversation,
-                role="user",
-                user_id=user_id,
-                text=text,
-            )
+            if secret is not None:
+                secret.add("user", user_id, text)
+            else:
+                message_id = self.db.add_message(conversation, "user", user_id, text)
+                self._remember(
+                    message_id=message_id,
+                    conversation=conversation,
+                    role="user",
+                    user_id=user_id,
+                    text=text,
+                )
 
         ctx = ToolContext(
             db=self.db,
@@ -329,6 +352,7 @@ class Agent:
             bot_client=self.client,
             owner_client=owner_client,
             assistant_user_id=active_identity_id,
+            ephemeral=secret is not None,
         )
 
         answer = ""
@@ -343,11 +367,13 @@ class Agent:
             for _ in range(MAX_TOOL_ROUNDS):
                 response, provider = await self._chat(
                     messages,
-                    tools=True,
+                    tools=not fast_chat,
                     user_id=user_id,
                     is_user_identity=is_user_identity,
                     code=code_mode,
                     fast=fast_chat,
+                    is_owner=ctx.is_owner or ctx.is_admin,
+                    ephemeral=secret is not None,
                 )
                 used_fallback = used_fallback or provider == "fallback"
                 message = response.choices[0].message
@@ -411,16 +437,19 @@ class Agent:
             )
 
         if answer and answer.strip() not in {"[NO_REPLY]", "NO_REPLY"}:
-            message_id = self.db.add_message(
-                conversation, "assistant", self.bot_user_id, answer
-            )
-            self._remember(
-                message_id=message_id,
-                conversation=conversation,
-                role="assistant",
-                user_id=None,
-                text=answer,
-            )
+            if secret is not None:
+                secret.add("assistant", None, answer)
+            else:
+                message_id = self.db.add_message(
+                    conversation, "assistant", self.bot_user_id, answer
+                )
+                self._remember(
+                    message_id=message_id,
+                    conversation=conversation,
+                    role="assistant",
+                    user_id=None,
+                    text=answer,
+                )
             return answer
         if trigger == "mention" and not answer:
             return "hmm, i blanked. try again?"
@@ -615,6 +644,8 @@ class Agent:
         is_user_identity: bool = False,
         code: bool = False,
         fast: bool = False,
+        is_owner: bool = True,
+        ephemeral: bool = False,
     ) -> tuple[Any, str]:
         models = self._models_for(is_user_identity, code=code, fast=fast)
 
@@ -624,8 +655,18 @@ class Agent:
             "max_tokens": max_tokens or self.settings.ai_max_tokens,
         }
         if tools:
-            kwargs["tools"] = self.toolbox.definitions
+            kwargs["tools"] = self.toolbox.definitions_for(
+                is_owner=is_owner, ephemeral=ephemeral
+            )
             kwargs["tool_choice"] = "auto"
+
+        # Check the budget once per call, not once per candidate model.
+        if self.budget is not None:
+            status = self.budget.status()
+            if status.exhausted:
+                raise BudgetExceeded(status)
+            if user_id and self.budget.user_exhausted(user_id):
+                raise BudgetExceeded(self.budget.user_status(user_id), scope="user")
 
         fallback = self._fallback()
         quota_error: Exception | None = None
@@ -663,14 +704,6 @@ class Agent:
                 provider_kwargs["messages"] = provider_messages
 
             for index, model in enumerate(provider_models):
-                if self.budget is not None:
-                    status = self.budget.status()
-                    if status.exhausted:
-                        raise BudgetExceeded(status)
-                    if user_id and self.budget.user_exhausted(user_id):
-                        raise BudgetExceeded(
-                            self.budget.user_status(user_id), scope="user"
-                        )
                 try:
                     response = await client.chat.completions.create(
                         model=model, **provider_kwargs

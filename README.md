@@ -14,6 +14,8 @@ if something feels off, `/nugget doctor` is the first stop. it checks scopes, to
 ## what it does
 
 - mentions, name calls like "hey nugget", dms, group dms, thread follow-ups and optional ambient replies
+- dm chats: one thread per conversation, with `/nugget chats`, `/nugget chat new` and follow-up detection
+- secret chats: `/nugget secret` keeps a conversation in memory only, read-only tools, discreet notification previews and an opt-in `--burn`
 - search across slack messages and files, plus channel join, leave, create, topic, invite and pin tools
 - reaction shortcuts and message shortcuts for research, explain and thread summaries
 - persistent code sandboxes with file edits, background jobs, uploads and branch push
@@ -52,7 +54,9 @@ you can split the credentials: `SLACK_USER_TOKEN` (ideally `xoxp`) handles api c
 - typing: a typing frame goes out every 2.5 seconds while the model runs.
 - messages: bots, its own messages, the bot account, duplicate timestamps and unrelated thread chatter get ignored.
 - group dms: boi answers when someone `@mentions` it. private dm history and group history stay separate.
-- threads: in channels it follows a thread only if the agent already knows it. dm threads stay in the thread they started in.
+- threads: in channels boi follows a thread it already answered, so a follow-up question doesn't need another ping. threads the bot app owns stay with the bot app. dm threads stay in the thread they started in.
+- dm chats: each dm conversation gets its own thread, rooted at the message that started it. `/nugget chats` lists them, `/nugget chat new` starts one, and `/nugget secret` starts a chat that is never saved. secret replies use a generic notification fallback so previews don't show the text.
+- context: mentions carry the last few channel or thread lines, so a one-word ping like "advice?" still knows what it's about.
 - reconnects: slack sends a `reconnect_url` frame, and the gateway falls back to `client.getWebSocketURL` with exponential backoff.
 - presence: it asks slack for `auto` presence. slack still marks human accounts away after about ten minutes.
 - isolation: workspace admin actions stay on the bot app. a stolen user session can't approve access or change settings.
@@ -240,7 +244,9 @@ scopes: `calendar`, `gmail.modify`, `drive.readonly`, `userinfo.email`. to revok
 
 ### mac
 
-run `scripts/mac_companion.py` on the mac, expose it with a cloudflare tunnel or ngrok, then run `/nugget setup mac`. it can check battery and volume, open apps, files and urls, send notifications, read the clipboard, lock, sleep, speak and run applescript or shell commands.
+run `scripts/mac_companion.py --token <long-random-secret>` on the mac, expose it with a cloudflare tunnel or ngrok, then run `/nugget setup mac`. it can check battery and volume, open apps, files and urls, send notifications, read the clipboard, lock, sleep, speak and run applescript or shell commands.
+
+the bridge is a root-equivalent capability, so it **requires** `--token`, listens on `127.0.0.1` by default, and refuses `run`/`applescript` unless you pass `--allow-shell`. only tunnel it if you accept that anyone with the token can run commands as your mac user.
 
 ### github
 
@@ -329,6 +335,25 @@ change them at runtime:
 /nugget config ai_code_model ...
 ```
 
+### dm chats and secret chats
+
+DMs used to be one endless conversation. Now each DM chat is its own thread, rooted at the message that started it, and `/nugget chats` keeps a small index.
+
+- `/nugget chat new [title]` always starts a new thread. So does saying "new chat ...".
+- otherwise a main-DM message continues the active chat if it lands within `DM_THREAD_MINUTES` (default 5) and looks like a follow-up ("and...", "what about...", a short reply to a bot question). A cold or unrelated message starts a new thread. `DM_THREAD_CLASSIFIER=true` lets Jev decide the borderline ones.
+- replying inside a thread always stays in it.
+- `/nugget forget` wipes the active chat; `/nugget forget all` wipes every DM chat.
+- `DM_CHATS=false` restores the old single-timeline DM behavior. Secret chats still work and stay secret.
+
+`/nugget secret [title]` starts a chat that is not saved:
+
+- no rows in `messages`, no embeddings, no memory/notes in the prompt. Turns live in process memory (`SECRET_CHAT_TTL_MINUTES`, default 120) and a restart forgets them.
+- the only thing on disk is a marker row `dm_secret_threads (user_id, thread_ts, expires_at)` that lasts until you end the chat. It stores no content; it stops a restart from silently treating an old secret thread as a normal, saved chat.
+- tools are read-only: `SECRET_CHAT_TOOLS=web` (default) allows `search_web`, `fetch_url`, `get_weather`, `roll_dice` and `nugget_fact`; `none` disables tools. Nothing can post, save, schedule, email or upload.
+- `SECRET_CHAT_DISCREET=true` sends the body in Block Kit with a generic `SECRET_PREVIEW_TEXT` fallback, so phone notifications, the DM list and thread previews don't show the message. The actual text is only in the opened message.
+- `/nugget end` ends it and wipes memory. `/nugget end --burn` also deletes the bot's own messages with `chat.delete`. Your own messages stay: a bot token can't delete them.
+- slack still stores the conversation, and the model provider still sees it. this is "the bot won't remember", not "nobody can see it".
+
 ## tools
 
 | group | tools |
@@ -400,7 +425,7 @@ SANDBOX_MAX_EXEC_TIMEOUT=600
 
 `/nugget storage` shows data, db, sandbox, browser and log sizes plus free disk. `/nugget storage prune` runs retention now.
 
-retention defaults: conversation history and vectors older than 180 days (`MEMORY_RETENTION_DAYS`), sandboxes unused for 30 days (`SANDBOX_TTL_DAYS`), old job logs after 7 days, and sqlite backups after 7 days. logs already rotate at 2 MB with three backups. `0` disables a retention setting.
+retention defaults: conversation history and vectors older than 180 days (`MEMORY_RETENTION_DAYS`), dm chat rows and secret-chat markers older than that, sandboxes unused for 30 days (`SANDBOX_TTL_DAYS`), old job logs after 7 days, and sqlite backups after 7 days. logs already rotate at 2 MB with three backups. `0` disables a retention setting.
 
 ### browser
 
@@ -461,6 +486,10 @@ assist = kind is help/feedback, or a question that needs live data/tools
 
 a message aimed at another person never triggers an agent turn unless the bot is also addressed. short follow-ups in a thread where the bot spoke last bypass the gate. `needs_tools` becomes a hint so the model fetches data instead of guessing.
 
+mentions carry the last few channel or thread lines as context, so a tagged one-word message ("advice?") can still see what it refers to. thread follow-ups work the same way, with a cooldown (`AI_THREAD_COOLDOWN`) and the same "is this actually for me" checks (`bot/features/followup.py`).
+
+a thread can belong to both identities. whoever spoke last answers an unmentioned follow-up, so the bot app and boi never double up; saying `boi` by name keeps the bot app out of it. group DMs stay mention-only for boi.
+
 the prompt also gives the model a public-channel veto: it can return `[NO_REPLY]` for messages that were not for it or would overshare. public replies containing sandbox, token, host, `.env`, sqlite, setup or model details are suppressed before posting.
 
 mentions and dms skip the gate. errors and timeouts fail closed. `AI_AMBIENT_CHANNELS=*` turns ambient replies on everywhere the bot is a member.
@@ -496,6 +525,10 @@ everything lives under `/nugget`. `/nugget help` is the full list.
 | `/nugget pinggroup [join|leave|panel]` | manage or post the ping-group panel | anyone / admin |
 | `/nugget poll "q" "a" "b"` | live button poll | anyone |
 | `/nugget ask <question>` | one-shot ai answer | ai channels |
+| `/nugget chats` | list your dm chats, one thread each | anyone (dm) |
+| `/nugget chat new [title]` | start a new dm chat thread | anyone (dm) |
+| `/nugget secret [title]` | unsaved in-memory chat, web tools only | anyone (dm) |
+| `/nugget end [--burn]` | end a secret chat, optionally delete my replies | anyone (dm) |
 | `/nugget summarize [n]` | ai catch-up for this channel | ai channels |
 | `/nugget imagine <prompt>` | generate an image | admin |
 | `/nugget speak <text>` | generate a qwen3 voice clip | admin |
@@ -517,6 +550,18 @@ weekly mon 18:00 weekly recap
 ```
 
 times use `TIMEZONE`. the first time expression is removed from the front and the rest becomes the reminder body.
+
+## people and roles
+
+three levels, set in `.env`:
+
+| role | env | can do |
+|---|---|---|
+| owner | `OWNER_USER_ID` | everything: mail, calendar, github, mac, memory, posting as themselves, global settings |
+| admin | `ADMIN_USER_IDS` | co-operator: AI tools, host dev tools (`run_code`, sandbox, browser), moderation. **not** owner-private data by default, cannot post as the owner, gets a separate sandbox namespace |
+| moderator | `MODERATOR_USER_IDS` | tier-2 access approvals and the access panel only. no AI tools, no private data, no host access |
+
+admins are **not** co-owners. if an admin really needs the owner's gmail/calendar/github/mac/notes, set `ADMIN_PRIVATE_ACCESS=true` and accept that they are owner-equivalent. for a completely personal assistant, run a separate instance instead of sharing one.
 
 ## environment
 
@@ -549,15 +594,45 @@ github secrets:
 | `SSH_PORT` | optional, default `22` |
 | `DEPLOY_PATH` | optional, default `slackbot` |
 | `SERVICE_NAME` | optional, default `chicen-nugget-bot` |
+| `SERVICE_USER` | optional, default `chicen`; the non-root account the bot runs as |
 
 editing `.env` directly on the server is temporary. the next deploy rewrites it from `ENV_FILE`. for persistent env changes, update the secret and redeploy. for tokens and non-secret settings, prefer `/nugget setup` and `/nugget config`, which live in sqlite and survive deploys.
 
-`./deploy-remote.sh user@host [remote-dir]` is the manual path. it rsyncs, installs dependencies and writes a systemd unit at `/etc/systemd/system/<service>.service`, assuming the repo is at `/root/slackbot`.
+`./deploy-remote.sh user@host [remote-dir]` is the manual path. it rsyncs, installs dependencies and writes a systemd unit at `/etc/systemd/system/<service>.service`. the unit runs as `SERVICE_USER` (default `chicen`), not root, because the bot exposes shell and browser tools; the script creates the account and chowns the repo if needed.
+
+### giving someone their own instance
+
+the bot is single-tenant by design: one owner, one set of credentials, one database, one sandbox root. `admin` is a trusted co-operator on **your** instance, not a private assistant for someone else. if another person should have their own credentials, channels and memory with no access to yours, give them their own deployment:
+
+```
+./scripts/new-instance.sh alice U012ABCDEF   # creates instances/alice.env, mode 600
+```
+
+then:
+
+1. create a second slack app for them (own bot token, app token, socket mode on) and fill `instances/alice.env`.
+2. deploy it under its own service name, unix user and directory:
+
+```
+SERVICE_NAME=nugget-alice SERVICE_USER=alice \
+  ENV_FILE=instances/alice.env ./deploy-remote.sh root@host alice-bot
+```
+
+`alice` is then the **owner of her own instance**: full tools, her own gmail/github/mac/browser credentials, her own `AI_CHANNELS`, admin channel and database. nothing is shared with your instance, and she is not an admin on yours.
+
+isolation details:
+
+- separate repo dir, `data/`, `logs/`, sandboxes and systemd unit per instance.
+- separate unix user per instance; files are created with umask `077` and the data dir is `0700`, so one instance's `run_code` cannot read the other's database. both still share the host kernel - for a hard boundary use a separate host or container.
+- `instances/` is gitignored and excluded from `rsync`, so env files with tokens never leave the machine they were created on.
+- optionally add them as `MODERATOR_USER_IDS` on your instance if they also help approve access requests. that grants no AI tools, no credentials and no host access.
+
+`ENV_FILE` defaults to the local `.env`.
 
 ## data and security
 
-- storage: one sqlite file at `data/bot.db`. conversation history, notes, reminders, polls, access requests, runtime settings, semantic memory vectors and a key/value store.
-- retention: history is per conversation and trimmed to `AI_HISTORY_LIMIT` turns. `/nugget forget` wipes stored ai memory, including semantic vectors. delete `data/bot.db` to reset everything.
+- storage: one sqlite file at `data/bot.db`. conversation history, notes, reminders, polls, access requests, runtime settings, semantic memory vectors, dm chat titles and secret-chat markers, and a key/value store. secret-chat message content is never written here.
+- retention: history is per conversation and trimmed to `AI_HISTORY_LIMIT` turns. `/nugget forget` wipes the active chat (or `all` DM chats), including semantic vectors. delete `data/bot.db` to reset everything.
 - logs: stdout plus rotating files in `logs/`. tool arguments and reply text can show up in debug logs.
 - secrets: tokens go through slack modals. never paste a token into chat. if you do, rotate it.
 - prompt injection: web pages, files and slack messages are untrusted data, never instructions.
@@ -624,6 +699,15 @@ python main.py
 ```
 
 don't run debug logging on a shared host. tool arguments and reply text can end up in logs.
+
+## credits
+
+this bot is a remix, not an invention. two projects shaped it a lot, and both are worth a look:
+
+- **[noodle](https://github.com/MatthiasLubbertsen/noodle)** by **Matthias Lubbertsen** — the biggest inspiration. the jev reply gate (`bot/ai/gate.py`, `bot/ai/jev.py`), semantic/embedding memory (`bot/ai/memory.py`, `bot/db.py`), per-paragraph reply chunking (`bot/utils/text.py`), the `flaron` directory lookup and exa web search/fetch fallback (`bot/ai/tools.py`), the `run_code` tool surface, quiet hours plus the proactive daily cap, the `# ` ignore prefix, and the "own slack account with a typing indicator" idea (`bot/user_gateway.py`) all started there. some of it was adapted, some reimplemented for a python/bolt-async stack.
+- **[novabot-slack](https://github.com/aelithron/novabot-slack)** by **aelithron** — the daily recap flow (public recap → private recap, with a heads-up before it) in `bot/features/recaps.py`, the tier-2 private-channel request flow in `bot/features/access.py`, and the usergroup ping helpers (don't thread on a ping; post a safe 🧵 anchor) in `bot/features/threads.py` are adapted from it.
+
+thanks to both for publishing their bots and writing them down. if something here should be credited more specifically, open an issue and it'll get fixed.
 
 ## license
 

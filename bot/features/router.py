@@ -42,6 +42,13 @@ from bot.features.commands import (
     cmd_todo,
     cmd_whois,
 )
+from bot.features.dm_chats import (
+    cmd_chat,
+    cmd_chats,
+    cmd_end,
+    cmd_newchat,
+    cmd_secret,
+)
 from bot.features.doctor import cmd_doctor
 from bot.features.huddles import cmd_huddle
 from bot.features.nuggets import cmd_nugget
@@ -103,6 +110,12 @@ SUBCOMMANDS: dict[str, Handler] = {
     "summarize": cmd_summarize,
     "summary": cmd_summarize,
     "forget": cmd_forget,
+    "chats": cmd_chats,
+    "chat": cmd_chat,
+    "newchat": cmd_newchat,
+    "secret": cmd_secret,
+    "incognito": cmd_secret,
+    "end": cmd_end,
     "memory": cmd_memory,
     "imagine": cmd_imagine,
     "huddle": cmd_huddle,

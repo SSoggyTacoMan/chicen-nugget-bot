@@ -10,6 +10,9 @@ Jev answers several questions about the same state in one pass:
 The bot only runs the expensive agent turn when should_reply clears its
 threshold (or the message is clearly for the bot) and it doesn't look like
 spam. Everything fails closed: a broken gate means no unprompted replies.
+
+Inspired by noodle's unprompted-reply gate
+(https://github.com/MatthiasLubbertsen/noodle).
 """
 
 from __future__ import annotations

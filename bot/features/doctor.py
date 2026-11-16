@@ -125,9 +125,8 @@ async def cmd_doctor(ack, command, client) -> None:
     try:
         from bot.features import retention
 
-        lines.append(
-            f"{ok} storage: {retention.storage_report(settings, runtime.db).splitlines()[1]}"
-        )
+        report = await asyncio.to_thread(retention.storage_report, settings, runtime.db)
+        lines.append(f"{ok} storage: {report.splitlines()[1]}")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"{warn} storage: {exc}")
 

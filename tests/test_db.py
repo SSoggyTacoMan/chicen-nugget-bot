@@ -89,11 +89,16 @@ def test_threads_and_kv(tmp_path):
     assert db.is_thread("C1", "123.456", owner="user") is False
     assert db.thread_owner("C1", "123.456") == "bot"
 
-    # Switching owner
+    # Threads can belong to both identities; the last speaker doesn't evict.
     db.mark_thread("C1", "123.456", owner="user")
     assert db.is_thread("C1", "123.456", owner="user") is True
-    assert db.is_thread("C1", "123.456", owner="bot") is False
-    assert db.thread_owner("C1", "123.456") == "user"
+    assert db.is_thread("C1", "123.456", owner="bot") is True
+    assert db.thread_owner("C1", "123.456") == "bot,user"
+    assert db.thread_owners("C1", "123.456") == {"bot", "user"}
+
+    # Re-marking is idempotent.
+    db.mark_thread("C1", "123.456", owner="user")
+    assert db.thread_owner("C1", "123.456") == "bot,user"
 
     db.kv_set("k", "v")
     assert db.kv_get("k") == "v"

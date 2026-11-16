@@ -72,6 +72,11 @@ HELP = """*{bot}: everything lives under `/nugget`*
 
 *ai*
 • `/nugget ask <question>` - one-shot ai answer
+• `/nugget chats` - your DM chats, one thread each
+• `/nugget chat new [title]` - start a new DM chat
+• `/nugget chat use <n>` - switch to an earlier chat
+• `/nugget secret [title]` - unsaved, in-memory chat (web only)
+• `/nugget end [--burn]` - end a secret chat, optionally delete my replies
 • `/nugget summarize [n]` - ai catch-up for this channel
 • `/nugget imagine <prompt> [--wide|--tall|--ratio 4:3]` - image generation
 • `/nugget speak <text>` - generate a voice clip with qwen3 tts
@@ -79,7 +84,8 @@ HELP = """*{bot}: everything lives under `/nugget`*
 • `/nugget imageaccess [list|add @user|remove @user]` - admin: who may make images
 • `/nugget budget` - admin: today's ai spend and limits
 • `/nugget memory [status|search|backfill]` - admin: semantic memory
-• `/nugget forget` - wipe stored ai memory (DM or channel)
+• `/nugget forget` - wipe stored ai memory for this chat (DM or channel)
+• `/nugget forget all` - wipe every DM chat in your DMs
 
 *tasks*
 • `/nugget todo` - list your pending tasks (`/nugget todo all` for all)
@@ -1080,12 +1086,13 @@ async def cmd_storage(ack, command, client) -> None:
     if runtime.db is None:
         await _say(client, command, "database is not available.", ephemeral=True)
         return
-    report = retention.storage_report(runtime.settings, runtime.db)
+    report = await asyncio.to_thread(retention.storage_report, runtime.settings, runtime.db)
     if (command.get("text") or "").strip().lower() == "prune":
-        result = retention.prune_now(runtime.db, runtime.settings)
+        result = await asyncio.to_thread(retention.prune_now, runtime.db, runtime.settings)
         report += (
             f"\n• pruned: {result['messages']} messages, {result['vectors']} vectors, "
-            f"{result['sandboxes']} sandboxes, {result['backups']} backups"
+            f"{result['sandboxes']} sandboxes, {result['backups']} backups, "
+            f"{result['dm_chats']} dm chats, {result['secret_markers']} secret markers"
         )
     else:
         report += "\n_`/nugget storage prune` to clear old history and stale sandboxes now_"

@@ -43,6 +43,7 @@ jobs:
       SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || 'slackbot' }}
       SERVICE_NAME: ${{ secrets.SERVICE_NAME || 'chicen-nugget-bot' }}
+      SERVICE_USER: ${{ secrets.SERVICE_USER || 'chicen' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -111,7 +112,7 @@ jobs:
         run: |
           set -uo pipefail
           for i in 1 2 3 4; do
-            if out=$(printf '%s\n' "$ENV_FILE" | ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "cat > \$HOME/$DEPLOY_PATH/.env && chmod 600 \$HOME/$DEPLOY_PATH/.env && echo ENV_OK" 2>&1); then
+            if out=$(printf '%s\n' "$ENV_FILE" | ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "cat > \$HOME/$DEPLOY_PATH/.env && chown $SERVICE_USER:$SERVICE_USER \$HOME/$DEPLOY_PATH/.env && chmod 600 \$HOME/$DEPLOY_PATH/.env && echo ENV_OK" 2>&1); then
               code=0
             else
               code=$?
@@ -137,7 +138,9 @@ jobs:
               \$PY -m venv .venv
               .venv/bin/pip install -q --upgrade pip
               .venv/bin/pip install -q -r requirements.txt
-              .venv/bin/playwright install chromium >/dev/null 2>&1 || true
+              PLAYWRIGHT_BROWSERS_PATH=0 .venv/bin/playwright install chromium >/dev/null 2>&1 || true
+              mkdir -p logs data
+              chown -R $SERVICE_USER:$SERVICE_USER .
               if [ -f data/bot.db ]; then
                 .venv/bin/python -c 'import sqlite3,time; s=sqlite3.connect(\"data/bot.db\"); d=sqlite3.connect(\"data/bot.db.bak.\"+str(int(time.time()))); s.backup(d); d.close(); s.close()'
                 ls -1t data/bot.db.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f

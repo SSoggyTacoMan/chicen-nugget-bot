@@ -31,10 +31,10 @@ logger = logging.getLogger(__name__)
 
 
 async def run() -> None:
-    setup_logging()
     # New files (db, WAL, logs, sandboxes) should never be group/world readable.
     with suppress(OSError):
         os.umask(0o077)
+    setup_logging()
     problems = settings.missing_required()
     if problems:
         raise SystemExit(
@@ -312,6 +312,8 @@ async def run() -> None:
                 with suppress(Exception):
                     await browser.shutdown()
         await scheduler.stop()
+        with suppress(Exception):
+            db.close()
 
 
 if __name__ == "__main__":  # pragma: no cover

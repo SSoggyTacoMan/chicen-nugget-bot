@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import re
 import time
 from typing import Any
 
 from bot.ai.limits import user_retry_after
+from bot.features import dm_chats
+from bot.features.followup import (
+    BOI_RE,
+    conversation_lines,
+    is_direct_followup,
+    looks_like_followup,
+)
 from bot.features.proactive import is_quiet_now, note_proactive, proactive_available
 from bot.runtime import runtime
 from bot.slack_api import (
     channel_info,
     fetch_slack_images,
+    message_text,
     post,
     post_ephemeral,
     react,
@@ -23,6 +30,7 @@ from bot.slack_api import (
     user_info,
 )
 from bot.utils.text import (
+    MAX_SLACK_TEXT,
     asks_for_silence,
     chat_chunks,
     chunk_options,
@@ -49,21 +57,41 @@ _UNSUBSCRIBE_COOLDOWN = 15.0
 _UNSUBSCRIBE_WORDS = {"unsubscribe", "unsub"}
 _REACTION_COOLDOWN = 30.0
 _last_reaction: dict[tuple[str, str, str, str], float] = {}
+_NAME_TTL = 6 * 3600.0
+_NAME_CACHE_MAX = 2000
 _NAME_ADDRESS = (
     re.compile(r"^\s*(?:hey|yo|hi|ok|okay|so|alright)?\s*(?:chicen\s+nugget|chicen|nugget)\b", re.IGNORECASE),
     re.compile(r"\b(?:chicen\s+nugget|chicen)\b", re.IGNORECASE),
     re.compile(r"\bnugget\s*[,?!:]", re.IGNORECASE),
 )
-_FOLLOWUP_RE = re.compile(
-    r"\b(?:you|u|why|how|what|explain|huh|really|serious|confused)\b|don'?t get",
-    re.IGNORECASE,
-)
-_REQUEST_RE = re.compile(
-    r"\b(?:can|could|would|will)\s+you\b|"
-    r"\b(?:help|check|look at|fix|review|explain|thoughts|opinion|advice|debug)\b",
-    re.IGNORECASE,
-)
-_names: dict[str, str] = {}
+_names: dict[str, tuple[float, str]] = {}
+
+
+def _prune_tracking() -> None:
+    """Bound the in-memory cooldown/name maps.
+
+    These are keyed by channel, thread or message, so a long-running bot would
+    otherwise grow them without limit. Pruning only kicks in once a map is
+    large enough to matter, keeping the common path allocation-free.
+    """
+    now = time.monotonic()
+    for mapping, ttl, cap in (
+        (_last_reaction, _REACTION_COOLDOWN * 4, 1000),
+        (_last_ambient, 3600.0, 500),
+        (_last_thread, 3600.0, 500),
+        (_last_unsubscribe, 60.0, 500),
+    ):
+        if len(mapping) <= cap:
+            continue
+        cutoff = now - ttl
+        for key, stamp in list(mapping.items()):
+            if stamp < cutoff:
+                mapping.pop(key, None)
+    if len(_names) > _NAME_CACHE_MAX:
+        cutoff = now - _NAME_TTL
+        for key, (stamp, _value) in list(_names.items()):
+            if stamp < cutoff:
+                _names.pop(key, None)
 
 
 async def _post_chunks(
@@ -72,24 +100,48 @@ async def _post_chunks(
     text: str,
     *,
     thread_ts: str | None = None,
-) -> None:
+    discreet: bool = False,
+) -> list[str]:
+    """Post a reply in fragments and return the ts of each posted message."""
     settings = runtime.settings
     max_fragments, delay = chunk_options(settings)
+    # Block Kit sections cap at 3000 chars, so keep the block body under it.
+    limit = 2900 if discreet else MAX_SLACK_TEXT
+    preview = None
+    if discreet:
+        preview = (
+            getattr(settings, "secret_preview_text", dm_chats.SECRET_REPLY_PREVIEW)
+            or dm_chats.SECRET_REPLY_PREVIEW
+        )
     chunks = chat_chunks(
         disarm_broadcasts(format_mrkdwn(text)),
         max_fragments=max_fragments,
+        limit=limit,
     )
+    sent: list[str] = []
     for index, chunk in enumerate(chunks):
-        await post(client, channel, chunk, thread_ts=thread_ts)
+        response = await post(
+            client, channel, chunk, thread_ts=thread_ts, notification_text=preview
+        )
+        ts = response.get("ts") if isinstance(response, dict) else None
+        if ts:
+            sent.append(str(ts))
         if index + 1 < len(chunks) and delay > 0:
             await asyncio.sleep(delay)
+    return sent
 
 
 async def on_message(event: dict[str, Any], client) -> None:
+    _prune_tracking()
     subtype = event.get("subtype")
     if (subtype and subtype != "file_share") or event.get("bot_id"):
         return
-    if has_owner_signature(event.get("text") or ""):
+    if has_owner_signature(event.get("text") or "") and event.get("user") in {
+        runtime.settings.owner_user_id,
+        runtime.user_id,
+    }:
+        # Only the owner's own native posts echo our signature; anyone else
+        # including it is trying to suppress a reply.
         return
     if is_ignored_message(event.get("text") or ""):
         return
@@ -117,7 +169,10 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
     subtype = event.get("subtype")
     if (subtype and subtype != "file_share") or event.get("bot_id"):
         return
-    if has_owner_signature(event.get("text") or ""):
+    if has_owner_signature(event.get("text") or "") and event.get("user") in {
+        runtime.settings.owner_user_id,
+        runtime.user_id,
+    }:
         return
     if is_ignored_message(event.get("text") or ""):
         return
@@ -135,7 +190,7 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
         event, runtime.settings.slack_bot_token, runtime.settings
     )
     text = incoming_text(
-        event.get("text") or "",
+        message_text(event),
         bot_user_id=runtime.bot_user_id,
         assistant_user_id=runtime.user_id or "",
     )
@@ -154,11 +209,13 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
         text=text,
         trigger="mpim_mention" if event.get("channel_type") == "mpim" else "mention",
         images=images,
+        context=await _mention_context(event, client),
     )
 
 
 async def on_reaction_added(event: dict[str, Any], client) -> None:
     """Small reaction shortcuts: 🔍 research, 🧵 summarize, 📌 pin."""
+    _prune_tracking()
     item = event.get("item") or {}
     if item.get("type") != "message":
         return
@@ -222,7 +279,19 @@ async def on_reaction_added(event: dict[str, Any], client) -> None:
             "someone reacted with a thread emoji, meaning: summarize this thread in "
             "a few lines.\n\n" + text
         )
-    conversation = f"dm:{user_id}" if is_dm else f"ch:{channel}:{root_ts}"
+    secret = None
+    if is_dm:
+        resolved = dm_chats.chat_for_thread(user_id, root_ts)
+        if resolved is not None:
+            conversation, secret = resolved
+        else:
+            conversation = f"dm:{user_id}"
+    else:
+        conversation = f"ch:{channel}:{root_ts}"
+    discreet = bool(
+        secret is not None
+        and getattr(runtime.settings, "secret_chat_discreet", True)
+    )
     try:
         async with runtime.lock(conversation):
             answer = await runtime.agent.reply(
@@ -230,19 +299,24 @@ async def on_reaction_added(event: dict[str, Any], client) -> None:
                 user_id=user_id,
                 text=prompt[:6000],
                 channel_id=channel,
-                thread_ts=None if is_dm else root_ts,
+                thread_ts=root_ts,
                 is_dm=is_dm,
                 trigger="reaction",
                 client=client,
+                secret=secret,
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return
-        await _post_chunks(
+        sent = await _post_chunks(
             client,
             channel,
             answer,
-            thread_ts=None if is_dm else root_ts,
+            thread_ts=root_ts,
+            discreet=discreet,
         )
+        if secret is not None:
+            for posted_ts in sent:
+                secret.note_bot_message(posted_ts)
         if not is_dm and runtime.db:
             runtime.db.mark_thread(channel, root_ts, owner="bot")
     except Exception:
@@ -268,7 +342,7 @@ async def _reaction_message(
         if not messages:
             continue
         message = messages[0]
-        text = (message.get("text") or "").strip()
+        text = message_text(message).strip()
         if not text:
             continue
         return text, message.get("thread_ts") or message.get("ts") or ts
@@ -297,7 +371,7 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
     voice_transcripts = await transcribe_slack_audio(
         event, settings.slack_bot_token, settings
     )
-    text = (event.get("text") or "").strip()
+    text = message_text(event).strip()
     if voice_transcripts:
         voice_block = "\n".join(voice_transcripts)
         text = (
@@ -321,10 +395,35 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
         )
         return
     message_ts = event.get("ts")
-    reply_thread_ts = event.get("thread_ts") or None
+    route = await dm_chats.route_dm(event)
+    if route is not None:
+        conversation = route.conversation
+        reply_thread_ts = route.thread_ts
+        secret = route.secret
+        if route.text:
+            text = route.text
+    else:
+        conversation = f"dm:{user_id}"
+        reply_thread_ts = event.get("thread_ts") or None
+        secret = None
+    discreet = bool(
+        secret is not None and getattr(settings, "secret_chat_discreet", True)
+    )
+    if (
+        route is not None
+        and route.redirected
+        and route.chat_ts
+        and dm_chats.should_nudge(user_id, route.chat_ts)
+    ):
+        nudge = (
+            "answered in your 🔒 secret thread ↑ - nothing is saved."
+            if secret is not None
+            else f"answered in *{route.title or 'that chat'}*'s thread ↑ - "
+            "`/nugget chat new` starts a new one."
+        )
+        await post_ephemeral(client, event["channel"], user_id, nudge)
     if message_ts:
         await react(client, event["channel"], message_ts, "eyes")
-    conversation = f"dm:{user_id}"
     try:
         async with runtime.lock(conversation):
             try:
@@ -337,13 +436,21 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
                     is_dm=True,
                     trigger="dm",
                     images=images,
+                    secret=secret,
                 )
             except Exception:
                 logger.exception("dm agent turn failed")
                 answer = "something broke on my side. check my logs?"
-        await _post_chunks(
-            client, event["channel"], answer, thread_ts=reply_thread_ts
+        sent = await _post_chunks(
+            client,
+            event["channel"],
+            answer,
+            thread_ts=reply_thread_ts,
+            discreet=discreet,
         )
+        if secret is not None:
+            for ts in sent:
+                secret.note_bot_message(ts)
     finally:
         if message_ts:
             await unreact(client, event["channel"], message_ts, "eyes")
@@ -406,7 +513,7 @@ async def _handle_named_mention(event: dict[str, Any], client) -> bool:
         event, runtime.settings.slack_bot_token, runtime.settings
     )
     clean_text = incoming_text(
-        text,
+        message_text(event),
         bot_user_id=runtime.bot_user_id,
         assistant_user_id=runtime.user_id or "",
     )
@@ -421,7 +528,12 @@ async def _handle_named_mention(event: dict[str, Any], client) -> bool:
         clean_text = "What is in this image?"
 
     await _handle_channel(
-        event, client, text=clean_text, trigger="named", images=images
+        event,
+        client,
+        text=clean_text,
+        trigger="named",
+        images=images,
+        context=await _mention_context(event, client),
     )
     # Recognized as addressed to the bot even if the model chose [NO_REPLY],
     # so don't let ambient or thread logic answer the same message again.
@@ -503,21 +615,30 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
     bot_names = {runtime.settings.bot_name.lower(), "nugget", "chicen", "chicennugget"}
     text_lower = text.lower()
     explicitly_named = any(re.search(rf"\b{re.escape(name)}\b", text_lower) for name in bot_names if name)
-    followup_to_bot = bool(
-        bot_last
-        and ("?" in text or _REQUEST_RE.search(text) or _FOLLOWUP_RE.search(text))
-    )
-
-    if not explicitly_named and not followup_to_bot:
-        human_users = {r.get("user_id") for r in rows if r.get("role") == "user" and r.get("user_id")}
-        if len(human_users) >= 2 and "?" not in text and not images:
-            return
-        if not images and len(text.split()) < 3 and "?" not in text:
-            return
-        # A statement is not an invitation. "i have 61 hours and can't do shit"
-        # should not turn into an unprompted coaching question.
-        if not images and "?" not in text and not _REQUEST_RE.search(text):
-            return
+    if BOI_RE.search(text):
+        return  # addressed to boi by name; the user gateway owns it
+    if (
+        not bot_last
+        and not explicitly_named
+        and runtime.db.is_thread(channel, thread_ts, owner="user")
+    ):
+        # boi spoke last in a thread both identities joined, so the follow-up
+        # belongs to it instead of doubling up.
+        return
+    followup_to_bot = is_direct_followup(text=text, bot_last=bot_last)
+    human_users = {
+        r.get("user_id") for r in rows if r.get("role") == "user" and r.get("user_id")
+    }
+    # A statement is not an invitation. "i have 61 hours and can't do shit"
+    # should not turn into an unprompted coaching question.
+    if not looks_like_followup(
+        text=text,
+        bot_last=bot_last,
+        humans=len(human_users),
+        has_images=bool(images),
+        named=explicitly_named,
+    ):
+        return
 
     jev_hint = ""
     if followup_to_bot:
@@ -592,80 +713,57 @@ async def _thread_context(
     bot_user_id: str,
 ) -> tuple[list[str], bool]:
     """Real thread lines, including humans the bot never stored in sqlite."""
-    try:
-        response = await client.conversations_replies(
-            channel=channel, ts=thread_ts, limit=20
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("could not read thread context for %s: %s", thread_ts, exc)
-        return [], False
-    lines: list[str] = []
-    bot_last = False
-    payload = response.get("messages") if hasattr(response, "get") else None
-    if inspect.isawaitable(payload):
-        payload = await payload
-    for message in payload if isinstance(payload, list) else []:
-        if current_ts and message.get("ts") == current_ts:
-            continue
-        if message.get("subtype") in {
-            "channel_join",
-            "channel_leave",
-            "channel_topic",
-            "channel_purpose",
-            "bot_message",
-        }:
-            continue
-        text = " ".join((message.get("text") or "").split())
-        if not text:
-            continue
-        user_id = message.get("user") or ""
-        if user_id == bot_user_id:
-            lines.append(f"you: {text[:200]}")
-        elif user_id:
-            lines.append(f"{await _user_name(client, user_id)}: {text[:200]}")
-        else:
-            lines.append(text[:200])
-        bot_last = user_id == bot_user_id
-    return lines[-8:], bot_last
+    lines, _humans, bot_last = await conversation_lines(
+        client,
+        channel,
+        thread_ts=thread_ts,
+        current_ts=current_ts,
+        agent_user_id=bot_user_id,
+        limit=20,
+        keep=8,
+        name_of=lambda uid: _user_name(client, uid),
+    )
+    return lines, bot_last
 
 
 async def _channel_context(
     client, channel: str, current_ts: str | None, bot_user_id: str
 ) -> tuple[list[str], bool]:
     """Recent channel lines and whether the bot spoke last, for ambient Jev."""
-    try:
-        response = await client.conversations_history(channel=channel, limit=12)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("could not read ambient context for %s: %s", channel, exc)
-        return [], False
-    lines: list[str] = []
-    bot_last = False
-    payload = response.get("messages") if hasattr(response, "get") else None
-    if inspect.isawaitable(payload):
-        payload = await payload
-    for message in reversed(payload if isinstance(payload, list) else []):
-        if current_ts and message.get("ts") == current_ts:
-            continue
-        if message.get("subtype") in {
-            "channel_join",
-            "channel_leave",
-            "channel_topic",
-            "channel_purpose",
-            "bot_message",
-        }:
-            continue
-        text = " ".join((message.get("text") or "").split())
-        if not text:
-            continue
-        user_id = message.get("user") or ""
-        if user_id == bot_user_id:
-            lines.append(f"you: {text[:200]}")
-        elif user_id:
-            lines.append(f"{await _user_name(client, user_id)}: {text[:200]}")
-        else:
-            lines.append(text[:200])
-        bot_last = user_id == bot_user_id
-    return lines[-6:], bot_last
+    lines, _humans, bot_last = await conversation_lines(
+        client,
+        channel,
+        current_ts=current_ts,
+        agent_user_id=bot_user_id,
+        limit=20,
+        keep=6,
+        name_of=lambda uid: _user_name(client, uid),
+    )
+    return lines, bot_last
+
+
+async def _mention_context(event: dict[str, Any], client) -> str:
+    """Recent lines around an @mention, so a terse ping still has context.
+
+    "advice?" on its own is unanswerable; the question it refers to is usually
+    the message right before it in the channel or thread.
+    """
+    channel = event.get("channel") or ""
+    if not channel:
+        return ""
+    if event.get("thread_ts"):
+        lines, _ = await _thread_context(
+            client,
+            channel,
+            event["thread_ts"],
+            event.get("ts"),
+            runtime.bot_user_id or "",
+        )
+    else:
+        lines, _ = await _channel_context(
+            client, channel, event.get("ts"), runtime.bot_user_id or ""
+        )
+    return "\n".join(lines[-4:])
 
 
 async def _maybe_ambient(event: dict[str, Any], client) -> None:
@@ -742,17 +840,23 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
 
 
 async def _user_name(client, user_id: str) -> str:
-    if user_id not in _names:
-        _names[user_id] = display_name(await user_info(client, user_id))
-    return _names[user_id]
+    cached = _names.get(user_id)
+    if cached and time.monotonic() - cached[0] < _NAME_TTL:
+        return cached[1]
+    name = display_name(await user_info(client, user_id))
+    _names[user_id] = (time.monotonic(), name)
+    return name
 
 
 async def _channel_name(client, channel_id: str) -> str:
     key = f"ch:{channel_id}"
-    if key not in _names:
-        info = await channel_info(client, channel_id) or {}
-        _names[key] = f"#{info.get('name')}" if info.get("name") else "a channel"
-    return _names[key]
+    cached = _names.get(key)
+    if cached and time.monotonic() - cached[0] < _NAME_TTL:
+        return cached[1]
+    info = await channel_info(client, channel_id) or {}
+    name = f"#{info.get('name')}" if info.get("name") else "a channel"
+    _names[key] = (time.monotonic(), name)
+    return name
 
 
 async def _handle_channel(

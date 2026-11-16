@@ -10,6 +10,7 @@ REQUIRED = {
     "user_id",
     "is_owner",
     "is_admin",
+    "is_moderator",
     "location",
     "trigger",
     "jev",

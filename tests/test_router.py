@@ -17,6 +17,16 @@ def test_aliases():
     assert router.resolve("summary")[0] is router.cmd_summarize
     assert router.resolve("remind 10m hi")[0] is router.cmd_remind
     assert router.resolve("pings join")[0] is router.cmd_pinggroup
+    assert router.resolve("incognito")[0] is router.cmd_secret
+
+
+def test_dm_chat_subcommands():
+    assert router.resolve("chats")[0] is router.cmd_chats
+    assert router.resolve("chat new rust")[0] is router.cmd_chat
+    assert router.resolve("chat new rust")[1] == "new rust"
+    assert router.resolve("newchat rust")[0] is router.cmd_newchat
+    assert router.resolve("secret")[0] is router.cmd_secret
+    assert router.resolve("end --burn")[0] is router.cmd_end
 
 
 def test_unknown_subcommand():

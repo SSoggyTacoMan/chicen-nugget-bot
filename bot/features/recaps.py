@@ -1,4 +1,4 @@
-"""Daily recap flow inspired by NovaBot.
+"""Daily recap flow inspired by NovaBot (https://github.com/aelithron/novabot-slack).
 
 A scheduled prompt in a public channel asks the owner how their day went. When
 the owner marks it done, the bot links their reply, celebrates it, and optionally

@@ -171,8 +171,14 @@ def _notes_index(settings: Settings) -> list[dict[str, str]]:
 def get_user_memory_prompt(db: Database | None, settings: Settings, user_id: str) -> str:
     if not db:
         return "none"
-    if user_id != settings.owner_user_id and not settings.is_admin(user_id):
-        return "none"
+    if user_id != settings.owner_user_id:
+        # Private memory follows the same rule as the private tools: an admin
+        # only gets it with ADMIN_PRIVATE_ACCESS, and moderators/guests never do.
+        allowed = settings.is_admin(user_id) and bool(
+            getattr(settings, "admin_private_access", False)
+        )
+        if not allowed:
+            return "none"
 
     sections: list[str] = []
     idx = _notes_index(settings)
@@ -218,6 +224,7 @@ class ToolContext:
     bot_client: AsyncWebClient | None = None
     owner_client: AsyncWebClient | None = None
     assistant_user_id: str = ""
+    ephemeral: bool = False
 
 
 class _TextExtractor(HTMLParser):
@@ -396,6 +403,31 @@ def _need_owner(ctx: ToolContext) -> bool:
     return ctx.is_owner or ctx.is_admin
 
 
+def _need_private(ctx: ToolContext) -> bool:
+    """Owner-private integrations and memory.
+
+    Admins are co-operators, not co-owners: by default they cannot read the
+    owner's mail/calendar/github/mac or stored memories. Set
+    ``ADMIN_PRIVATE_ACCESS=true`` to opt into the old owner-equivalent behavior.
+    """
+    if ctx.is_owner:
+        return True
+    if not ctx.is_admin:
+        return False
+    return bool(getattr(ctx.settings, "admin_private_access", False))
+
+
+def _need_owner_only(ctx: ToolContext) -> bool:
+    """Global configuration/integrations: never delegated to an admin."""
+    return ctx.is_owner
+
+
+def _private_denied(what: str) -> str:
+    return _error(
+        f"only the owner/admin can {what} (admins need ADMIN_PRIVATE_ACCESS=true)"
+    )
+
+
 def _default_repo(settings: Settings, db: Database | None = None) -> str:
     """`https://github.com/owner/repo` -> `owner/repo`, else empty."""
     repo = ""
@@ -502,14 +534,94 @@ def parse_slack_thread_ref(ref: str) -> tuple[str | None, str | None]:
 class Toolbox:
     """Registry of model-callable tools."""
 
+    # Tools that are safe for a non-owner guest. Everything else is guarded by
+    # ``_need_owner`` in its handler, so sending it to the model for a guest is
+    # wasted tokens (and invites calls that will always fail).
+    GUEST_TOOLS: frozenset[str] = frozenset(
+        {
+            "get_weather",
+            "roll_dice",
+            "cancel_reminder",
+            "lookup_user",
+            "lookup_channel",
+            "nugget_fact",
+            "generate_image",
+            "flaron",
+            "public_holidays",
+            "hackatime_stats",
+            "dog_fact",
+            "taco_recipe",
+            "urban_dict",
+            "manage_tasks",
+        }
+    )
+
+    # Read-only tools for an unsaved secret chat. Nothing that stores, posts,
+    # uploads, schedules or reaches into private integrations.
+    SECRET_TOOLS: frozenset[str] = frozenset(
+        {"search_web", "fetch_url", "get_weather", "roll_dice", "nugget_fact"}
+    )
+
+    def secret_tool_names(self) -> frozenset[str]:
+        mode = str(getattr(self.settings, "secret_chat_tools", "web") or "web").lower()
+        if mode == "none":
+            return frozenset()
+        return self.SECRET_TOOLS
+
     def __init__(self, settings: Settings, db: Database | None = None) -> None:
         self.settings = settings
         self.db = db
         self._browser_manager: BrowserManager | None = None
+        self._definitions_all: list[dict[str, Any]] | None = None
+        self._definitions_guest: list[dict[str, Any]] | None = None
+        self._definitions_secret: list[dict[str, Any]] | None = None
+        self._definitions_built_at = 0.0
+        self._definitions_ttl = 300.0
 
     # ------------------------------------------------------------ definitions
     @property
     def definitions(self) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        if (
+            self._definitions_all is None
+            or now - self._definitions_built_at > self._definitions_ttl
+        ):
+            # Rebuild occasionally so enabling a service via /nugget setup shows
+            # up without a restart, while avoiding a rebuild on every round.
+            self._definitions_all = self._build_definitions()
+            self._definitions_guest = None
+            self._definitions_built_at = now
+        return self._definitions_all
+
+    def definitions_for(
+        self, *, is_owner: bool = True, ephemeral: bool = False
+    ) -> list[dict[str, Any]]:
+        """Tool schemas for this caller.
+
+        The full set is ~42 KB of JSON, resent on every completion round. Guests
+        can only use a small ungated subset, so trim it for them. Secret chats
+        get an even smaller read-only set.
+        """
+        if ephemeral:
+            if self._definitions_secret is None:
+                names = self.secret_tool_names()
+                self._definitions_secret = [
+                    item
+                    for item in self.definitions
+                    if item["function"]["name"] in names
+                ]
+            return self._definitions_secret
+        if is_owner:
+            return self.definitions
+        if self._definitions_guest is None:
+            self._definitions_guest = [
+                item
+                for item in self.definitions
+                if item["function"]["name"] in self.GUEST_TOOLS
+            ]
+        return self._definitions_guest
+
+    def _build_definitions(self) -> list[dict[str, Any]]:
         def tool(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
             return {
                 "type": "function",
@@ -1658,6 +1770,8 @@ class Toolbox:
                 args = {}
         if not isinstance(args, dict):
             args = {}
+        if getattr(ctx, "ephemeral", False) and name not in self.secret_tool_names():
+            return _error("that tool isn't available in a secret chat")
         try:
             handler = getattr(self, f"_tool_{name}", None)
             if handler is None:
@@ -1837,8 +1951,8 @@ class Toolbox:
         return f"cancelled reminder #{reminder_id}."
 
     async def _tool_search_slack(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can search slack")
+        if not _need_private(ctx):
+            return _private_denied("search slack")
         query = str(args.get("query") or "").strip()
         if not query:
             return _error("query is required")
@@ -2041,6 +2155,9 @@ class Toolbox:
         """
         if not as_user:
             return _PostRoute(client=ctx.bot_client or ctx.client)
+        if not ctx.is_owner:
+            # Admins must never be able to speak with the owner's identity.
+            return _PostRoute(error="only the owner can post as themselves (as_user=true)")
         if ctx.owner_client is not None:
             return _PostRoute(client=ctx.owner_client, native_owner=True)
         client = ctx.bot_client or ctx.client
@@ -2068,8 +2185,8 @@ class Toolbox:
         return _PostRoute(client=client, customize=display)
 
     async def _tool_get_channel_history(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can read channel history")
+        if not _need_private(ctx):
+            return _private_denied("read channel history")
         channel_value = str(args.get("channel") or "here").strip()
         channel_id = await self._resolve_channel(ctx, channel_value)
         if not channel_id:
@@ -2403,8 +2520,8 @@ class Toolbox:
         return None
 
     async def _tool_remember(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can store notes")
+        if not _need_private(ctx):
+            return _private_denied("store notes")
         text = str(args.get("text") or "").strip()
         if not text:
             return _error("nothing to remember")
@@ -2436,8 +2553,8 @@ class Toolbox:
         return f"saved note #{note_id} to notes/{topic}.md."
 
     async def _tool_recall(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can search memory")
+        if not _need_private(ctx):
+            return _private_denied("search memory")
         topic_arg = str(args.get("topic") or "").strip()
         query = str(args.get("query") or "").strip()
 
@@ -2492,8 +2609,8 @@ class Toolbox:
         return _json(payload)
 
     async def _tool_search_memory(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can search semantic memory")
+        if not _need_private(ctx):
+            return _private_denied("search semantic memory")
         query = str(args.get("query") or "").strip()
         if not query:
             return _error("query is required")
@@ -2523,8 +2640,8 @@ class Toolbox:
         )
 
     async def _tool_forget(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can delete memory")
+        if not _need_private(ctx):
+            return _private_denied("delete memory")
         note_id_raw = args.get("note_id")
         query = str(args.get("query") or "").strip()
         topic_arg = str(args.get("topic") or "").strip()
@@ -2642,8 +2759,8 @@ class Toolbox:
         return f"posted to {loc} (ts {result.get('ts')}) as {_sender_label(route)}."
 
     async def _tool_slack_status(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can manage Slack status")
+        if not _need_private(ctx):
+            return _private_denied("manage Slack status")
         if ctx.user_client is None:
             return _error("user client is not configured (needs SLACK_USER_TOKEN)")
         action = str(args.get("action") or "get").lower().strip()
@@ -2695,8 +2812,8 @@ class Toolbox:
         return _error(f"unknown slack_status action: {action}")
 
     async def _tool_slack_dnd(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can manage DND")
+        if not _need_private(ctx):
+            return _private_denied("manage DND")
         if ctx.user_client is None:
             return _error("user client is not configured (needs SLACK_USER_TOKEN)")
         action = str(args.get("action") or "info").lower().strip()
@@ -2734,8 +2851,8 @@ class Toolbox:
         return _error(f"unknown slack_dnd action: {action}")
 
     async def _tool_slack_react(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can react to messages")
+        if not _need_private(ctx):
+            return _private_denied("react to messages")
         action = str(args.get("action") or "add").lower().strip()
         channel_val = str(args.get("channel") or "").strip()
         ts = str(args.get("timestamp") or "").strip()
@@ -2745,6 +2862,8 @@ class Toolbox:
                 channel_val, ts = ref_cid, ref_ts
         emoji = str(args.get("emoji") or "").strip().strip(":")
         as_user = bool(args.get("as_user", False))
+        if as_user and not ctx.is_owner:
+            return _error("only the owner can react as the user account (as_user=true)")
         if not emoji:
             return _error("emoji name is required")
         if not ts:
@@ -2771,8 +2890,8 @@ class Toolbox:
             return _error(f"slack reaction failed: {error_code(exc)}")
 
     async def _tool_slack_activity(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can check Slack activity")
+        if not _need_private(ctx):
+            return _private_denied("check Slack activity")
         if ctx.user_client is None:
             return _error("SLACK_USER_TOKEN is not configured (needs search:read)")
         owner_id = ctx.settings.owner_user_id
@@ -2839,8 +2958,8 @@ class Toolbox:
         return token or None
 
     async def _tool_google_calendar(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can access Google Calendar")
+        if not _need_private(ctx):
+            return _private_denied("access Google Calendar")
         token = await self._get_google_token(ctx)
         if not token:
             return _error("Google credentials not configured (use `/nugget setup google`)")
@@ -2994,8 +3113,8 @@ class Toolbox:
         return _error(f"unknown google_calendar action: {action}")
 
     async def _tool_gmail(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can access Gmail")
+        if not _need_private(ctx):
+            return _private_denied("access Gmail")
         token = await self._get_google_token(ctx)
         if not token:
             return _error("Google credentials not configured (use `/nugget setup google`)")
@@ -3133,8 +3252,8 @@ class Toolbox:
         return _error(f"unknown gmail action: {action}")
 
     async def _tool_google_drive(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can access Google Drive")
+        if not _need_private(ctx):
+            return _private_denied("access Google Drive")
         token = await self._get_google_token(ctx)
         if not token:
             return _error("Google credentials not configured (use `/nugget setup google`)")
@@ -3206,8 +3325,8 @@ class Toolbox:
         return _error(f"unknown google_drive action: {action}")
 
     async def _tool_mac_control(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can control the Mac")
+        if not _need_private(ctx):
+            return _private_denied("control the Mac")
         mac = integrations.mac_config(ctx.db, ctx.settings)
         bridge_url = mac["url"]
         bridge_token = mac["token"]
@@ -3789,8 +3908,8 @@ class Toolbox:
             return _error(f"flaron lookup failed: {exc}")
 
     async def _tool_fetch_slack_message(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can fetch slack messages")
+        if not _need_private(ctx):
+            return _private_denied("fetch slack messages")
         ref = str(args.get("ref") or "").strip()
         if not ref:
             return _error("ref is required")
@@ -3829,8 +3948,8 @@ class Toolbox:
         return f"message in <#{cid}> from <@{user}> at {ts}:\n{text}"
 
     async def _tool_summarize_thread(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can summarize threads")
+        if not _need_private(ctx):
+            return _private_denied("summarize threads")
         ref = str(args.get("ref") or "").strip()
         if ref:
             cid, ts = parse_slack_thread_ref(ref)
@@ -3941,8 +4060,8 @@ class Toolbox:
             return _error(f"failed to fetch holidays: {exc}")
 
     async def _tool_check_emails(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can check emails")
+        if not _need_private(ctx):
+            return _private_denied("check emails")
         imap = integrations.imap_config(ctx.db, ctx.settings)
         host = imap["host"]
         user = imap["user"]
@@ -3996,10 +4115,10 @@ class Toolbox:
             return _error(f"failed to fetch hackatime stats: {exc}")
 
     async def _tool_github_info(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
+        if not _need_private(ctx):
             # The configured token can read private repos and notifications, so
             # this must never be callable by a guest in a shared channel.
-            return _error("only the owner/admin can inspect github")
+            return _private_denied("inspect github")
         action = str(args.get("action") or "repo").lower().strip()
         github = integrations.github_config(ctx.db, ctx.settings)
         target = str(args.get("target") or _default_repo(ctx.settings, ctx.db)).strip()
@@ -4347,8 +4466,8 @@ class Toolbox:
         return result
 
     async def _tool_github_write(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can change GitHub")
+        if not _need_private(ctx):
+            return _private_denied("change GitHub")
         if not ctx.is_dm:
             return _error("github_write is only permitted in direct messages")
         action = str(args.get("action") or "").lower().strip()
@@ -4722,10 +4841,18 @@ class Toolbox:
 
     def _sandbox(self, ctx: ToolContext) -> SandboxManager:
         settings = ctx.settings
-        root = Path(
+        base = Path(
             getattr(settings, "sandbox_dir", None)
             or (Path(settings.data_dir) / "sandboxes")
         )
+        root = base
+        if not ctx.is_owner:
+            # Co-admins get their own sandbox namespace. Keep it *outside* the
+            # owner's root so retention/prune and workspace listings stay
+            # separate, and so an admin can never open an owner workspace by
+            # guessing its name.
+            user_key = re.sub(r"[^a-z0-9_-]+", "-", (ctx.user_id or "unknown").lower())
+            root = base.parent / f"{base.name}-by-user" / (user_key or "unknown")
         return SandboxManager(
             root,
             max_workspaces=int(getattr(settings, "sandbox_max_workspaces", 20) or 20),
@@ -5101,8 +5228,8 @@ class Toolbox:
             return _error(f"urban dictionary lookup failed: {exc}")
 
     async def _tool_image_access(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can manage image access")
+        if not _need_owner_only(ctx):
+            return _error("only the owner can manage image access")
         action = str(args.get("action") or "list").lower().strip()
         settings = ctx.settings
         env_users = sorted(settings.image_user_ids)
@@ -5135,8 +5262,8 @@ class Toolbox:
         return _error("action must be list, add or remove")
 
     async def _tool_bot_config(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can view or change bot settings")
+        if not _need_owner_only(ctx):
+            return _error("only the owner can view or change bot settings")
         action = str(args.get("action") or "list").lower().strip()
         raw_key = str(args.get("key") or "").strip().lower()
         value = str(args.get("value") or "").strip()
@@ -5521,8 +5648,8 @@ class Toolbox:
         return _error(f"unknown task action: {action}")
 
     async def _tool_api_request(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can call connected APIs")
+        if not _need_private(ctx):
+            return _private_denied("call connected APIs")
         if not ctx.is_dm:
             return _error("api_request is only permitted in direct messages")
         service = str(args.get("service") or "").lower().strip()
@@ -5689,8 +5816,8 @@ class Toolbox:
             return _error(f"browser failed: {exc}")
 
     async def _tool_daily_briefing(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can build a personal briefing")
+        if not _need_private(ctx):
+            return _private_denied("build a personal briefing")
         try:
             days = max(1, min(7, int(args.get("days") or 1)))
         except (TypeError, ValueError):
@@ -5784,8 +5911,8 @@ class Toolbox:
         )
 
     async def _tool_integration_setup(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_owner(ctx):
-            return _error("only the owner/admin can change integration setup")
+        if not _need_owner_only(ctx):
+            return _error("only the owner can change integration setup")
         action = str(args.get("action") or "panel").lower().strip()
         integration = str(args.get("integration") or "").strip().lower()
 

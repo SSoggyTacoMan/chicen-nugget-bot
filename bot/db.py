@@ -123,6 +123,26 @@ CREATE TABLE IF NOT EXISTS bot_threads (
     PRIMARY KEY (channel_id, thread_ts)
 );
 
+CREATE TABLE IF NOT EXISTS dm_chats (
+    user_id TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    archived INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, thread_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_dm_chats_user ON dm_chats (user_id, archived, last_used_at);
+
+CREATE TABLE IF NOT EXISTS dm_secret_threads (
+    user_id TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    PRIMARY KEY (user_id, thread_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_dm_secret_user ON dm_secret_threads (user_id, expires_at);
+
 CREATE TABLE IF NOT EXISTS ai_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     day TEXT NOT NULL,
@@ -161,90 +181,155 @@ def iso(dt: datetime | None = None) -> str:
     return (dt or utcnow()).astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _rank_with_numpy(
+    rows: list[dict[str, Any]],
+    vector: list[float],
+    query_norm: float,
+    limit: int,
+) -> list[dict[str, Any]] | None:
+    """Vectorised cosine ranking. Returns None when numpy is unavailable."""
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    dimensions_expected = len(vector)
+    matrix: list[Any] = []
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        if int(row.get("dimensions") or 0) != dimensions_expected:
+            continue
+        raw = row.get("vector")
+        if not isinstance(raw, (bytes, bytearray)) or len(raw) != dimensions_expected * 4:
+            continue
+        matrix.append(np.frombuffer(raw, dtype=np.float32))
+        kept.append(row)
+    if not matrix:
+        return []
+
+    array = np.vstack(matrix)
+    query = np.asarray(vector, dtype=np.float32)
+    norms = np.linalg.norm(array, axis=1)
+    denominator = norms * query_norm
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scores = np.where(denominator > 0, (array @ query) / denominator, 0.0)
+    order = np.argsort(-scores)[: max(1, limit)]
+    return [
+        {
+            "message_id": kept[index].get("message_id"),
+            "conversation": kept[index].get("conversation"),
+            "role": kept[index].get("role"),
+            "user_id": kept[index].get("user_id"),
+            "text": kept[index].get("text"),
+            "created_at": kept[index].get("created_at"),
+            "score": float(scores[index]),
+        }
+        for index in order
+    ]
+
+
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._write_lock = threading.Lock()
+        self._local = threading.local()
+        self._connections: list[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
 
     # ------------------------------------------------------------------ core
     def _connect(self) -> sqlite3.Connection:
+        """Return this thread's long-lived connection.
+
+        Opening a fresh SQLite connection (and re-applying PRAGMAs) for every
+        query was measurable overhead: an agent turn performs dozens of small
+        reads and a handful of writes. One connection per thread keeps the hot
+        path cheap while staying safe for the synchronous call sites.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
         conn = sqlite3.connect(self.path, timeout=15)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        # WAL + NORMAL is crash-safe for the database and much faster than the
+        # default FULL sync, which fsynced on every single insert.
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        self._local.conn = conn
+        with self._connections_lock:
+            self._connections.append(conn)
+        try:
+            Path(self.path).chmod(0o600)
+        except OSError:
+            pass
         return conn
+
+    def close(self) -> None:
+        with self._connections_lock:
+            connections, self._connections = self._connections, []
+        for conn in connections:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+        self._local.conn = None
 
     def init(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._write_lock:
             conn = self._connect()
-            try:
-                conn.executescript(SCHEMA)
-                columns = {
-                    row["name"] for row in conn.execute("PRAGMA table_info(access_requests)").fetchall()
-                }
-                if "admin_note" not in columns:
-                    conn.execute("ALTER TABLE access_requests ADD COLUMN admin_note TEXT")
+            conn.executescript(SCHEMA)
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(access_requests)").fetchall()
+            }
+            if "admin_note" not in columns:
+                conn.execute("ALTER TABLE access_requests ADD COLUMN admin_note TEXT")
 
-                usage_columns = {
-                    row["name"] for row in conn.execute("PRAGMA table_info(ai_usage)").fetchall()
-                }
-                if "user_id" not in usage_columns:
-                    # Older databases predate per-user spend tracking. Keep the
-                    # column here so the index below can be created after.
-                    conn.execute(
-                        "ALTER TABLE ai_usage ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"
-                    )
+            usage_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(ai_usage)").fetchall()
+            }
+            if "user_id" not in usage_columns:
+                # Older databases predate per-user spend tracking. Keep the
+                # column here so the index below can be created after.
                 conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage (day, user_id)"
+                    "ALTER TABLE ai_usage ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"
                 )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage (day, user_id)"
+            )
 
-                thread_columns = {
-                    row["name"] for row in conn.execute("PRAGMA table_info(bot_threads)").fetchall()
-                }
-                if "owner" not in thread_columns:
-                    conn.execute(
-                        "ALTER TABLE bot_threads ADD COLUMN owner TEXT NOT NULL DEFAULT 'bot'"
-                    )
-                conn.commit()
-            finally:
-                conn.close()
+            thread_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(bot_threads)").fetchall()
+            }
+            if "owner" not in thread_columns:
+                conn.execute(
+                    "ALTER TABLE bot_threads ADD COLUMN owner TEXT NOT NULL DEFAULT 'bot'"
+                )
+            conn.commit()
 
     def _write(self, sql: str, params: Iterable[Any] = ()) -> int:
         with self._write_lock:
             conn = self._connect()
-            try:
-                cur = conn.execute(sql, tuple(params))
-                conn.commit()
-                return int(cur.lastrowid or 0)
-            finally:
-                conn.close()
+            cur = conn.execute(sql, tuple(params))
+            conn.commit()
+            return int(cur.lastrowid or 0)
 
     def _execute(self, sql: str, params: Iterable[Any] = ()) -> int:
         """Run a write and return the number of affected rows."""
         with self._write_lock:
             conn = self._connect()
-            try:
-                cur = conn.execute(sql, tuple(params))
-                conn.commit()
-                return max(0, int(cur.rowcount))
-            finally:
-                conn.close()
+            cur = conn.execute(sql, tuple(params))
+            conn.commit()
+            return max(0, int(cur.rowcount))
 
     def _all(self, sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
         conn = self._connect()
-        try:
-            return [dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
-        finally:
-            conn.close()
+        return [dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
 
     def _one(self, sql: str, params: Iterable[Any] = ()) -> dict[str, Any] | None:
         conn = self._connect()
-        try:
-            row = conn.execute(sql, tuple(params)).fetchone()
-            return dict(row) if row else None
-        finally:
-            conn.close()
+        row = conn.execute(sql, tuple(params)).fetchone()
+        return dict(row) if row else None
 
     # ------------------------------------------------------------------- kv
     def kv_get(self, key: str) -> str | None:
@@ -425,32 +510,26 @@ class Database:
         return self._all("SELECT * FROM reminders WHERE done = 0 ORDER BY next_run")
 
     def cancel_reminder(self, reminder_id: int) -> bool:
-        conn = self._connect()
-        try:
-            with self._write_lock:
-                cur = conn.execute(
-                    "UPDATE reminders SET done = 1 WHERE id = ? AND done = 0",
-                    (reminder_id,),
-                )
-                conn.commit()
-                return cur.rowcount > 0
-        finally:
-            conn.close()
+        with self._write_lock:
+            conn = self._connect()
+            cur = conn.execute(
+                "UPDATE reminders SET done = 1 WHERE id = ? AND done = 0",
+                (reminder_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
 
     def cancel_reminders_by_kind(self, kind: str, user_id: str | None = None) -> int:
-        conn = self._connect()
-        try:
-            with self._write_lock:
-                query = "UPDATE reminders SET done = 1 WHERE done = 0 AND kind = ?"
-                params: list[Any] = [kind]
-                if user_id:
-                    query += " AND user_id = ?"
-                    params.append(user_id)
-                cur = conn.execute(query, params)
-                conn.commit()
-                return cur.rowcount
-        finally:
-            conn.close()
+        with self._write_lock:
+            conn = self._connect()
+            query = "UPDATE reminders SET done = 1 WHERE done = 0 AND kind = ?"
+            params: list[Any] = [kind]
+            if user_id:
+                query += " AND user_id = ?"
+                params.append(user_id)
+            cur = conn.execute(query, params)
+            conn.commit()
+            return cur.rowcount
 
     def find_recurring(self, kind: str, user_id: str) -> dict[str, Any] | None:
         return self._one(
@@ -521,11 +600,8 @@ class Database:
     def vacuum(self) -> None:
         with self._write_lock:
             conn = self._connect()
-            try:
-                conn.execute("VACUUM")
-                conn.commit()
-            finally:
-                conn.close()
+            conn.execute("VACUUM")
+            conn.commit()
 
     def add_memory_vector(
         self,
@@ -570,6 +646,12 @@ class Database:
         query_norm = sum(value * value for value in vector) ** 0.5
         if query_norm <= 0:
             return []
+
+        if rows:
+            result = _rank_with_numpy(rows, vector, query_norm, limit)
+            if result is not None:
+                return result
+
         scored: list[dict[str, Any]] = []
         for row in rows:
             dimensions = int(row.get("dimensions") or 0)
@@ -864,31 +946,170 @@ class Database:
 
     # ---------------------------------------------------------------- threads
     def mark_thread(self, channel_id: str, thread_ts: str, owner: str = "bot") -> None:
+        """Record an identity that answered here.
+
+        A thread can belong to both identities: the bot app and boi may reply in
+        the same thread, and whichever spoke last must not evict the other.
+        """
         self._write(
             "INSERT INTO bot_threads (channel_id, thread_ts, created_at, owner) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(channel_id, thread_ts) DO UPDATE SET owner = excluded.owner",
+            "ON CONFLICT(channel_id, thread_ts) DO UPDATE SET owner = "
+            "CASE WHEN instr(',' || bot_threads.owner || ',', ',' || excluded.owner || ',') > 0 "
+            "THEN bot_threads.owner ELSE bot_threads.owner || ',' || excluded.owner END",
             (channel_id, thread_ts, iso(), owner),
         )
 
-    def is_thread(self, channel_id: str, thread_ts: str, owner: str | None = None) -> bool:
-        if owner:
-            row = self._one(
-                "SELECT 1 AS ok FROM bot_threads WHERE channel_id = ? AND thread_ts = ? AND owner = ?",
-                (channel_id, thread_ts, owner),
-            )
-        else:
-            row = self._one(
-                "SELECT 1 AS ok FROM bot_threads WHERE channel_id = ? AND thread_ts = ?",
-                (channel_id, thread_ts),
-            )
-        return bool(row)
-
-    def thread_owner(self, channel_id: str, thread_ts: str) -> str | None:
+    def thread_owners(self, channel_id: str, thread_ts: str) -> set[str]:
         row = self._one(
             "SELECT owner FROM bot_threads WHERE channel_id = ? AND thread_ts = ?",
             (channel_id, thread_ts),
         )
-        return str(row["owner"]) if row and row.get("owner") else None
+        raw = str(row["owner"]) if row and row.get("owner") else ""
+        return {part for part in raw.split(",") if part}
+
+    def is_thread(self, channel_id: str, thread_ts: str, owner: str | None = None) -> bool:
+        owners = self.thread_owners(channel_id, thread_ts)
+        if owner:
+            return owner in owners
+        return bool(owners)
+
+    def thread_owner(self, channel_id: str, thread_ts: str) -> str | None:
+        owners = self.thread_owners(channel_id, thread_ts)
+        if not owners:
+            return None
+        return ",".join(sorted(owners))
+
+    # --------------------------------------------------------------- dm chats
+    def add_dm_chat(self, user_id: str, thread_ts: str, title: str = "") -> None:
+        now = iso()
+        self._write(
+            "INSERT INTO dm_chats (user_id, thread_ts, title, created_at, last_used_at) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, thread_ts) DO UPDATE SET "
+            "last_used_at = excluded.last_used_at",
+            (user_id, thread_ts, title, now, now),
+        )
+
+    def dm_chat(self, user_id: str, thread_ts: str) -> dict[str, Any] | None:
+        return self._one(
+            "SELECT * FROM dm_chats WHERE user_id = ? AND thread_ts = ?",
+            (user_id, thread_ts),
+        )
+
+    def dm_chats(self, user_id: str, limit: int = 25) -> list[dict[str, Any]]:
+        return self._all(
+            "SELECT * FROM dm_chats WHERE user_id = ? AND archived = 0 "
+            "ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT ?",
+            (user_id, max(1, limit)),
+        )
+
+    def rename_dm_chat(self, user_id: str, thread_ts: str, title: str) -> bool:
+        return (
+            self._execute(
+                "UPDATE dm_chats SET title = ? WHERE user_id = ? AND thread_ts = ?",
+                (title, user_id, thread_ts),
+            )
+            > 0
+        )
+
+    def archive_dm_chat(self, user_id: str, thread_ts: str) -> bool:
+        return (
+            self._execute(
+                "UPDATE dm_chats SET archived = 1 WHERE user_id = ? AND thread_ts = ?",
+                (user_id, thread_ts),
+            )
+            > 0
+        )
+
+    def touch_dm_chat(self, user_id: str, thread_ts: str) -> None:
+        self._write(
+            "UPDATE dm_chats SET last_used_at = ? WHERE user_id = ? AND thread_ts = ?",
+            (iso(), user_id, thread_ts),
+        )
+
+    def count_dm_chats(self, user_id: str) -> int:
+        row = self._one(
+            "SELECT COUNT(*) AS n FROM dm_chats WHERE user_id = ? AND archived = 0",
+            (user_id,),
+        )
+        return int((row or {}).get("n") or 0)
+
+    def prune_dm_chats(self, user_id: str, keep: int = 50) -> int:
+        """Drop the oldest chats past the per-user cap."""
+        keep = max(1, keep)
+        rows = self._all(
+            "SELECT thread_ts FROM dm_chats WHERE user_id = ? AND archived = 0 "
+            "ORDER BY COALESCE(last_used_at, created_at) DESC",
+            (user_id,),
+        )
+        doomed = [row["thread_ts"] for row in rows[keep:]]
+        for thread_ts in doomed:
+            self._execute(
+                "DELETE FROM dm_chats WHERE user_id = ? AND thread_ts = ?",
+                (user_id, thread_ts),
+            )
+        return len(doomed)
+
+    def prune_old_dm_chats(self, days: int) -> int:
+        if days <= 0:
+            return 0
+        cutoff = iso(utcnow() - timedelta(days=days))
+        return self._execute(
+            "DELETE FROM dm_chats WHERE COALESCE(last_used_at, created_at) < ?",
+            (cutoff,),
+        )
+
+    def active_dm_chat(self, user_id: str) -> str | None:
+        return self.kv_get(f"dm_active:{user_id}")
+
+    def set_active_dm_chat(self, user_id: str, thread_ts: str | None) -> None:
+        key = f"dm_active:{user_id}"
+        if thread_ts:
+            self.kv_set(key, thread_ts)
+        else:
+            self.kv_del(key)
+
+    # ----------------------------------------------------------- secret chats
+    def mark_secret_thread(
+        self, user_id: str, thread_ts: str, expires_at: str | None = None
+    ) -> None:
+        self._write(
+            "INSERT INTO dm_secret_threads (user_id, thread_ts, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(user_id, thread_ts) DO UPDATE SET "
+            "expires_at = excluded.expires_at",
+            (user_id, thread_ts, iso(), expires_at),
+        )
+
+    def is_secret_thread(self, user_id: str, thread_ts: str) -> bool:
+        # A thread that was ever secret stays secret until it is explicitly
+        # unmarked. Expiry only drops the in-memory turns; if an old thread
+        # became normal again, a late reply would start being saved.
+        row = self._one(
+            "SELECT 1 AS ok FROM dm_secret_threads WHERE user_id = ? AND thread_ts = ?",
+            (user_id, thread_ts),
+        )
+        return bool(row)
+
+    def unmark_secret_thread(self, user_id: str, thread_ts: str) -> None:
+        self._execute(
+            "DELETE FROM dm_secret_threads WHERE user_id = ? AND thread_ts = ?",
+            (user_id, thread_ts),
+        )
+
+    def secret_threads(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        return self._all(
+            "SELECT * FROM dm_secret_threads WHERE user_id = ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (user_id, max(1, limit)),
+        )
+
+    def prune_secret_threads(self, days: int = 0) -> int:
+        if days <= 0:
+            return 0
+        cutoff = iso(utcnow() - timedelta(days=days))
+        return self._execute(
+            "DELETE FROM dm_secret_threads WHERE created_at < ?",
+            (cutoff,),
+        )
 
     # ------------------------------------------------------------------ stats
     def stats(self) -> dict[str, int]:

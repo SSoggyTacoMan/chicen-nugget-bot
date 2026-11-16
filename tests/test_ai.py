@@ -315,7 +315,7 @@ def test_bot_config_tool(tmp_path):
     async def run():
         # Guest denied
         denied = await box.execute("bot_config", {"action": "list"}, ctx_guest)
-        assert "only the owner/admin" in denied
+        assert "only the owner" in denied
 
         # Owner can list
         lst = await box.execute("bot_config", {"action": "list"}, ctx_owner)
@@ -1359,14 +1359,15 @@ def test_bot_honors_explicit_no_reply():
         runtime.agent, runtime.settings = old_agent, old_settings
 
 
-def test_bot_dm_threads_stay_in_thread():
+def test_bot_dm_threads_stay_in_thread(tmp_path):
     import asyncio
     from unittest.mock import AsyncMock, MagicMock, patch
 
+    from bot.db import Database
     from bot.features.agent import _handle_dm
     from bot.runtime import runtime
 
-    old_agent, old_settings = runtime.agent, runtime.settings
+    old_agent, old_settings, old_db = runtime.agent, runtime.settings, runtime.db
     runtime.agent = MagicMock()
     runtime.agent.reply = AsyncMock(return_value="ok")
     runtime.settings = MagicMock()
@@ -1374,6 +1375,14 @@ def test_bot_dm_threads_stay_in_thread():
     runtime.settings.ai_allow_admins = False
     runtime.settings.ai_enabled = True
     runtime.settings.slack_bot_token = "xoxb-test"
+    runtime.settings.dm_chats = True
+    runtime.settings.dm_thread_minutes = 5
+    runtime.settings.dm_chat_max = 50
+    runtime.settings.secret_chats = False
+    runtime.settings.secret_chat_discreet = True
+    db = Database(str(tmp_path / "dm_chats.db"))
+    db.init()
+    runtime.db = db
     client = AsyncMock()
 
     async def run():
@@ -1392,17 +1401,22 @@ def test_bot_dm_threads_stay_in_thread():
             await _handle_dm(threaded, client)
 
             replies = runtime.agent.reply.call_args_list
-            assert replies[0][1]["thread_ts"] is None
+            # The first DM starts its own thread, rooted at the user's message.
+            assert replies[0][1]["thread_ts"] == "10.0"
+            assert replies[0][1]["conversation"] == "dm:U_OWNER:10.0"
+            # A thread reply stays in that same thread.
             assert replies[1][1]["thread_ts"] == "10.0"
+            assert replies[1][1]["conversation"] == "dm:U_OWNER:10.0"
 
             posts = mock_post.call_args_list
-            assert posts[0][1]["thread_ts"] is None
+            assert posts[0][1]["thread_ts"] == "10.0"
             assert posts[1][1]["thread_ts"] == "10.0"
 
     try:
         asyncio.run(run())
     finally:
-        runtime.agent, runtime.settings = old_agent, old_settings
+        runtime.agent, runtime.settings, runtime.db = old_agent, old_settings, old_db
+        db.close()
 
 
 def test_thread_followup_ignores_plain_statements(tmp_path):
@@ -2742,6 +2756,151 @@ def test_thread_followup_after_bot_reply_bypasses_strict_gate(tmp_path):
         runtime.gate = old_gate
         runtime.db = old_db
         runtime.settings = old_settings
+
+
+def test_mention_includes_recent_channel_context():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.features.agent import on_app_mention
+    from bot.runtime import runtime
+
+    old_settings, old_bot = runtime.settings, runtime.bot_user_id
+    runtime.settings = MagicMock()
+    runtime.settings.ai_allowed.return_value = True
+    runtime.settings.slack_bot_token = "xoxb-test"
+    runtime.bot_user_id = "UBOT"
+    client = AsyncMock()
+
+    async def run():
+        recent = (
+            ["alice: sorry for ping but should i buy gta 6?", "alice: also FOMO"],
+            False,
+        )
+        with patch("bot.features.agent._channel_context", AsyncMock(return_value=recent)), \
+             patch("bot.features.agent._handle_channel", AsyncMock(return_value=True)) as mock_handle, \
+             patch("bot.features.agent.fetch_slack_images", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.transcribe_slack_audio", AsyncMock(return_value=[])):
+            await on_app_mention(
+                {"channel": "C1", "user": "U1", "text": "<@UBOT> advice?", "ts": "1.1"},
+                client,
+            )
+        mock_handle.assert_called_once()
+        context = mock_handle.call_args[1]["context"]
+        assert "gta 6" in context
+        assert "advice?" not in context
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.settings, runtime.bot_user_id = old_settings, old_bot
+
+
+def test_thread_followup_works_when_boi_also_replied(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.db import Database
+    from bot.features.agent import _handle_thread_continuation, _last_thread
+    from bot.runtime import runtime
+
+    db = Database(str(tmp_path / "dual_thread.db"))
+    db.init()
+    db.mark_thread("C_DUAL", "700.000", owner="user")
+    db.mark_thread("C_DUAL", "700.000", owner="bot")
+    db.add_message("ch:C_DUAL:700.000", "assistant", None, "buy it")
+    old_db, old_settings, old_gate = runtime.db, runtime.settings, runtime.gate
+    runtime.db = db
+    runtime.settings = MagicMock()
+    runtime.settings.ai_allowed.return_value = True
+    runtime.settings.ai_thread_cooldown = 0
+    runtime.settings.ai_gate_enabled = True
+    runtime.settings.bot_name = "Chicen Nugget Bot"
+    runtime.gate = MagicMock()
+    _last_thread.clear()
+
+    async def run():
+        with patch("bot.features.agent._user_name", return_value="alice"), \
+             patch("bot.features.agent._channel_name", return_value="general"), \
+             patch("bot.features.agent.fetch_slack_images", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.transcribe_slack_audio", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.user_retry_after", return_value=0), \
+             patch("bot.features.agent._handle_channel", AsyncMock(return_value=True)) as mock_handle:
+            await _handle_thread_continuation(
+                {
+                    "channel": "C_DUAL",
+                    "thread_ts": "700.000",
+                    "user": "U1",
+                    "text": "wait really?",
+                    "ts": "700.002",
+                },
+                AsyncMock(),
+            )
+            mock_handle.assert_called_once()
+            assert "really" in mock_handle.call_args[1]["text"]
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.db, runtime.settings, runtime.gate = old_db, old_settings, old_gate
+
+
+def test_thread_followup_skips_boi_when_it_spoke_last(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.db import Database
+    from bot.features.agent import _handle_thread_continuation, _last_thread
+    from bot.runtime import runtime
+
+    db = Database(str(tmp_path / "dual_last.db"))
+    db.init()
+    db.mark_thread("C_DUAL", "800.000", owner="bot")
+    db.mark_thread("C_DUAL", "800.000", owner="user")
+    old_db, old_settings = runtime.db, runtime.settings
+    runtime.db = db
+    runtime.settings = MagicMock()
+    runtime.settings.ai_allowed.return_value = True
+    runtime.settings.ai_thread_cooldown = 0
+    runtime.settings.ai_gate_enabled = True
+    runtime.settings.bot_name = "Chicen Nugget Bot"
+    _last_thread.clear()
+
+    async def run():
+        with patch("bot.features.agent._thread_context", AsyncMock(return_value=(["you: ..."], False))), \
+             patch("bot.features.agent.fetch_slack_images", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.transcribe_slack_audio", AsyncMock(return_value=[])), \
+             patch("bot.features.agent.user_retry_after", return_value=0), \
+             patch("bot.features.agent._handle_channel", AsyncMock(return_value=True)) as mock_handle:
+            await _handle_thread_continuation(
+                {
+                    "channel": "C_DUAL",
+                    "thread_ts": "800.000",
+                    "user": "U1",
+                    "text": "wait really?",
+                    "ts": "800.002",
+                },
+                AsyncMock(),
+            )
+            mock_handle.assert_not_called()
+
+            # Naming boi keeps the bot app out of it even if the bot spoke last.
+            await _handle_thread_continuation(
+                {
+                    "channel": "C_DUAL",
+                    "thread_ts": "800.000",
+                    "user": "U1",
+                    "text": "boi what do you think?",
+                    "ts": "800.003",
+                },
+                AsyncMock(),
+            )
+            mock_handle.assert_not_called()
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.db, runtime.settings = old_db, old_settings
 
 
 def test_public_veto_regex_catches_internal_details():

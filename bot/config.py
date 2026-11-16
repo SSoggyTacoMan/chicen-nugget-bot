@@ -92,6 +92,8 @@ class Settings:
     bot_name: str
     owner_user_id: str
     admin_user_ids: frozenset[str]
+    moderator_user_ids: frozenset[str]
+    admin_private_access: bool
     timezone: str
     auto_join_channels: frozenset[str]
 
@@ -137,6 +139,16 @@ class Settings:
     ai_thread_cooldown: int
     chat_chunk_delay: float
     chat_chunk_max: int
+    dm_chats: bool
+    dm_thread_minutes: int
+    dm_thread_classifier: bool
+    dm_chat_max: int
+    secret_chats: bool
+    secret_chat_ttl_minutes: int
+    secret_chat_max_per_user: int
+    secret_chat_tools: str
+    secret_chat_discreet: bool
+    secret_preview_text: str
     quiet_hours_start: int
     quiet_hours_end: int
     proactive_daily_cap: int
@@ -287,6 +299,25 @@ class Settings:
     def is_admin(self, user_id: str | None) -> bool:
         return bool(user_id) and (user_id in self.admin_user_ids)
 
+    def is_moderator(self, user_id: str | None) -> bool:
+        """Moderators can run the access-request flow but nothing else."""
+        return bool(user_id) and (user_id in self.moderator_user_ids)
+
+    def can_moderate(self, user_id: str | None) -> bool:
+        return self.is_admin(user_id) or self.is_moderator(user_id)
+
+    def private_access(self, user_id: str | None) -> bool:
+        """Owner-private tools (mail, calendar, github, mac, memory).
+
+        Owners always have it. Admins only when ADMIN_PRIVATE_ACCESS is on,
+        because those tools use the owner's credentials and data.
+        """
+        if not user_id:
+            return False
+        if user_id == self.owner_user_id:
+            return True
+        return self.is_admin(user_id) and self.admin_private_access
+
     def image_allowed(self, user_id: str | None) -> bool:
         """Admins always may; everyone else needs IMAGE_ALLOWED_USER_IDS."""
         return self.is_admin(user_id) or (
@@ -325,6 +356,7 @@ class Settings:
 def load_settings() -> Settings:
     owner = _str("OWNER_USER_ID")
     admins = set(_list("ADMIN_USER_IDS"))
+    moderators = set(_list("MODERATOR_USER_IDS"))
     if owner:
         admins.add(owner)
 
@@ -365,6 +397,8 @@ def load_settings() -> Settings:
         bot_name=_str("BOT_NAME", "Chicen Nugget Bot") or "Chicen Nugget Bot",
         owner_user_id=owner,
         admin_user_ids=frozenset(admins),
+        moderator_user_ids=frozenset(moderators),
+        admin_private_access=_bool("ADMIN_PRIVATE_ACCESS", False),
         timezone=_str("TIMEZONE", "UTC") or "UTC",
         auto_join_channels=frozenset(_list("AUTO_JOIN_CHANNELS")),
         data_dir=data_dir,
@@ -428,6 +462,17 @@ def load_settings() -> Settings:
         ai_thread_cooldown=max(0, _int("AI_THREAD_COOLDOWN", 120)),
         chat_chunk_delay=max(0.0, _float("CHAT_CHUNK_DELAY_SECONDS", 0.6)),
         chat_chunk_max=max(1, min(8, _int("CHAT_CHUNK_MAX", 4))),
+        dm_chats=_bool("DM_CHATS", True),
+        dm_thread_minutes=max(1, _int("DM_THREAD_MINUTES", 5)),
+        dm_thread_classifier=_bool("DM_THREAD_CLASSIFIER", False),
+        dm_chat_max=max(1, _int("DM_CHAT_MAX", 50)),
+        secret_chats=_bool("SECRET_CHATS", True),
+        secret_chat_ttl_minutes=max(5, _int("SECRET_CHAT_TTL_MINUTES", 120)),
+        secret_chat_max_per_user=max(1, _int("SECRET_CHAT_MAX_PER_USER", 3)),
+        secret_chat_tools=(_str("SECRET_CHAT_TOOLS", "web") or "web").lower(),
+        secret_chat_discreet=_bool("SECRET_CHAT_DISCREET", True),
+        secret_preview_text=_str("SECRET_PREVIEW_TEXT", "🔒 secret chat reply")
+        or "🔒 secret chat reply",
         quiet_hours_start=quiet_start,
         quiet_hours_end=quiet_end,
         proactive_daily_cap=max(0, _int("PROACTIVE_DAILY_CAP", 0)),

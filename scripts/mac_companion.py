@@ -3,16 +3,22 @@
 
 Lightweight local bridge daemon running on macOS.
 Exposes volume, battery, clipboard, notifications, frontmost app, lock, sleep,
-speech, and shell execution so the Slack assistant (Boi) can interact with your Mac.
+speech, and (optionally) shell execution so the Slack assistant (Boi) can
+interact with your Mac.
 
 Zero dependencies (Python 3 standard library only).
 
-Usage:
-    python3 scripts/mac_companion.py [--port 8765] [--token YOUR_SECRET_TOKEN]
+This bridge is a root-equivalent capability: anyone who can reach it and knows
+the token can run commands as your macOS user. It therefore refuses to start
+without a token and listens on loopback by default.
 
-Then expose it via Cloudflare Tunnel or ngrok:
-    cloudflared tunnel --url http://localhost:8765
-    # or: ngrok http 8765
+Usage:
+    python3 scripts/mac_companion.py --token YOUR_SECRET_TOKEN
+    # optional, dangerous: allow `run` and `applescript` actions
+    python3 scripts/mac_companion.py --token ... --allow-shell
+
+Expose it through Cloudflare Tunnel or ngrok only if you understand the risk:
+    cloudflared tunnel --url http://127.0.0.1:8765
 
 And configure your bot in Slack:
     /nugget setup mac
@@ -21,11 +27,14 @@ And configure your bot in Slack:
 from __future__ import annotations
 
 import argparse
+import hmac
 import http.server
 import json
 import os
 import subprocess
 import sys
+
+MAX_BODY_BYTES = 1_000_000
 
 
 def run_cmd(*cmd: str, stdin_data: bytes | None = None, timeout: float = 15.0) -> tuple[int, str, str]:
@@ -51,6 +60,7 @@ def run_cmd(*cmd: str, stdin_data: bytes | None = None, timeout: float = 15.0) -
 
 class BridgeHandler(http.server.BaseHTTPRequestHandler):
     token: str = ""
+    allow_shell: bool = False
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         sys.stderr.write(f"[mac_companion] {args[0]} - {args[1]}\n")
@@ -63,19 +73,25 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorized(self) -> bool:
+        if not self.token:
+            return False
+        auth = self.headers.get("Authorization", "")
+        expected = f"Bearer {self.token}"
+        return hmac.compare_digest(auth, expected)
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path in {"/", "/health", "/status"}:
-            self._send_json(200, {"status": "ok", "platform": sys.platform})
+            # Keep the health probe free of host details; no auth is required so
+            # tunnels and uptime checks can use it safely.
+            self._send_json(200, {"status": "ok"})
         else:
             self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.token:
-            auth = self.headers.get("Authorization", "")
-            expected = f"Bearer {self.token}"
-            if auth != expected:
-                self._send_json(401, {"error": "unauthorized"})
-                return
+        if not self._authorized():
+            self._send_json(401, {"error": "unauthorized"})
+            return
 
         if self.path != "/action":
             self._send_json(404, {"error": "unknown endpoint; use /action"})
@@ -83,9 +99,18 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+        if length < 0 or length > MAX_BODY_BYTES:
+            self._send_json(413, {"error": f"body too large (max {MAX_BODY_BYTES} bytes)"})
+            return
+        try:
             payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
         except Exception as exc:  # noqa: BLE001
             self._send_json(400, {"error": f"invalid json: {exc}"})
+            return
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "body must be a JSON object"})
             return
 
         action = str(payload.get("action") or "status").lower().strip()
@@ -174,6 +199,18 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {"result": out} if code == 0 else {"error": err})
             return
 
+        if action in {"applescript", "run"} and not self.allow_shell:
+            self._send_json(
+                403,
+                {
+                    "error": (
+                        f"action {action!r} is disabled; restart the bridge with "
+                        "--allow-shell to enable arbitrary script/command execution"
+                    )
+                },
+            )
+            return
+
         if action == "applescript":
             script = str(payload.get("script") or "").strip()
             if not script:
@@ -219,13 +256,36 @@ def main() -> None:
         print("warning: mac_companion is designed to run locally on macOS.", file=sys.stderr)
 
     parser = argparse.ArgumentParser(description="Chicen Nugget Mac Companion Bridge")
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Bind address (default: 127.0.0.1). Use 0.0.0.0 only behind a tunnel.",
+    )
     parser.add_argument("--port", type=int, default=8765, help="Port to listen on (default: 8765)")
-    parser.add_argument("--token", type=str, default="", help="Optional shared bearer token")
+    parser.add_argument(
+        "--token",
+        type=str,
+        required=True,
+        help="Shared bearer token. Required: the bridge refuses to run unauthenticated.",
+    )
+    parser.add_argument(
+        "--allow-shell",
+        action="store_true",
+        help="Enable the `run` (arbitrary shell) and `applescript` actions. Off by default.",
+    )
     args = parser.parse_args()
 
-    BridgeHandler.token = args.token
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), BridgeHandler)
-    print(f"mac_companion listening on http://0.0.0.0:{args.port} (token: {'yes' if args.token else 'none'})")
+    if not args.token.strip():
+        parser.error("--token must not be empty")
+
+    BridgeHandler.token = args.token.strip()
+    BridgeHandler.allow_shell = bool(args.allow_shell)
+    server = http.server.ThreadingHTTPServer((args.host, args.port), BridgeHandler)
+    print(
+        f"mac_companion listening on http://{args.host}:{args.port} "
+        f"(auth: on, shell: {'on' if args.allow_shell else 'off'})"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

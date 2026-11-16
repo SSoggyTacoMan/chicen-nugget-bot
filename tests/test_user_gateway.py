@@ -2,7 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot.runtime import runtime
-from bot.user_gateway import UserGateway
+from bot.user_gateway import UserGateway, _last_thread
 
 
 def test_user_gateway_init():
@@ -380,8 +380,17 @@ def test_user_gateway_ignores_bot_owned_thread(tmp_path):
     asyncio.run(run())
 
 
-def test_user_gateway_ignores_unmentioned_channel_messages():
+def test_user_gateway_ignores_unmentioned_channel_messages(tmp_path):
+    from bot.db import Database
+
     async def run():
+        db = Database(str(tmp_path / "gw_unknown_thread.db"))
+        db.init()
+        old_db, old_user_client = runtime.db, runtime.user_client
+        runtime.db = db
+        runtime.user_client = None
+        _last_thread.clear()
+
         mock_client = AsyncMock()
         gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
         mock_agent = AsyncMock()
@@ -407,6 +416,234 @@ def test_user_gateway_ignores_unmentioned_channel_messages():
                 await gw._handle_event(event)
             mock_agent.reply.assert_not_called()
         finally:
+            runtime.db = old_db
+            runtime.user_client = old_user_client
+            runtime.settings = old_settings
+
+    asyncio.run(run())
+
+
+def _followup_thread(messages):
+    """A thread reply event plus the replies slack would return for it."""
+    return (
+        {
+            "type": "message",
+            "channel": "C_TEST",
+            "user": "U_OWNER",
+            "text": messages[-1]["text"],
+            "ts": messages[-1]["ts"],
+            "thread_ts": messages[0]["ts"],
+        },
+        {"messages": messages},
+    )
+
+
+def test_user_gateway_follows_up_in_its_own_thread(tmp_path):
+    from bot.db import Database
+
+    async def run():
+        db = Database(str(tmp_path / "gw_followup.db"))
+        db.init()
+        db.mark_thread("C_TEST", "500.000", owner="user")
+        _last_thread.clear()
+
+        event, replies = _followup_thread(
+            [
+                {"user": "U_OWNER", "text": "<@U_ALT> advice?", "ts": "500.000"},
+                {"user": "U_ALT", "text": "what's the situation?", "ts": "500.001"},
+                {
+                    "user": "U_OWNER",
+                    "text": "should i buy gta 6? i have 500 hours on gta v so i know i will like it",
+                    "ts": "500.002",
+                },
+            ]
+        )
+        mock_client = AsyncMock()
+        mock_client.conversations_replies = AsyncMock(return_value=replies)
+        gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
+        mock_agent = AsyncMock()
+        mock_agent.reply = AsyncMock(return_value="buy it")
+        runtime.agent = mock_agent
+
+        old_db, old_user_client, old_settings = runtime.db, runtime.user_client, runtime.settings
+        runtime.db = db
+        runtime.user_client = None
+        mock_settings = MagicMock()
+        mock_settings.ai_enabled = True
+        mock_settings.ai_allowed.return_value = True
+        mock_settings.ai_thread_cooldown = 0
+        mock_settings.bot_name = "Chicen Nugget Bot"
+        runtime.settings = mock_settings
+
+        try:
+            with patch("bot.user_gateway.fetch_slack_images", AsyncMock(return_value=[])):
+                await gw._handle_event(event)
+
+            mock_agent.reply.assert_called_once()
+            kwargs = mock_agent.reply.call_args[1]
+            assert kwargs["trigger"] == "thread_followup"
+            assert kwargs["thread_ts"] == "500.000"
+            assert "advice?" in kwargs["context"]
+            mock_client.chat_postMessage.assert_called_once()
+            assert mock_client.chat_postMessage.call_args[1]["thread_ts"] == "500.000"
+            assert db.is_thread("C_TEST", "500.000", owner="user")
+        finally:
+            runtime.db = old_db
+            runtime.user_client = old_user_client
+            runtime.settings = old_settings
+
+    asyncio.run(run())
+
+
+def test_user_gateway_thread_followup_respects_cooldown(tmp_path):
+    from bot.db import Database
+
+    async def run():
+        db = Database(str(tmp_path / "gw_cooldown.db"))
+        db.init()
+        db.mark_thread("C_TEST", "510.000", owner="user")
+
+        event, replies = _followup_thread(
+            [
+                {"user": "U_ALT", "text": "what's the situation?", "ts": "510.000"},
+                {"user": "U_OWNER", "text": "can you check this build error for me", "ts": "510.002"},
+            ]
+        )
+        mock_client = AsyncMock()
+        mock_client.conversations_replies = AsyncMock(return_value=replies)
+        gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
+        mock_agent = AsyncMock()
+        mock_agent.reply = AsyncMock(return_value="on it")
+        runtime.agent = mock_agent
+
+        old_db, old_user_client, old_settings = runtime.db, runtime.user_client, runtime.settings
+        runtime.db = db
+        runtime.user_client = None
+        mock_settings = MagicMock()
+        mock_settings.ai_enabled = True
+        mock_settings.ai_allowed.return_value = True
+        mock_settings.ai_thread_cooldown = 120
+        mock_settings.bot_name = "Chicen Nugget Bot"
+        runtime.settings = mock_settings
+
+        try:
+            with patch("bot.user_gateway.fetch_slack_images", AsyncMock(return_value=[])):
+                await gw._handle_event(event)
+                mock_agent.reply.assert_called_once()
+
+                # Same thread again inside the cooldown window stays quiet.
+                mock_agent.reply.reset_mock()
+                await gw._handle_event({**event, "ts": "510.003", "text": "any update on that?"})
+            mock_agent.reply.assert_not_called()
+        finally:
+            _last_thread.clear()
+            runtime.db = old_db
+            runtime.user_client = old_user_client
+            runtime.settings = old_settings
+
+    asyncio.run(run())
+
+
+def test_user_gateway_followup_steps_back_when_bot_spoke_last(tmp_path):
+    from bot.db import Database
+
+    async def run():
+        db = Database(str(tmp_path / "gw_dual.db"))
+        db.init()
+        db.mark_thread("C_TEST", "800.000", owner="bot")
+        db.mark_thread("C_TEST", "800.000", owner="user")
+        _last_thread.clear()
+
+        event = {
+            "type": "message",
+            "channel": "C_TEST",
+            "user": "U_OWNER",
+            "text": "can you check the diff too",
+            "ts": "800.003",
+            "thread_ts": "800.000",
+        }
+        replies = {
+            "messages": [
+                {"user": "U_ALT", "text": "here's the answer", "ts": "800.000"},
+                {"user": "U_BOT", "text": "want me to check the diff?", "ts": "800.002"},
+            ]
+        }
+        mock_client = AsyncMock()
+        mock_client.conversations_replies = AsyncMock(return_value=replies)
+        gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
+        mock_agent = AsyncMock()
+        runtime.agent = mock_agent
+
+        old_db, old_user_client, old_settings = runtime.db, runtime.user_client, runtime.settings
+        old_bot = runtime.bot_user_id
+        runtime.db = db
+        runtime.user_client = None
+        runtime.bot_user_id = "U_BOT"
+        mock_settings = MagicMock()
+        mock_settings.ai_enabled = True
+        mock_settings.ai_allowed.return_value = True
+        mock_settings.ai_thread_cooldown = 0
+        runtime.settings = mock_settings
+
+        try:
+            with patch("bot.user_gateway.fetch_slack_images", AsyncMock(return_value=[])):
+                await gw._handle_event(event)
+            mock_agent.reply.assert_not_called()
+        finally:
+            runtime.db = old_db
+            runtime.user_client = old_user_client
+            runtime.settings = old_settings
+            runtime.bot_user_id = old_bot
+
+    asyncio.run(run())
+
+
+def test_user_gateway_mention_gets_channel_context():
+    async def run():
+        mock_client = AsyncMock()
+        mock_client.conversations_history = AsyncMock(
+            return_value={
+                "messages": [
+                    {
+                        "user": "U_OWNER",
+                        "text": "<!channel> sorry for ping but should i buy gta 6?",
+                        "ts": "600.000",
+                    }
+                ]
+            }
+        )
+        gw = UserGateway(token="xoxc-test", cookie="xoxd-test", user_id="U_ALT", user_client=mock_client)
+        mock_agent = AsyncMock()
+        mock_agent.reply = AsyncMock(return_value="yes")
+        runtime.agent = mock_agent
+
+        old_db, old_user_client, old_settings = runtime.db, runtime.user_client, runtime.settings
+        runtime.db = None
+        runtime.user_client = None
+        mock_settings = MagicMock()
+        mock_settings.ai_enabled = True
+        mock_settings.ai_allowed.return_value = True
+        runtime.settings = mock_settings
+
+        event = {
+            "type": "message",
+            "channel": "C_TEST",
+            "user": "U_OWNER",
+            "text": f"<@{gw.user_id}> advice?",
+            "ts": "600.001",
+        }
+
+        try:
+            with patch("bot.user_gateway.fetch_slack_images", AsyncMock(return_value=[])):
+                await gw._handle_event(event)
+
+            mock_agent.reply.assert_called_once()
+            kwargs = mock_agent.reply.call_args[1]
+            assert kwargs["trigger"] == "mention"
+            assert "gta 6" in kwargs["context"]
+        finally:
+            runtime.db = old_db
+            runtime.user_client = old_user_client
             runtime.settings = old_settings
 
     asyncio.run(run())

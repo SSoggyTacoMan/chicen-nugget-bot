@@ -81,12 +81,16 @@ class BrowserManager:
         if self._browser is not None:
             return
         self.root.mkdir(parents=True, exist_ok=True)
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            # Chromium refuses to start as root unless --no-sandbox is passed.
+            # Never do that: the bot can load untrusted pages, and an unsandboxed
+            # browser driven by an agent is a host-level risk. Run it non-root.
+            raise BrowserError(
+                "refusing to start chromium as root; run the bot as a non-root "
+                "user (e.g. `User=` in the systemd unit or the Dockerfile user)"
+            )
         self._playwright = await async_playwright().start()
         args = ["--disable-dev-shm-usage"]
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            # Chromium refuses to start as root without this. The bot is
-            # single-tenant and already runs as that OS user.
-            args.append("--no-sandbox")
         try:
             self._browser = await self._playwright.chromium.launch(
                 headless=self.headless, args=args
@@ -107,12 +111,16 @@ class BrowserManager:
             return True
         now = time.monotonic()
         cached = self._host_cache.get(host)
-        if cached and now - cached[0] < 600:
+        # Keep the window short: a long cache widens the DNS-rebinding gap
+        # between our check and Chromium's own resolution.
+        if cached and now - cached[0] < 30:
             return cached[1]
         try:
             blocked = await is_private_host(host)
         except Exception:  # noqa: BLE001 - fail closed
             blocked = True
+        if len(self._host_cache) > 512:
+            self._host_cache.clear()
         self._host_cache[host] = (now, blocked)
         return blocked
 

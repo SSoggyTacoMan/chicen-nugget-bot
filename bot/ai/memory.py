@@ -1,4 +1,7 @@
-"""Semantic memory: embed stored turns and search them by meaning."""
+"""Semantic memory: embed stored turns and search them by meaning.
+
+Approach inspired by noodle (https://github.com/MatthiasLubbertsen/noodle).
+"""
 
 from __future__ import annotations
 
@@ -11,6 +14,10 @@ from bot.config import Settings
 from bot.db import Database
 
 logger = logging.getLogger(__name__)
+
+# Short acknowledgements ("ok", "thanks", "lol") are not worth an embedding
+# round-trip; they dominate chat volume without adding retrievable meaning.
+MIN_EMBED_CHARS = 8
 
 
 class MemoryIndex:
@@ -59,6 +66,8 @@ class MemoryIndex:
     ) -> None:
         if not self.enabled or not message_id:
             return
+        if len((text or "").strip()) < MIN_EMBED_CHARS:
+            return
         vector = await self.embed(text)
         if vector:
             db.add_memory_vector(
@@ -77,7 +86,11 @@ class MemoryIndex:
         vector = await self.embed(query)
         if not vector:
             return []
-        return db.search_memory_vectors(self.model, vector, limit)
+        # The scan is CPU-heavy (thousands of embeddings); keep it off the event
+        # loop so a memory search cannot stall message handling.
+        return await asyncio.to_thread(
+            db.search_memory_vectors, self.model, vector, limit
+        )
 
     async def backfill(self, db: Database, limit: int = 500) -> int:
         if not self.enabled:

@@ -47,7 +47,6 @@ PRICES: dict[str, Price] = {
     "anthropic/claude-sonnet-5": Price(2.00, 10.00),
     "openai/gpt-6.1-sol": Price(2.00, 10.00),
     "openai/gpt-6.1-terra": Price(1.00, 5.00),
-    "openai/gpt-6-luna": Price(0.10, 0.50),
     "openai/gpt-6-astra": Price(10.00, 50.00),
     "deepseek/deepseek-v4.1-flash": Price(0.022, 0.40),
     "deepseek/deepseek-v4-flash": Price(0.09, 0.18),

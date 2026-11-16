@@ -84,7 +84,16 @@ def _status() -> str:
 
 
 def _is_admin(user_id: str | None) -> bool:
-    return bool(user_id) and runtime.settings.is_admin(user_id)
+    # The setup panel writes the owner's tokens (slack user session, gmail,
+    # github, mac bridge), so it follows private access, not just admin status.
+    from bot.config import Settings
+
+    settings = runtime.settings
+    if not user_id:
+        return False
+    if isinstance(settings, Settings):
+        return settings.private_access(user_id)
+    return settings.is_admin(user_id)
 
 
 def _set(key: str, value: str) -> None:

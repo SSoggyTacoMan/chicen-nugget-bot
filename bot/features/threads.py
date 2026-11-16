@@ -1,4 +1,4 @@
-"""NovaBot-inspired usergroup helpers.
+"""NovaBot-inspired usergroup helpers (https://github.com/aelithron/novabot-slack).
 
 - Warn someone who replies in a thread on a usergroup ping.
 - Offer (or automatically post) a safe message for people to thread on.

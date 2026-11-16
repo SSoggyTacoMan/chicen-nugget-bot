@@ -521,7 +521,6 @@ def leave_text(result: str) -> str:
 # ------------------------------------------------------------------ command
 async def cmd_pinggroup(ack, command, client) -> None:
     await ack()
-    settings = runtime.settings
     channel = command["channel_id"]
     user_id = command["user_id"]
     group = welcome_config().usergroup_id

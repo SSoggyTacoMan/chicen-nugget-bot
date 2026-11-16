@@ -20,12 +20,24 @@ from slack_sdk.web.async_client import AsyncWebClient
 logger = logging.getLogger(__name__)
 
 
+def _blocked_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True for anything that is not a globally routable address.
+
+    ``is_global`` covers RFC1918, loopback, link-local (including the cloud
+    metadata address), reserved and multicast space, plus shared/CGNAT
+    (100.64.0.0/10) on modern Python versions.
+    """
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return not ip.is_global
+
+
 async def is_private_host(hostname: str) -> bool:
     if not hostname:
         return True
     try:
         ip = ipaddress.ip_address(hostname)
-        return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
+        return _blocked_address(ip)
     except ValueError:
         pass
     try:
@@ -38,7 +50,7 @@ async def is_private_host(hostname: str) -> bool:
             ip = ipaddress.ip_address(address)
         except ValueError:
             continue
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        if _blocked_address(ip):
             return True
     return False
 
@@ -69,18 +81,28 @@ async def post(
     unfurl_links: bool = False,
     username: str | None = None,
     icon_url: str | None = None,
+    notification_text: str | None = None,
 ) -> dict[str, Any] | None:
     """Post a message.
 
     ``username`` and ``icon_url`` use Slack's ``chat:write.customize`` scope:
     the message is still a bot message with the app badge, but it displays the
     supplied name and avatar instead of the app's own.
+
+    ``notification_text`` keeps the real body in blocks and sends a generic
+    fallback as ``text``. Slack uses ``text`` for push notifications, the
+    conversation list and accessibility, so secret chats don't leak their
+    content into previews.
     """
     extra: dict[str, Any] = {}
     if username:
         extra["username"] = username
     if icon_url:
         extra["icon_url"] = icon_url
+    if notification_text:
+        if not blocks:
+            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+        text = notification_text
     try:
         response = await client.chat_postMessage(
             channel=channel,
@@ -412,6 +434,94 @@ async def invite_to_channel(
             return True, None
         logger.warning("conversations_invite failed for %s in %s: %s", user_id, channel_id, code)
         return False, code
+
+
+_QUOTE_LIMIT = 600
+
+
+def _rich_text(element: Any) -> str:
+    """Flatten one Slack rich text element into plain text."""
+    if not isinstance(element, Mapping):
+        return ""
+    kind = element.get("type")
+    if kind == "text":
+        return str(element.get("text") or "")
+    if kind == "user":
+        return f"<@{element.get('user_id')}>"
+    if kind == "channel":
+        return f"<#{element.get('channel_id')}>"
+    if kind == "link":
+        return str(element.get("url") or "")
+    if kind == "emoji":
+        return f":{element.get('name')}:"
+    pieces: list[str] = []
+    for value in element.values():
+        if isinstance(value, list):
+            pieces.extend(_rich_text(item) for item in value)
+    return "".join(piece for piece in pieces if piece)
+
+
+def _quote_line(raw: str, *, author: str = "", where: str = "") -> str:
+    text = " ".join((raw or "").split())
+    if not text:
+        return ""
+    if len(text) > _QUOTE_LIMIT:
+        text = text[: _QUOTE_LIMIT - 1].rstrip() + "…"
+    source = " ".join(part for part in (author, where) if part)
+    return f"[quoted from {source}] {text}" if source else f"[quoted] {text}"
+
+
+def share_text(message: Mapping[str, Any]) -> str:
+    """Quoted content of a Slack message, which often isn't in ``text``.
+
+    Sharing a message or thread into a channel puts the original in
+    ``attachments`` (``is_share`` / ``is_msg_unfurl``), and the quote action
+    uses a ``rich_text_quote`` block. Reading only ``text`` leaves a message
+    like "explain why this is stupid" with nothing to explain, so the model
+    answers whatever it saw before instead.
+    """
+    quotes: list[str] = []
+    for attachment in message.get("attachments") or []:
+        if not isinstance(attachment, Mapping):
+            continue
+        if not (
+            attachment.get("is_share")
+            or attachment.get("is_msg_unfurl")
+            or attachment.get("is_reply_unfurl")
+        ):
+            continue
+        author = str(attachment.get("author_name") or "").strip()
+        channel_name = str(attachment.get("channel_name") or "").strip()
+        body = attachment.get("text") or attachment.get("fallback") or ""
+        line = _quote_line(
+            str(body),
+            author=author,
+            where=f"in #{channel_name}" if channel_name else "",
+        )
+        if line:
+            quotes.append(line)
+
+    for block in message.get("blocks") or []:
+        if not isinstance(block, Mapping):
+            continue
+        for element in block.get("elements") or []:
+            if not isinstance(element, Mapping):
+                continue
+            if element.get("type") != "rich_text_quote":
+                continue
+            line = _quote_line(_rich_text(element))
+            if line:
+                quotes.append(line)
+    return "\n".join(quotes)
+
+
+def message_text(message: Mapping[str, Any]) -> str:
+    """A message's own text plus any quoted or shared content."""
+    text = str(message.get("text") or "").strip()
+    quote = share_text(message)
+    if not quote:
+        return text
+    return f"{text}\n\n{quote}".strip() if text else quote
 
 
 async def fetch_slack_images(

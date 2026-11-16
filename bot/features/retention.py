@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import time
@@ -69,6 +70,11 @@ def prune_now(db: Database, settings: Settings) -> dict[str, object]:
     retention_days = _cfg_int(db, "memory_retention_days", settings.memory_retention_days)
     sandbox_days = _cfg_int(db, "sandbox_ttl_days", settings.sandbox_ttl_days)
     counts = db.prune_history(retention_days)
+    chats_pruned = db.prune_old_dm_chats(retention_days)
+    secret_markers = db.prune_secret_threads(retention_days)
+    from bot.features import dm_chats
+
+    dm_chats.prune_secret()
     removed = _manager(settings).prune_stale(sandbox_days)
     backups = 0
     cutoff = time.time() - 7 * 86400
@@ -87,6 +93,8 @@ def prune_now(db: Database, settings: Settings) -> dict[str, object]:
         "usage_rows": counts["usage"],
         "sandboxes": len(removed),
         "backups": backups,
+        "dm_chats": chats_pruned,
+        "secret_markers": secret_markers,
     }
 
 
@@ -128,7 +136,9 @@ async def tick() -> None:
     if today == _last_day:
         return
     try:
-        result = prune_now(runtime_db(), settings)
+        # VACUUM, deletes and directory pruning are synchronous and can stall
+        # the event loop for seconds on a large database.
+        result = await asyncio.to_thread(prune_now, runtime_db(), settings)
     except Exception:
         logger.exception("storage prune failed")
         return
@@ -136,7 +146,7 @@ async def tick() -> None:
     if any(result.values()):
         logger.info("storage prune: %s", result)
     try:
-        free = shutil.disk_usage(settings.data_dir).free
+        free = await asyncio.to_thread(lambda: shutil.disk_usage(settings.data_dir).free)
     except OSError:
         return
     min_free = _cfg_float(runtime_db(), "storage_min_free_gb", settings.storage_min_free_gb)
