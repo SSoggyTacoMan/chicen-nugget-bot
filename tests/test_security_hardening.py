@@ -111,3 +111,40 @@ def test_mac_bridge_requires_a_token():
     assert handler._authorized() is False
     handler.headers = {"Authorization": "Bearer secret"}
     assert handler._authorized() is True
+
+
+def test_no_hardcoded_api_keys_in_the_repo():
+    """A real key belongs in .env, not in a tracked file.
+
+    9router keys look like ``sk-`` plus 20+ characters; placeholder values such
+    as ``sk-secret`` in tests don't match.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    skip_dirs = {
+        ".git",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+        "data",
+        "logs",
+        "node_modules",
+        "instances",
+    }
+    pattern = re.compile(r"\bsk-[A-Za-z0-9_-]{20,}")
+    offenders: list[str] = []
+    for path in root.rglob("*"):
+        if not path.is_file() or any(part in skip_dirs for part in path.parts):
+            continue
+        if path.name.startswith(".env") or path.suffix in {".db", ".sqlite3", ".png", ".jpg", ".gif"}:
+            continue
+        try:
+            text = path.read_text(errors="ignore")
+        except OSError:
+            continue
+        if pattern.search(text):
+            offenders.append(str(path.relative_to(root)))
+    assert not offenders, f"hardcoded api keys in {offenders}"
