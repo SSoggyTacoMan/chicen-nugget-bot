@@ -14,6 +14,7 @@ if something feels off, `/nugget doctor` is the first stop. it checks scopes, to
 ## what it does
 
 - mentions, name calls like "hey nugget", dms, group dms, thread follow-ups and optional ambient replies
+- quoted and shared messages: Slack hides the original in attachments, so it is read back into the prompt as a quote instead of being dropped
 - dm chats: one thread per conversation, with `/nugget chats`, `/nugget chat new` and follow-up detection
 - secret chats: `/nugget secret` keeps a conversation in memory only, read-only tools, discreet notification previews and an opt-in `--burn`
 - search across slack messages and files, plus channel join, leave, create, topic, invite and pin tools
@@ -487,6 +488,8 @@ assist = kind is help/feedback, or a question that needs live data/tools
 a message aimed at another person never triggers an agent turn unless the bot is also addressed. short follow-ups in a thread where the bot spoke last bypass the gate. `needs_tools` becomes a hint so the model fetches data instead of guessing.
 
 mentions carry the last few channel or thread lines as context, so a tagged one-word message ("advice?") can still see what it refers to. thread follow-ups work the same way, with a cooldown (`AI_THREAD_COOLDOWN`) and the same "is this actually for me" checks (`bot/features/followup.py`).
+
+when someone quotes or shares a message, Slack puts the original in the message's attachments (or a rich-text quote block) instead of its text, so the bot folds it back in as `[quoted from pj in #hq-engineering] ...` before the model sees it. that applies to mentions, DMs, message shortcuts, dm chats and the recent-lines context: "explain why this is stupid" now arrives with the thing it is about (`bot/slack_api.py:share_text`).
 
 a thread can belong to both identities. whoever spoke last answers an unmentioned follow-up, so the bot app and boi never double up; saying `boi` by name keeps the bot app out of it. group DMs stay mention-only for boi.
 
