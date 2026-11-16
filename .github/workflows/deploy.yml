@@ -29,7 +29,17 @@ jobs:
       - name: lint
         run: ruff check bot tests --select E9,F63,F7,F82
       - name: tests
-        run: pytest -q
+        run: |
+          set +e
+          pytest -q --tb=short 2>&1 | tee pytest.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            # Put the failing tests in the check-run annotations. Workflow logs
+            # need repo admin rights, annotations are readable from the API.
+            summary=$(grep -E "^(FAILED|ERROR)|^=+ (FAILURES|ERRORS)" -A 20 pytest.log | tail -120 | tr '\n' ' ' | sed -e 's/%/%25/g' -e 's/\r//g' | cut -c1-6000)
+            echo "::error title=pytest failed::$summary"
+          fi
+          exit "$code"
 
   deploy:
     needs: test

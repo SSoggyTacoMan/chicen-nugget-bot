@@ -9,7 +9,7 @@ from typing import Any
 from bot.ai.limits import user_retry_after
 from bot.features import dm_chats
 from bot.runtime import runtime
-from bot.slack_api import post
+from bot.slack_api import message_text, post
 from bot.utils.text import (
     MAX_SLACK_TEXT,
     chat_chunks,
@@ -49,7 +49,7 @@ async def _run_shortcut(
 ) -> None:
     channel = (shortcut.get("channel") or {}).get("id") or ""
     message = shortcut.get("message") or {}
-    text = (message.get("text") or "").strip()
+    text = message_text(message)
     ts = message.get("ts") or ""
     user_id = (shortcut.get("user") or {}).get("id") or ""
     if not channel or not ts or not user_id or not text:

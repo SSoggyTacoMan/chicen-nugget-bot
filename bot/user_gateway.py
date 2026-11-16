@@ -24,7 +24,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from bot.ai.limits import user_retry_after
 from bot.features.followup import BOI_RE, conversation_lines, looks_like_followup
 from bot.runtime import runtime
-from bot.slack_api import fetch_slack_images, transcribe_slack_audio
+from bot.slack_api import fetch_slack_images, message_text, transcribe_slack_audio
 from bot.utils.text import (
     asks_for_silence,
     chat_chunks,
@@ -342,7 +342,7 @@ class UserGateway:
             event, self.token, settings, cookie=self.cookie
         )
         clean_text = incoming_text(
-            text,
+            message_text(event),
             bot_user_id=runtime.bot_user_id or "",
             assistant_user_id=self.user_id or runtime.user_id or "",
         )
