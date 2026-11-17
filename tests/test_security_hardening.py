@@ -171,3 +171,88 @@ def test_slack_file_urls_are_restricted_to_slack_hosts():
     assert not is_slack_file_url("https://evil.example/files.slack.com")
     assert not is_slack_file_url("https://files.slack.com.evil.example/a.png")
     assert not is_slack_file_url("https://user:pw@files.slack.com/a.png")
+
+
+def test_secret_kv_values_are_encrypted_at_rest(tmp_path):
+    import sqlite3
+
+    from bot.db import Database
+
+    path = tmp_path / "enc.db"
+    db = Database(path)
+    db.init()
+    db.kv_set("config:github_token", "ghp_supersecret")
+    db.kv_set("config:api_token:vercel", "vc-secret")
+    db.kv_set("cache:google_access_token", "ya29.abc")
+    db.kv_set("config:recaps", "true")
+
+    raw = dict(sqlite3.connect(path).execute("SELECT key, value FROM kv").fetchall())
+    assert "ghp_supersecret" not in raw["config:github_token"]
+    assert "vc-secret" not in raw["config:api_token:vercel"]
+    assert "ya29.abc" not in raw["cache:google_access_token"]
+    assert raw["config:recaps"] == "true"
+
+    assert db.kv_get("config:github_token") == "ghp_supersecret"
+    assert dict(db.kv_prefix("config:api_token:")) == {"config:api_token:vercel": "vc-secret"}
+    assert (tmp_path / ".kv.key").stat().st_mode & 0o777 == 0o600
+
+
+def test_existing_plaintext_secrets_are_migrated(tmp_path):
+    import sqlite3
+
+    from bot.db import Database
+
+    path = tmp_path / "old.db"
+    first = Database(path)
+    first.init()
+    conn = sqlite3.connect(path)
+    conn.execute("INSERT INTO kv (key, value) VALUES ('config:imap_password', 'hunter2')")
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.init()
+    stored = sqlite3.connect(path).execute(
+        "SELECT value FROM kv WHERE key = 'config:imap_password'"
+    ).fetchone()[0]
+    assert "hunter2" not in stored
+    assert db.kv_get("config:imap_password") == "hunter2"
+
+
+def test_api_request_writes_need_confirmation():
+    import asyncio
+    from unittest.mock import MagicMock, patch
+
+    from bot.ai.tools import Toolbox
+    from tests.test_slack_admin import _ctx
+
+    class Client:
+        calls: list = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            Client.calls.append(method)
+            resp = MagicMock(status_code=200, is_success=True, content=b"{}", text="{}")
+            resp.json.return_value = {}
+            return resp
+
+    box = Toolbox(MagicMock())
+    db = MagicMock()
+    db.kv_get.return_value = "tok"
+
+    async def run():
+        ctx = _ctx(db=db)
+        args = {"service": "vercel", "method": "DELETE", "path": "/v9/projects/abc"}
+        with patch("bot.ai.tools.httpx.AsyncClient", return_value=Client()):
+            preview = await box.execute("api_request", args, ctx)
+            assert "preview" in preview and "confirm=true" in preview
+            assert Client.calls == []
+            await box.execute("api_request", {**args, "confirm": True}, ctx)
+            assert Client.calls == ["DELETE"]
+
+    asyncio.run(run())

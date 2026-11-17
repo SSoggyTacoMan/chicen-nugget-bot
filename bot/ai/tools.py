@@ -1657,6 +1657,10 @@ class Toolbox:
                         "type": "object",
                         "description": "Optional JSON body for POST/PUT/PATCH/DELETE.",
                     },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Required for POST/PUT/PATCH/DELETE. Without it you get a preview; tell the user what will change, get their yes, then repeat with confirm=true.",
+                    },
                 },
                 ["service", "path"],
             ),
@@ -5920,6 +5924,23 @@ class Toolbox:
             return _error("body must be a JSON object or array")
         if body is not None and len(json.dumps(body, default=str)) > MAX_API_BODY_BYTES:
             return _error(f"body is too large (max {MAX_API_BODY_BYTES} bytes)")
+
+        if method != "GET" and not bool(args.get("confirm", False)):
+            return _json(
+                {
+                    "preview": {
+                        "service": preset["label"],
+                        "method": method,
+                        "path": path,
+                        "query": query or None,
+                        "body": json.dumps(body, default=str)[:1500] if body is not None else None,
+                    },
+                    "hint": (
+                        f"this changes data on {preset['label']}. tell the user exactly what "
+                        "you are about to do and get their yes, then call again with confirm=true"
+                    ),
+                }
+            )
 
         url = f"{str(preset['base']).rstrip('/')}{path}"
         headers = {

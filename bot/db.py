@@ -8,12 +8,21 @@ sharing a connection across threads/event-loop turns.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 import struct
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+from cryptography.fernet import Fernet, InvalidToken
+
+logger = logging.getLogger(__name__)
+
+_ENC_PREFIX = "enc:v1:"
+_SECRET_MARKERS = ("token", "secret", "password", "cookie", "api_key")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS members (
@@ -228,6 +237,16 @@ def _rank_with_numpy(
     ]
 
 
+def _is_secret_key(key: str) -> bool:
+    """kv keys whose values are credentials and must not sit in the db in plaintext."""
+    if key == "cache:google_access_token":
+        return True
+    if not key.startswith("config:"):
+        return False
+    # `config:api_token:vercel` -> check every segment, `google_oauth_state` is not a secret.
+    return any(marker in key.lower() for marker in _SECRET_MARKERS)
+
+
 def _like_escape(value: str) -> str:
     """Escape LIKE wildcards so user text matches literally (use with ESCAPE '\\')."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -240,6 +259,58 @@ class Database:
         self._local = threading.local()
         self._connections: list[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
+        self._fernet: Fernet | None = None
+
+    # ------------------------------------------------------------ encryption
+    def _cipher(self) -> Fernet:
+        """Key from KV_ENCRYPTION_KEY, else a generated key file next to the db.
+
+        The file protects the database on its own (backups, copies, leaked
+        dumps). Set KV_ENCRYPTION_KEY to keep the key off the data disk too.
+        """
+        if self._fernet is not None:
+            return self._fernet
+        env_key = os.environ.get("KV_ENCRYPTION_KEY", "").strip()
+        if env_key:
+            key = env_key.encode()
+        else:
+            key_path = self.path.parent / ".kv.key"
+            if key_path.exists():
+                key = key_path.read_bytes().strip()
+            else:
+                key = Fernet.generate_key()
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(key)
+        self._fernet = Fernet(key)
+        return self._fernet
+
+    def _seal(self, key: str, value: str) -> str:
+        if not _is_secret_key(key) or not value or value.startswith(_ENC_PREFIX):
+            return value
+        return _ENC_PREFIX + self._cipher().encrypt(value.encode("utf-8")).decode("ascii")
+
+    def _unseal(self, key: str, value: str | None) -> str | None:
+        if value is None or not value.startswith(_ENC_PREFIX):
+            return value
+        try:
+            return self._cipher().decrypt(value[len(_ENC_PREFIX):].encode("ascii")).decode("utf-8")
+        except InvalidToken:
+            logger.error(
+                "could not decrypt stored value for %s: the encryption key changed or was lost; "
+                "re-enter it with /nugget setup",
+                key,
+            )
+            return None
+
+    def _encrypt_existing_secrets(self, conn: sqlite3.Connection) -> None:
+        for row in conn.execute("SELECT key, value FROM kv").fetchall():
+            if _is_secret_key(row["key"]) and row["value"] and not row["value"].startswith(_ENC_PREFIX):
+                conn.execute(
+                    "UPDATE kv SET value = ? WHERE key = ?",
+                    (self._seal(row["key"], row["value"]), row["key"]),
+                )
 
     # ------------------------------------------------------------------ core
     def _connect(self) -> sqlite3.Connection:
@@ -310,6 +381,7 @@ class Database:
                 conn.execute(
                     "ALTER TABLE bot_threads ADD COLUMN owner TEXT NOT NULL DEFAULT 'bot'"
                 )
+            self._encrypt_existing_secrets(conn)
             conn.commit()
 
     def _write(self, sql: str, params: Iterable[Any] = ()) -> int:
@@ -339,7 +411,7 @@ class Database:
     # ------------------------------------------------------------------- kv
     def kv_get(self, key: str) -> str | None:
         row = self._one("SELECT value FROM kv WHERE key = ?", (key,))
-        return row["value"] if row else None
+        return self._unseal(key, row["value"]) if row else None
 
     def integrity_check(self) -> str:
         row = self._one("PRAGMA integrity_check")
@@ -349,7 +421,7 @@ class Database:
         self._write(
             "INSERT INTO kv (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
+            (key, self._seal(key, value)),
         )
 
     def kv_del(self, key: str) -> None:
@@ -360,7 +432,7 @@ class Database:
             "SELECT key, value FROM kv WHERE key LIKE ? ESCAPE '\\' ORDER BY key",
             (f"{_like_escape(prefix)}%",),
         )
-        return [(r["key"], r["value"]) for r in rows]
+        return [(r["key"], self._unseal(r["key"], r["value"]) or "") for r in rows]
 
     # -------------------------------------------------------------- members
     def record_join(

@@ -468,15 +468,11 @@ def test_fetch_slack_images_from_text_urls():
         "text": "check out <https://example.com/cat.png> and https://images.org/dog.jpg"
     }
 
-    async def mock_get(url, *args, **kwargs):
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.content = b"fake_png_data"
-        resp.headers = {"content-type": "image/png"}
-        return resp
+    async def mock_download(http, url, max_bytes):
+        return 200, b"fake_png_data", {"content-type": "image/png"}
 
     async def run():
-        with patch.object(httpx.AsyncClient, "get", new=mock_get):
+        with patch("bot.slack_api._download_capped", new=mock_download):
             urls = await fetch_slack_images(event, "xoxb-test")
             assert len(urls) == 2
             assert all(u.startswith("data:image/") for u in urls)

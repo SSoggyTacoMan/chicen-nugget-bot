@@ -67,6 +67,27 @@ def is_slack_file_url(url: str) -> bool:
     return any(host == suffix[1:] or host.endswith(suffix) for suffix in _SLACK_FILE_HOSTS)
 
 
+async def _download_capped(
+    http: httpx.AsyncClient, url: str, max_bytes: int
+) -> tuple[int, bytes | None, Mapping[str, str]]:
+    """GET a url, stopping as soon as the body passes ``max_bytes``.
+
+    Returns (status, body, headers); body is None on a non-200 or when too large.
+    """
+    async with http.stream("GET", url) as resp:
+        if resp.status_code != 200:
+            return resp.status_code, None, resp.headers
+        declared = resp.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > max_bytes:
+            return resp.status_code, None, resp.headers
+        buf = bytearray()
+        async for chunk in resp.aiter_bytes():
+            buf.extend(chunk)
+            if len(buf) > max_bytes:
+                return resp.status_code, None, resp.headers
+        return resp.status_code, bytes(buf), resp.headers
+
+
 async def slack_host_filter(request: httpx.Request) -> None:
     """Request hook: refuse any hop (including redirects) that leaves Slack's hosts."""
     if not is_slack_file_url(str(request.url)):
@@ -595,15 +616,17 @@ async def fetch_slack_images(
                     if not host or await is_private_host(host):
                         continue
                     try:
-                        resp = await http.get(img_url)
-                        if resp.status_code == 200 and resp.content and len(resp.content) <= 10 * 1024 * 1024:
-                            ctype = resp.headers.get("content-type", "").split(";")[0].strip()
+                        status, content, resp_headers = await _download_capped(
+                            http, img_url, 10 * 1024 * 1024
+                        )
+                        if status == 200 and content:
+                            ctype = resp_headers.get("content-type", "").split(";")[0].strip()
                             if not ctype.startswith("image/"):
                                 ext = parsed.path.rsplit(".", 1)[-1].lower()
                                 ctype = f"image/{ext}" if ext in {"png", "jpg", "jpeg", "webp", "gif"} else "image/png"
                                 if ctype == "image/jpg":
                                     ctype = "image/jpeg"
-                            b64 = base64.b64encode(resp.content).decode("ascii")
+                            b64 = base64.b64encode(content).decode("ascii")
                             data_urls.append(f"data:{ctype};base64,{b64}")
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("exception fetching image url %s: %s", img_url, exc)
