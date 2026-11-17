@@ -1227,15 +1227,19 @@ class Toolbox:
             ),
             tool(
                 "summarize_thread",
-                "Read a whole Slack thread (paginates past 200 replies) and summarize it. Long threads are compressed slice by slice into one TLDR. Pass a permalink to the thread or omit to use the current thread. Owner/admin only, plus members in channels listed in AI_THREAD_SUMMARY_CHANNELS.",
+                "Read a whole Slack thread (paginates past 200 replies), summarize it, and answer a specific question from it when asked. Long threads are compressed slice by slice into one TLDR, with a keyword pass over every reply for the question. Pass a permalink to the thread or omit to use the current thread. Owner/admin only, plus members in channels listed in AI_THREAD_SUMMARY_CHANNELS.",
                 {
                     "ref": {
                         "type": "string",
                         "description": "Slack permalink URL, or omit for the current thread.",
                     },
+                    "question": {
+                        "type": "string",
+                        "description": "A specific question to answer from the thread, e.g. 'who has the domain renewal code'. Also returns the tldr.",
+                    },
                     "focus": {
                         "type": "string",
-                        "description": "Optional angle, e.g. 'just decisions' or 'what did they say about pricing'.",
+                        "description": "Optional angle for the tldr, e.g. 'just decisions' or 'what did they say about pricing'. Use question for a direct question instead.",
                     },
                     "limit": {
                         "type": "integer",
@@ -4058,12 +4062,14 @@ class Toolbox:
             limit = int(ctx.settings.thread_summary_max_messages)
         limit = max(50, min(5000, limit))
         focus = str(args.get("focus") or "").strip()[:300]
+        question = str(args.get("question") or "").strip()[:500]
         try:
             digest = await summarize_thread(
                 client,
                 cid,
                 ts,
                 focus=focus,
+                question=question,
                 max_messages=limit,
                 user_id=ctx.user_id,
             )
@@ -4083,6 +4089,7 @@ class Toolbox:
                     cid,
                     ts,
                     focus=focus,
+                    question=question,
                     max_messages=limit,
                     user_id=ctx.user_id,
                 )

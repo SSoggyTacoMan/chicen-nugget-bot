@@ -233,3 +233,94 @@ def test_extra_tools_do_not_widen_the_guest_toolbox():
     assert "summarize_thread" in extra
     assert extra - base == {"summarize_thread"}
     assert "send_dm" not in extra
+
+
+def test_question_finds_a_needle_in_the_middle_of_a_huge_thread():
+    old_agent, old_settings = runtime.agent, runtime.settings
+    agent = MagicMock()
+
+    async def complete(**kwargs):
+        if "answering one question" in kwargs["system"]:
+            return "the vault code is 4417, said by <@U9>."
+        if "scanning one slice" in kwargs["system"]:
+            return "NOTHING"
+        return "tldr"
+
+    agent.complete = AsyncMock(side_effect=complete)
+    runtime.agent = agent
+    runtime.settings = MagicMock()
+    runtime.settings.ai_enabled = True
+    runtime.settings.thread_summary_chunk_chars = 14000
+
+    messages = [
+        msg(f"17{i:08d}.000001", f"U{i % 9}", "normal chatter " + "x" * 190)
+        for i in range(1500)
+    ]
+    messages[750] = msg("1700000750.000001", "U9", "the vault code is 4417, do not share")
+    pages = []
+    for start in range(0, len(messages), 200):
+        more = start + 200 < len(messages)
+        pages.append(
+            page(
+                messages[start : start + 200],
+                more=more,
+                cursor=str(start + 200) if more else "",
+            )
+        )
+    client = FakeSlack(
+        pages,
+        permalink="https://example.slack.com/archives/C1/p1700000000000001",
+    )
+
+    async def run():
+        return await summarize_thread(
+            client, "C1", "1700000000000001", question="what is the vault code?"
+        )
+
+    try:
+        digest = asyncio.run(run())
+    finally:
+        runtime.agent, runtime.settings = old_agent, old_settings
+
+    assert digest.hits
+    assert "4417" in digest.hits[0].text
+    assert digest.hits[0].link and "/p1700000750000001" in digest.hits[0].link
+    # the middle of the transcript was dropped, but the answer is still there
+    assert "4417" not in digest.transcript
+    text = format_digest(digest)
+    assert "direct hits" in text and "4417" in text
+    assert "question: what is the vault code?" in text
+    reduce_call = agent.complete.await_args_list[-1]
+    assert "what is the vault code?" in reduce_call.kwargs["text"]
+    assert "4417" in reduce_call.kwargs["text"]
+
+
+def test_summarize_tool_forwards_the_question():
+    from unittest.mock import patch
+
+    from bot.ai.tools import Toolbox
+
+    box = Toolbox(MagicMock())
+    digest = ThreadDigest(
+        channel="C1",
+        ts="1.0",
+        messages=2,
+        participants=2,
+        first_ts="1.0",
+        last_ts="1.1",
+        truncated=False,
+        transcript="a\nb",
+    )
+    ctx = _tool_context()
+    ctx.settings.thread_summary_allowed = MagicMock(return_value=True)
+    core = AsyncMock(return_value=digest)
+
+    async def run():
+        with patch("bot.ai.tools.summarize_thread", core):
+            return await box.execute(
+                "summarize_thread", {"question": "who has the code?"}, ctx
+            )
+
+    text = asyncio.run(run())
+    assert "thread in <#C1>" in text
+    assert core.await_args.kwargs["question"] == "who has the code?"

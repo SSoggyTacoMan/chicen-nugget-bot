@@ -476,7 +476,8 @@ message shortcuts: **explain this** and **summarize thread**. both answer in the
 `summarize_thread` follows Slack's reply cursor until the thread is exhausted, keeping the newest `THREAD_SUMMARY_MAX_MESSAGES` (default 2000). a 1,000-reply thread is read whole, then compressed slice by slice and reduced into one tldr, so the answer is not a guess from the last few lines and not a dump of the first 100 replies.
 
 - `@nugget tldr` inside a thread, `:thread:` on a reply, or the **summarize thread** shortcut all use it.
-- pass a permalink to summarize a thread you are not in, `focus` to steer it ("just decisions"), and `limit` to cap replies.
+- it does both jobs at once: a tldr, and a direct answer when you ask a specific question ("who has the domain renewal code?"). the question gets a keyword pass over every reply *before* anything is thinned, so a single line in the middle of 2,000 survives, comes back quoted with the author and time, and links to that reply.
+- pass a permalink to summarize a thread you are not in, `question` for a direct question, `focus` to steer the tldr ("just decisions"), and `limit` to cap replies.
 - `thread_permalink` returns a shareable link. `send_dm` forwards the tldr and link to someone.
 - owner/admin only by default. list channels in `AI_THREAD_SUMMARY_CHANNELS` to let members ask for a tldr there (`*` for all). admins still need `ADMIN_PRIVATE_ACCESS` outside those channels.
 

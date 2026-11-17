@@ -5,6 +5,11 @@ with a thousand replies is far past what a single prompt can hold. This module
 walks every page, then either returns a small transcript as-is or compresses it
 slice by slice and reduces those notes into one TLDR.
 
+A specific question ("who has the domain renewal code?") runs through the same
+pipeline with two additions: a keyword pass over every reply before anything is
+thinned, and question-aware slice prompts. The TLDR and the answer come back
+together.
+
 The tool, the message shortcut and the 🧵 reaction all funnel through here, so
 "tldr" means the same thing no matter how it was asked.
 """
@@ -13,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +35,9 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 200
 MAX_PAGES = 60
 MAX_MESSAGE_CHARS = 500
+HIT_CHARS = 600
+MAX_HITS = 5
+NOTE_CHARS = 900
 SMALL_THREAD_CHARS = 6000
 MAX_CHUNKS = 18
 MAP_TOKENS = 450
@@ -52,12 +61,178 @@ _MAP_SYSTEM = (
     "not prose. no preamble, no headings."
 )
 
+_MAP_SYSTEM_QUESTION = (
+    "you are scanning one slice of a long Slack thread for one specific question. "
+    "if this slice contains anything that answers it, quote the exact words and say who "
+    "said it and when. also note decisions, links and numbers nearby. "
+    "if nothing in the slice answers it, reply with exactly: NOTHING. "
+    "no preamble, no prose."
+)
+
 _REDUCE_SYSTEM = (
     "you are writing a TLDR of a long Slack thread for someone who was not in it. "
     "format: one sentence gist, then 3-6 bullets of what actually happened or was decided, "
     "then 'open' for unresolved questions, then 'links' when there are any. "
     "no chronological recap, no filler, no preamble. under 220 words. slack mrkdwn."
 )
+
+_REDUCE_SYSTEM_QUESTION = (
+    "you are answering one question about a long Slack thread, for someone who was not in it. "
+    "start with the direct answer and quote the exact line with the author and time. "
+    "if the notes and direct hits do not answer it, say you could not find it and say what "
+    "the thread does cover instead. then add at most two bullets of context. "
+    "no filler, no preamble. under 150 words. slack mrkdwn."
+)
+
+_QUESTION_STOPWORDS = {
+    "about",
+    "after",
+    "again",
+    "also",
+    "an",
+    "and",
+    "any",
+    "anybody",
+    "anyone",
+    "anything",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "being",
+    "but",
+    "by",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "done",
+    "down",
+    "ever",
+    "find",
+    "for",
+    "from",
+    "get",
+    "gets",
+    "got",
+    "had",
+    "has",
+    "have",
+    "he",
+    "her",
+    "here",
+    "hers",
+    "him",
+    "his",
+    "how",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "just",
+    "know",
+    "knows",
+    "like",
+    "look",
+    "looking",
+    "may",
+    "me",
+    "mention",
+    "mentioned",
+    "mentions",
+    "might",
+    "mine",
+    "must",
+    "my",
+    "no",
+    "not",
+    "of",
+    "off",
+    "ok",
+    "okay",
+    "on",
+    "or",
+    "our",
+    "out",
+    "over",
+    "please",
+    "said",
+    "say",
+    "says",
+    "shall",
+    "she",
+    "should",
+    "so",
+    "some",
+    "somebody",
+    "someone",
+    "something",
+    "still",
+    "tell",
+    "than",
+    "thank",
+    "thanks",
+    "that",
+    "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "to",
+    "too",
+    "under",
+    "up",
+    "us",
+    "very",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "will",
+    "with",
+    "without",
+    "would",
+    "yes",
+    "you",
+    "your",
+    "yours",
+}
+
+_WORD_RE = re.compile(r"[a-z0-9][a-z0-9'_-]{2,}")
+_ARCHIVE_RE = re.compile(r"^(.*/archives/[^/]+/)p[0-9]+")
+
+
+@dataclass(frozen=True)
+class ThreadRecord:
+    ts: str
+    user: str
+    author: str
+    when: str
+    text: str
+
+
+@dataclass
+class AnswerHit:
+    ts: str
+    user: str
+    author: str
+    when: str
+    text: str
+    score: int
+    link: str | None = None
 
 
 @dataclass
@@ -72,6 +247,8 @@ class ThreadDigest:
     transcript: str = ""
     summary: str = ""
     permalink: str | None = None
+    question: str = ""
+    hits: list[AnswerHit] | None = None
 
 
 def _ts_float(value: Any) -> float:
@@ -124,6 +301,7 @@ async def fetch_thread(
     Returns the messages and whether we stopped early. Slack caps a page at 200
     replies and signals more with ``has_more`` plus a cursor; ignoring that is
     how a 1,000-reply thread silently turned into "the first 100 messages".
+    When the cap is hit, the newest replies are the ones kept.
     """
     if not client or not channel or not ts:
         raise ValueError("no slack client, channel or thread timestamp")
@@ -135,8 +313,6 @@ async def fetch_thread(
         batch = response.get("messages") or []
         collected.extend(m for m in batch if isinstance(m, Mapping))
         if len(collected) > max_messages:
-            # Keep the newest replies: the end of a long thread is where the
-            # decisions and the "so what happened" usually are.
             collected = collected[-max_messages:]
             truncated = True
         cursor = (response.get("response_metadata") or {}).get("next_cursor") or None
@@ -165,39 +341,143 @@ def _clean(message: Mapping[str, Any], *, chars: int) -> str:
     return text
 
 
-def render_lines(
+def _clip(text: str, chars: int) -> str:
+    return text if len(text) <= chars else text[: chars - 1].rstrip() + "…"
+
+
+def build_records(
     messages: list[Mapping[str, Any]],
     *,
     chars: int = MAX_MESSAGE_CHARS,
-) -> tuple[list[str], int, str | None, str | None]:
-    """One readable line per message, with its local date and time."""
-    lines: list[str] = []
-    participants: set[str] = set()
-    first_ts = last_ts = None
+) -> list[ThreadRecord]:
+    """Readable records for the messages the model should see."""
+    records: list[ThreadRecord] = []
     for message in messages:
         if message.get("subtype") in _SKIP_SUBTYPES:
             continue
         text = _clean(message, chars=chars)
         if not text:
             continue
-        stamp = _clock(message.get("ts"))
-        if stamp:
-            when = stamp
-            if not first_ts:
-                first_ts = str(message.get("ts"))
-            last_ts = str(message.get("ts"))
-        else:
-            when = "?"
-        user = message.get("user") or message.get("bot_id") or ""
-        if not user:
-            author = "someone"
-        elif message.get("user"):
+        stamp = _clock(message.get("ts")) or "?"
+        user = str(message.get("user") or "")
+        if user:
             author = f"<@{user}>"
-            participants.add(str(user))
-        else:
+        elif message.get("bot_id"):
             author = "a bot"
-        lines.append(f"{author} ({when}): {text}")
-    return lines, len(participants), first_ts, last_ts
+        else:
+            author = "someone"
+        records.append(
+            ThreadRecord(
+                ts=str(message.get("ts") or ""),
+                user=user,
+                author=author,
+                when=stamp,
+                text=text,
+            )
+        )
+    return records
+
+
+def render_lines(
+    messages: list[Mapping[str, Any]],
+    *,
+    chars: int = MAX_MESSAGE_CHARS,
+) -> tuple[list[str], int, str | None, str | None]:
+    """One readable line per message, with its local date and time."""
+    records = build_records(messages, chars=chars)
+    lines = [f"{record.author} ({record.when}): {record.text}" for record in records]
+    participants = len({record.user for record in records if record.user})
+    first_ts = records[0].ts if records else None
+    last_ts = records[-1].ts if records else None
+    return lines, participants, first_ts, last_ts
+
+
+def question_keywords(question: str) -> list[str]:
+    text = (question or "").lower().replace("\u2019", "'")
+    text = re.sub(r"n't\b", "", text)
+    text = re.sub(r"'s\b", "", text)
+    text = re.sub(r"'re\b|'ve\b|'ll\b|'d\b|'m\b", "", text)
+    keywords: list[str] = []
+    for word in _WORD_RE.findall(text):
+        if word in _QUESTION_STOPWORDS or word in keywords:
+            continue
+        keywords.append(word)
+    return keywords[:10]
+
+
+def find_hits(
+    records: list[ThreadRecord],
+    question: str,
+    *,
+    permalink: str | None = None,
+    channel: str = "",
+    root_ts: str = "",
+) -> list[AnswerHit]:
+    """Keyword pass over every reply, before the transcript is thinned.
+
+    This is the deterministic half of the answer: if one reply says "the code
+    is 4417", that line is kept verbatim even when the middle of the thread is
+    dropped to fit the prompt. Rare words count for more, so "renewal" outranks
+    every reply that merely says "code".
+    """
+    keywords = question_keywords(question)
+    if not keywords or not records:
+        return []
+    bodies = [record.text.lower() for record in records]
+    frequency = {
+        word: sum(1 for body in bodies if word in body) for word in keywords
+    }
+    scored: list[tuple[float, ThreadRecord]] = []
+    for record, body in zip(records, bodies):
+        matched = [word for word in keywords if word in body]
+        if not matched:
+            continue
+        score = sum(1.0 / max(1, frequency[word]) for word in matched) * 1000
+        scored.append((score + len(matched), record))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    hits: list[AnswerHit] = []
+    seen: set[str] = set()
+    for score, record in scored:
+        key = record.text[:120]
+        if key in seen:
+            continue
+        seen.add(key)
+        hits.append(
+            AnswerHit(
+                ts=record.ts,
+                user=record.user,
+                author=record.author,
+                when=record.when,
+                text=record.text,
+                score=int(score),
+                link=_hit_link(permalink, record.ts, channel, root_ts),
+            )
+        )
+        if len(hits) >= MAX_HITS:
+            break
+    return hits
+
+
+def _hit_link(
+    permalink: str | None,
+    ts: str,
+    channel: str,
+    root_ts: str,
+) -> str | None:
+    """A reply permalink, derived from the root one Slack already gave us.
+
+    Slack permalinks are ``/archives/<channel>/p<ts without the dot>``, so a
+    thread read costs one ``chat.getPermalink`` call instead of one per hit.
+    """
+    if not permalink or not ts:
+        return None
+    match = _ARCHIVE_RE.match(permalink)
+    if not match:
+        return None
+    link = f"{match.group(1)}p{ts.replace('.', '')}"
+    if root_ts and channel:
+        link += f"?thread_ts={root_ts}&cid={channel}"
+    return link
 
 
 def _chunks(lines: list[str], limit: int) -> list[str]:
@@ -273,11 +553,23 @@ async def thread_permalink(client, channel: str, ts: str) -> str | None:
         return None
 
 
+def _hit_block(hits: list[AnswerHit]) -> str:
+    lines = []
+    for hit in hits:
+        line = f"- {hit.author} ({hit.when}): {_clip(hit.text, 400)}"
+        if hit.link:
+            line += f" <{hit.link}|link>"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 async def _summarise_lines(
     channel: str,
     lines: list[str],
     *,
     focus: str,
+    question: str,
+    hits: list[AnswerHit],
     user_id: str | None,
     chunk_chars: int,
 ) -> str:
@@ -286,6 +578,13 @@ async def _summarise_lines(
         return ""
     chunks = _chunks(lines, max(2000, chunk_chars))
     focus_line = f"focus: {focus.strip()[:300]}\n" if focus.strip() else ""
+    question = question.strip()[:500]
+    headers: list[str] = []
+    if focus_line:
+        headers.append(focus_line.strip())
+    if question:
+        headers.append(f"question: {question}")
+    header = "\n".join(headers)
     notes: list[str] = []
     if len(chunks) == 1:
         notes = chunks
@@ -294,12 +593,15 @@ async def _summarise_lines(
 
         async def one(index: int, chunk: str) -> str:
             async with semaphore:
+                parts = [
+                    f"thread <#{channel}> · slice {index + 1}/{len(chunks)}",
+                ]
+                if header:
+                    parts.append(header)
+                parts.append(chunk)
                 return await agent.complete(
-                    system=_MAP_SYSTEM,
-                    text=(
-                        f"thread <#{channel}> · slice {index + 1}/{len(chunks)}\n"
-                        f"{focus_line}\n{chunk}"
-                    ),
+                    system=_MAP_SYSTEM_QUESTION if question else _MAP_SYSTEM,
+                    text="\n".join(parts),
                     max_tokens=MAP_TOKENS,
                     user_id=user_id,
                 )
@@ -317,17 +619,36 @@ async def _summarise_lines(
                 continue
             if "ai budget" in text or "today's ai limit" in text:
                 continue
-            notes.append(text)
-        if not notes:
+            if question and text.rstrip(" .").upper() == "NOTHING":
+                continue
+            notes.append(_clip(text, NOTE_CHARS))
+        if not notes and not hits:
             return ""
 
     body = "\n\n---\n\n".join(notes)
+    if question:
+        prompt = [
+            f"thread <#{channel}> · {len(lines)} readable messages",
+            f"question: {question}",
+            "",
+            "direct hits:",
+            _hit_block(hits) or "(no keyword hits)",
+            "",
+            "notes:",
+            body or "(no slice answered this question)",
+        ]
+        system = _REDUCE_SYSTEM_QUESTION
+    else:
+        suffix = f" · {focus_line.strip()}" if focus_line else ""
+        prompt = [
+            f"thread <#{channel}> · {len(lines)} readable messages{suffix}",
+            "",
+            body,
+        ]
+        system = _REDUCE_SYSTEM
     summary = await agent.complete(
-        system=_REDUCE_SYSTEM,
-        text=(
-            f"thread <#{channel}> · {len(lines)} readable messages"
-            f"{' · ' + focus_line.strip() if focus_line else ''}\n\n{body}"
-        ),
+        system=system,
+        text="\n".join(prompt),
         max_tokens=REDUCE_TOKENS,
         user_id=user_id,
     )
@@ -340,6 +661,7 @@ async def summarize_thread(
     ts: str,
     *,
     focus: str = "",
+    question: str = "",
     max_messages: int = 2000,
     user_id: str | None = None,
     include_permalink: bool = True,
@@ -348,9 +670,17 @@ async def summarize_thread(
     messages, truncated = await fetch_thread(
         client, channel, ts, max_messages=max_messages
     )
-    chars = 200 if len(messages) > THIN_MESSAGES else MAX_MESSAGE_CHARS
-    lines, participants, first_ts, last_ts = render_lines(messages, chars=chars)
+    line_chars = 200 if len(messages) > THIN_MESSAGES else MAX_MESSAGE_CHARS
+    records = build_records(messages, chars=HIT_CHARS)
+    lines = [
+        f"{record.author} ({record.when}): {_clip(record.text, line_chars)}"
+        for record in records
+    ]
+    participants = len({record.user for record in records if record.user})
+    first_ts = records[0].ts if records else None
+    last_ts = records[-1].ts if records else None
     link = await thread_permalink(client, channel, ts) if include_permalink else None
+    question = (question or "").strip()[:500]
     digest = ThreadDigest(
         channel=channel,
         ts=ts,
@@ -360,6 +690,18 @@ async def summarize_thread(
         last_ts=last_ts,
         truncated=truncated,
         permalink=link,
+        question=question,
+        hits=(
+            find_hits(
+                records,
+                question,
+                permalink=link,
+                channel=channel,
+                root_ts=ts,
+            )
+            if question
+            else []
+        ),
     )
     if not lines:
         return digest
@@ -380,6 +722,8 @@ async def summarize_thread(
         channel,
         transcript,
         focus=focus,
+        question=question,
+        hits=digest.hits or [],
         user_id=user_id,
         chunk_chars=budget,
     )
@@ -400,18 +744,30 @@ def format_digest(digest: ThreadDigest) -> str:
     header = " · ".join(meta)
     if digest.truncated:
         header += " · truncated"
+    parts = [header]
     if digest.permalink:
-        header += f"\npermalink: {digest.permalink}"
+        parts.append(f"permalink: {digest.permalink}")
+    if digest.question:
+        parts.append(f"question: {digest.question}")
+    if digest.hits:
+        parts.append("direct hits:\n" + _hit_block(digest.hits))
     body = digest.summary or digest.transcript
     if len(body) > MAX_TOOL_TRANSCRIPT and not digest.summary:
         body = body[:MAX_TOOL_TRANSCRIPT] + "\n… transcript truncated"
-    return f"{header}\n\n{body}" if body else header
+    if body:
+        parts.append(body)
+    return "\n\n".join(parts)
 
 
 __all__ = [
+    "AnswerHit",
     "ThreadDigest",
+    "ThreadRecord",
+    "build_records",
     "fetch_thread",
+    "find_hits",
     "format_digest",
+    "question_keywords",
     "render_lines",
     "summarize_thread",
     "thread_permalink",
