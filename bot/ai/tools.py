@@ -142,7 +142,24 @@ def _sanitize_topic(topic: str) -> str:
 
 def _list_note_files(settings: Settings) -> list[Path]:
     d = _notes_dir(settings)
-    return sorted(d.glob("*.md"))
+    root = d.resolve()
+    files: list[Path] = []
+    for f in sorted(d.glob("*.md")):
+        if f.is_symlink() or not f.is_file():
+            continue
+        if f.resolve().parent != root:
+            continue
+        files.append(f)
+    return files
+
+
+def _rewrite_note_file(settings: Settings, f: Path, lines: list[str]) -> None:
+    """Rewrite a note file, refusing anything outside the notes directory."""
+    root = _notes_dir(settings).resolve()
+    target = f.resolve()
+    if target.parent != root or target.suffix != ".md":
+        raise OSError(f"refusing to write outside the notes directory: {f.name}")
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _notes_index(settings: Settings) -> list[dict[str, str]]:
@@ -151,7 +168,7 @@ def _notes_index(settings: Settings) -> list[dict[str, str]]:
         desc = ""
         try:
             head = f.read_text(encoding="utf-8")[:1000]
-            m = re.search(r"^description:\s*(.+)$", head, re.MULTILINE)
+            m = re.search(r"^description:[ \t]*(.+)$", head, re.MULTILINE)
             if m:
                 desc = m.group(1).strip()
             elif head:
@@ -2557,7 +2574,7 @@ class Toolbox:
             existing = note_file.read_text(encoding="utf-8")
             if desc and existing.startswith("---"):
                 existing = re.sub(
-                    r"^description:\s*.*$",
+                    r"^description:.*$",
                     f"description: {desc}",
                     existing,
                     count=1,
@@ -2687,7 +2704,7 @@ class Toolbox:
                             if not (line.strip().startswith("- ") and clean_target in line.lower())
                         ]
                         if len(kept) != len(lines):
-                            f.write_text("\n".join(kept) + "\n", encoding="utf-8")
+                            _rewrite_note_file(ctx.settings, f, kept)
                     except OSError as exc:
                         logger.debug("could not clean note file %s: %s", f.name, exc)
             else:
@@ -2723,7 +2740,7 @@ class Toolbox:
                     ]
                     if len(kept) != len(lines):
                         md_pruned += len(lines) - len(kept)
-                        f.write_text("\n".join(kept) + "\n", encoding="utf-8")
+                        _rewrite_note_file(ctx.settings, f, kept)
                 except OSError as exc:
                     logger.debug("could not clean note file %s: %s", f.name, exc)
             if md_pruned:

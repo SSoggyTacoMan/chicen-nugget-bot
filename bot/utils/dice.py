@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 
 DICE_RE = re.compile(
-    r"^\s*(?:(\d+)\s*)?d\s*(\d+)\s*(?:([+-])\s*(\d+))?\s*$", re.IGNORECASE
+    r"^(?:(\d+)\s*)?d\s*(\d+)\s*(?:([+-])\s*(\d+))?$", re.IGNORECASE
 )
 MAX_DICE = 50
 MAX_SIDES = 1000

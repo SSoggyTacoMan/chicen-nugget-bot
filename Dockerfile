@@ -7,12 +7,15 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
+COPY requirements.lock .
+RUN pip install --no-cache-dir --only-binary :all: --require-hashes -r requirements.lock \
     && playwright install --with-deps chromium \
     && chmod -R a+rX /ms-playwright
 
-COPY . .
+COPY main.py slack-app-manifest.json ./
+COPY bot ./bot
+COPY prompts ./prompts
+COPY scripts/backfill_memory.py ./scripts/backfill_memory.py
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/data /app/logs \

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from datetime import datetime
 
 from bot.features import recaps, retention, watchers
@@ -31,10 +32,8 @@ async def stop() -> None:
     global _task
     if _task and not _task.done():
         _task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await _task
-        except asyncio.CancelledError:
-            pass
     _task = None
 
 

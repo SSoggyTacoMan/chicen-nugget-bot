@@ -36,6 +36,8 @@ from bot.utils.tz import tzinfo
 
 logger = logging.getLogger(__name__)
 
+_background_tasks: set[asyncio.Task] = set()
+
 
 HELP = """*{bot}: everything lives under `/nugget`*
 
@@ -418,9 +420,9 @@ async def cmd_roll(ack, command, client) -> None:
 async def cmd_choose(ack, command, client) -> None:
     await ack()
     raw = command.get("text") or ""
-    options = [item.strip() for item in re.split(r"\s*\|\s*|\n+", raw) if item.strip()]
+    options = [item.strip() for item in re.split(r"[|\n]+", raw) if item.strip()]
     if len(options) < 2:
-        options = [item.strip() for item in re.split(r"\s*,\s*", raw) if item.strip()]
+        options = [item.strip() for item in raw.split(",") if item.strip()]
     if len(options) < 2:
         await _say(client, command, "usage: `/choose pizza | tacos | sushi`", ephemeral=True)
         return
@@ -1121,7 +1123,9 @@ async def cmd_memory(ack, command, client) -> None:
             f"indexing up to {limit} old turns. i'll DM you when it's done.",
             ephemeral=True,
         )
-        asyncio.create_task(_backfill_memory(limit, user))
+        backfill_task = asyncio.create_task(_backfill_memory(limit, user))
+        _background_tasks.add(backfill_task)
+        backfill_task.add_done_callback(_background_tasks.discard)
         return
 
     if sub in {"search", "find"}:

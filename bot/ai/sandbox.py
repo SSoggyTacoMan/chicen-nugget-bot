@@ -148,7 +148,11 @@ class SandboxManager:
         return name, path
 
     def _meta_path(self, name: str) -> Path:
-        return self.meta_root / f"{safe_name(name)}.json"
+        path = (self.meta_root / f"{safe_name(name)}.json").resolve()
+        meta_resolved = self.meta_root.resolve()
+        if meta_resolved not in path.parents:
+            raise SandboxError("sandbox metadata path escapes the meta directory")
+        return path
 
     def _read_meta(self, name: str) -> dict[str, Any]:
         try:
@@ -683,6 +687,11 @@ class SandboxManager:
         limit = count if count > 0 else -1
         updated = text.replace(find, replace or "", limit)
         replaced = min(count, total) if count > 0 else total
+        # Re-validate right before writing so a path swapped for a symlink
+        # since the first check cannot redirect the write outside the sandbox.
+        target = self._resolve_in(info.path, path)
+        if not target.is_file():
+            raise SandboxError(f"file not found: {path}")
         target.write_text(updated, encoding="utf-8")
         self._touch(name)
         return f"replaced {replaced} occurrence(s) in {path}"

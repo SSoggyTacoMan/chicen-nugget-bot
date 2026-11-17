@@ -34,7 +34,7 @@ def _parse_poll(text: str) -> tuple[str, list[str]] | None:
     if len(quoted) >= 3:
         question, options = quoted[0], quoted[1:]
     else:
-        parts = [item.strip() for item in re.split(r"\s*\|\s*|\n+", text or "") if item.strip()]
+        parts = [item.strip() for item in re.split(r"[|\n]+", text or "") if item.strip()]
         if len(parts) < 3:
             return None
         question, options = parts[0], parts[1:]

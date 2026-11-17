@@ -21,9 +21,7 @@ jobs:
           python-version: "3.13"
       - name: install
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest ruff
+          pip install --only-binary :all: --require-hashes -r requirements.lock -r requirements-dev.lock
       - name: compile
         run: python -m compileall -q bot main.py
       - name: lint
@@ -150,8 +148,7 @@ jobs:
               mkdir -p logs data
               if command -v python3.13 >/dev/null; then PY=python3.13; else PY=python3; fi
               \$PY -m venv .venv
-              .venv/bin/pip install -q --upgrade pip
-              .venv/bin/pip install -q -r requirements.txt
+              .venv/bin/pip install -q --only-binary :all: --require-hashes -r requirements.lock
               PLAYWRIGHT_BROWSERS_PATH=0 .venv/bin/playwright install chromium >/dev/null 2>&1 || true
               mkdir -p logs data
               if id -u $SERVICE_USER >/dev/null 2>&1; then

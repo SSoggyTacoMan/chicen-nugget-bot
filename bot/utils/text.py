@@ -243,7 +243,7 @@ def format_mrkdwn(text: str) -> str:
         t = re.sub(r"\*\*(.+?)\*\*", r"*\1*", t)
         t = re.sub(r"~~(.+?)~~", r"~\1~", t)
         t = re.sub(r"\[([^\]\n]+)\]\((https?://[^\)\s]+)\)", r"<\2|\1>", t)
-        t = re.sub(r"(?m)^#{1,6}\s+([^\n]+)$", r"*\1*", t)
+        t = re.sub(r"(?m)^#{1,6}[ \t]+([^\n]+)$", r"*\1*", t)
         out.append(t)
     return "".join(out)
 

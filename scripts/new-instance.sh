@@ -17,7 +17,7 @@ if ! printf '%s' "$NAME" | grep -qE '^[a-z0-9-]+$'; then
 fi
 
 OUT="instances/${NAME}.env"
-if [ -e "$OUT" ]; then
+if [[ -e "$OUT" ]]; then
   echo "$OUT already exists, refusing to overwrite" >&2
   exit 1
 fi
@@ -26,7 +26,7 @@ mkdir -p instances
 umask 077
 cp .env.example "$OUT"
 sed -i.bak -e "s|^BOT_NAME=.*|BOT_NAME=\"Chicen Nugget Bot (${NAME})\"|" "$OUT"
-if [ -n "$OWNER" ]; then
+if [[ -n "$OWNER" ]]; then
   sed -i.bak -e "s|^OWNER_USER_ID=.*|OWNER_USER_ID=${OWNER}|" "$OUT"
 fi
 rm -f "${OUT}.bak"

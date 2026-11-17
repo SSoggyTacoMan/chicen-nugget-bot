@@ -3,13 +3,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-if [ -x .venv/bin/playwright ]; then
+if [[ -x .venv/bin/playwright ]]; then
   PW=.venv/bin/playwright
 else
   PW=playwright
 fi
 
-if [ "$(uname -s)" = "Linux" ]; then
+if [[ "$(uname -s)" = "Linux" ]]; then
   "$PW" install --with-deps chromium
 else
   "$PW" install chromium

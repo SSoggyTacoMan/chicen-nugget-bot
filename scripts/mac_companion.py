@@ -69,6 +69,8 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -106,8 +108,8 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             return
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
-        except Exception as exc:  # noqa: BLE001
-            self._send_json(400, {"error": f"invalid json: {exc}"})
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "invalid json"})
             return
         if not isinstance(payload, dict):
             self._send_json(400, {"error": "body must be a JSON object"})
@@ -166,7 +168,7 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 code, _, err = run_cmd("open", "-a", target)
                 if code != 0:
                     code, _, err = run_cmd("open", target)
-            self._send_json(200, {"result": f"opened {target}"} if code == 0 else {"error": err})
+            self._send_json(200, {"result": "opened"} if code == 0 else {"error": err})
             return
 
         if action == "notify":
@@ -204,7 +206,7 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 403,
                 {
                     "error": (
-                        f"action {action!r} is disabled; restart the bridge with "
+                        "this action is disabled; restart the bridge with "
                         "--allow-shell to enable arbitrary script/command execution"
                     )
                 },
@@ -248,7 +250,7 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {"result": "spoke the text"} if code == 0 else {"error": err})
             return
 
-        self._send_json(400, {"error": f"unknown action '{action}'"})
+        self._send_json(400, {"error": "unknown action"})
 
 
 def main() -> None:
@@ -283,7 +285,7 @@ def main() -> None:
     BridgeHandler.allow_shell = bool(args.allow_shell)
     server = http.server.ThreadingHTTPServer((args.host, args.port), BridgeHandler)
     print(
-        f"mac_companion listening on http://{args.host}:{args.port} "
+        f"mac_companion listening on {args.host}:{args.port} "
         f"(auth: on, shell: {'on' if args.allow_shell else 'off'})"
     )
     try:

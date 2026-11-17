@@ -81,6 +81,7 @@ class UserGateway:
         self._seen_ts: set[str] = set()
         self._seen_order: deque[str] = deque()
         self._reconnect_url: str | None = None
+        self._event_tasks: set[asyncio.Task] = set()
 
     def _next_id(self) -> int:
         mid = self._msg_id
@@ -111,10 +112,7 @@ class UserGateway:
                     await self.user_client.users_setPresence(presence="auto")
             with suppress(Exception):
                 await self._ws.send_json({"id": self._next_id(), "type": "ping"})
-            try:
-                await asyncio.sleep(45.0)
-            except asyncio.CancelledError:
-                break
+            await asyncio.sleep(45.0)
 
     @asynccontextmanager
     async def typing(self, channel: str, thread_ts: str | None = None):
@@ -204,7 +202,9 @@ class UserGateway:
                                 if msg.type == aiohttp.WSMsgType.TEXT:
                                     try:
                                         event = msg.json()
-                                        asyncio.create_task(self._handle_event(event))
+                                        event_task = asyncio.create_task(self._handle_event(event))
+                                        self._event_tasks.add(event_task)
+                                        event_task.add_done_callback(self._event_tasks.discard)
                                     except Exception as exc:  # noqa: BLE001
                                         logger.debug("error handling gateway frame: %s", exc)
                                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
@@ -214,7 +214,10 @@ class UserGateway:
                             with suppress(asyncio.CancelledError):
                                 await presence_task
             except asyncio.CancelledError:
-                break
+                self._running = False
+                self._ws = None
+                self._session = None
+                raise
             except Exception as exc:  # noqa: BLE001
                 if self._running:
                     logger.warning("user gateway connection error: %s (reconnecting in %.1fs)", exc, backoff)

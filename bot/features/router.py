@@ -161,7 +161,7 @@ _FILLER_RE = re.compile(
     re.IGNORECASE,
 )
 _VERB_RE = re.compile(
-    r"^(?:start|begin|open|create|make|do|run|use|set\s*up|setup)\b[:,]?\s*",
+    r"^(?:start|begin|open|create|make|do|run|use|set\s*up)\b[:,]?\s*",
     re.IGNORECASE,
 )
 _SECRET_CHAT_RE = re.compile(

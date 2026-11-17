@@ -64,7 +64,7 @@ _NEVER = float("-inf")
 _NAME_TTL = 6 * 3600.0
 _NAME_CACHE_MAX = 2000
 _NAME_ADDRESS = (
-    re.compile(r"^\s*(?:hey|yo|hi|ok|okay|so|alright)?\s*(?:chicen\s+nugget|chicen|nugget)\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:(?:hey|yo|hi|ok|okay|so|alright)\s*)?(?:chicen\s+nugget|chicen|nugget)\b", re.IGNORECASE),
     re.compile(r"\b(?:chicen\s+nugget|chicen)\b", re.IGNORECASE),
     re.compile(r"\bnugget\s*[,?!:]", re.IGNORECASE),
 )

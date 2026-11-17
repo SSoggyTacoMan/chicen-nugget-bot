@@ -13,7 +13,7 @@ SERVICE="${SERVICE_NAME:-chicen-nugget-bot}"
 SERVICE_USER="${SERVICE_USER:-chicen}"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${ENV_FILE:-${LOCAL_DIR}/.env}"
-if [ ! -f "${ENV_FILE}" ]; then
+if [[ ! -f "${ENV_FILE}" ]]; then
   echo "env file not found: ${ENV_FILE}" >&2
   exit 1
 fi
