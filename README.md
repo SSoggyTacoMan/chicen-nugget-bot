@@ -370,7 +370,7 @@ DMs used to be one endless conversation. Now each DM chat is its own thread, roo
 |---|---|
 | web | `search_web`, `fetch_url`, `http_status`, `hacker_news`, `ocr_document`, `browser` |
 | code | `inspect_code`, `clone_repo`, `sandbox`, `run_code`, `github_info`, `github_write`, `hackatime_stats`, `system_diagnostics` |
-| slack | `search_slack`, `fetch_slack_message`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `manage_channel`, `send_dm`, `post_message`, `slack_status`, `slack_dnd`, `slack_react`, `slack_activity` |
+| slack | `search_slack`, `fetch_slack_message`, `thread_permalink`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `manage_channel`, `send_dm`, `post_message`, `slack_status`, `slack_dnd`, `slack_react`, `slack_activity` |
 | personal | `google_calendar`, `gmail`, `google_drive`, `mac_control`, `check_emails`, `daily_briefing`, `api_request` |
 | setup | `integration_setup` |
 | workspace | `flaron`, `pending_access_requests`, `get_stats`, `bot_config` |
@@ -470,6 +470,15 @@ react with:
 - `:pushpin:` to pin it (owner/admin only)
 
 message shortcuts: **explain this** and **summarize thread**. both answer in the thread.
+
+### long threads
+
+`summarize_thread` follows Slack's reply cursor until the thread is exhausted, keeping the newest `THREAD_SUMMARY_MAX_MESSAGES` (default 2000). a 1,000-reply thread is read whole, then compressed slice by slice and reduced into one tldr, so the answer is not a guess from the last few lines and not a dump of the first 100 replies.
+
+- `@nugget tldr` inside a thread, `:thread:` on a reply, or the **summarize thread** shortcut all use it.
+- pass a permalink to summarize a thread you are not in, `focus` to steer it ("just decisions"), and `limit` to cap replies.
+- `thread_permalink` returns a shareable link. `send_dm` forwards the tldr and link to someone.
+- owner/admin only by default. list channels in `AI_THREAD_SUMMARY_CHANNELS` to let members ask for a tldr there (`*` for all). admins still need `ADMIN_PRIVATE_ACCESS` outside those channels.
 
 ## the jev gate
 

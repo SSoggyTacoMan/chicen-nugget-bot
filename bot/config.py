@@ -137,6 +137,9 @@ class Settings:
     ai_ambient_channels: frozenset[str]
     ai_ambient_cooldown: int
     ai_thread_cooldown: int
+    ai_thread_summary_channels: frozenset[str]
+    thread_summary_max_messages: int
+    thread_summary_chunk_chars: int
     chat_chunk_delay: float
     chat_chunk_max: int
     dm_chats: bool
@@ -340,6 +343,12 @@ class Settings:
             return False
         return "*" in self.ai_ambient_channels or channel_id in self.ai_ambient_channels
 
+    def thread_summary_allowed(self, channel_id: str | None) -> bool:
+        """May non-owner members ask for a thread TLDR in this channel?"""
+        if not channel_id or not self.ai_thread_summary_channels:
+            return False
+        return "*" in self.ai_thread_summary_channels or channel_id in self.ai_thread_summary_channels
+
     def missing_required(self) -> list[str]:
         problems: list[str] = []
         if not self.slack_bot_token or not self.slack_bot_token.startswith("xoxb-"):
@@ -460,6 +469,11 @@ def load_settings() -> Settings:
         ai_ambient_channels=frozenset(_list("AI_AMBIENT_CHANNELS")),
         ai_ambient_cooldown=max(0, _int("AI_AMBIENT_COOLDOWN", 120)),
         ai_thread_cooldown=max(0, _int("AI_THREAD_COOLDOWN", 120)),
+        ai_thread_summary_channels=frozenset(_list("AI_THREAD_SUMMARY_CHANNELS")),
+        thread_summary_max_messages=max(100, _int("THREAD_SUMMARY_MAX_MESSAGES", 2000)),
+        thread_summary_chunk_chars=max(
+            4_000, _int("THREAD_SUMMARY_CHUNK_CHARS", 14_000)
+        ),
         chat_chunk_delay=max(0.0, _float("CHAT_CHUNK_DELAY_SECONDS", 0.6)),
         chat_chunk_max=max(1, min(8, _int("CHAT_CHUNK_MAX", 4))),
         dm_chats=_bool("DM_CHATS", True),

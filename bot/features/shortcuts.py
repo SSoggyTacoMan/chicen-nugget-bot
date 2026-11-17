@@ -40,7 +40,9 @@ async def on_summarize(ack, shortcut: dict[str, Any], client) -> None:
     await _run_shortcut(
         shortcut,
         client,
-        "summarize this thread in a few lines. keep it useful, not chronological.\n\n",
+        "summarize this thread in a few lines. call `summarize_thread` first so you "
+        "read every reply instead of just the last few lines; it paginates long "
+        "threads. keep it useful, not chronological.\n\n",
     )
 
 

@@ -280,8 +280,9 @@ async def on_reaction_added(event: dict[str, Any], client) -> None:
         )
     else:
         prompt = (
-            "someone reacted with a thread emoji, meaning: summarize this thread in "
-            "a few lines.\n\n" + text
+            "someone reacted with a thread emoji, meaning: summarize this whole "
+            "thread with `summarize_thread` (it paginates long threads, so read "
+            "all of it), then reply in a few lines.\n\n" + text
         )
     secret = None
     if is_dm:

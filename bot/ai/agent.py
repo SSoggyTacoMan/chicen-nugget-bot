@@ -362,6 +362,12 @@ class Agent:
             and not code_mode
             and self._simple_chat(text, images=images)
         )
+        extra_tools: frozenset[str] = frozenset()
+        try:
+            if self.settings.thread_summary_allowed(channel_id) is True:
+                extra_tools = frozenset({"summarize_thread"})
+        except Exception:  # noqa: BLE001 - a broken policy must fail closed
+            extra_tools = frozenset()
         used_fallback = False
         try:
             for _ in range(MAX_TOOL_ROUNDS):
@@ -374,6 +380,7 @@ class Agent:
                     fast=fast_chat,
                     is_owner=ctx.is_owner or ctx.is_admin,
                     ephemeral=secret is not None,
+                    extra_tools=extra_tools,
                 )
                 used_fallback = used_fallback or provider == "fallback"
                 message = response.choices[0].message
@@ -646,6 +653,7 @@ class Agent:
         fast: bool = False,
         is_owner: bool = True,
         ephemeral: bool = False,
+        extra_tools: frozenset[str] = frozenset(),
     ) -> tuple[Any, str]:
         models = self._models_for(is_user_identity, code=code, fast=fast)
 
@@ -656,7 +664,7 @@ class Agent:
         }
         if tools:
             kwargs["tools"] = self.toolbox.definitions_for(
-                is_owner=is_owner, ephemeral=ephemeral
+                is_owner=is_owner, ephemeral=ephemeral, extra_tools=extra_tools
             )
             kwargs["tool_choice"] = "auto"
 

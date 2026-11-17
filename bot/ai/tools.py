@@ -39,6 +39,11 @@ from bot import image_access, integrations
 from bot.ai import images, tts
 from bot.ai.browser import BrowserError, BrowserManager
 from bot.ai.sandbox import SandboxError, SandboxManager, safe_env, safe_name
+from bot.ai.thread_summary import (
+    format_digest,
+    summarize_thread,
+    thread_permalink,
+)
 from bot.api_keys import (
     API_SERVICES,
     api_key_status,
@@ -611,13 +616,19 @@ class Toolbox:
         return self._definitions_all
 
     def definitions_for(
-        self, *, is_owner: bool = True, ephemeral: bool = False
+        self,
+        *,
+        is_owner: bool = True,
+        ephemeral: bool = False,
+        extra_tools: frozenset[str] = frozenset(),
     ) -> list[dict[str, Any]]:
         """Tool schemas for this caller.
 
         The full set is ~42 KB of JSON, resent on every completion round. Guests
         can only use a small ungated subset, so trim it for them. Secret chats
-        get an even smaller read-only set.
+        get an even smaller read-only set. ``extra_tools`` is how a guest gets
+        thread summaries in an allowlisted channel without the rest of the
+        owner toolbox.
         """
         if ephemeral:
             if self._definitions_secret is None:
@@ -630,6 +641,13 @@ class Toolbox:
             return self._definitions_secret
         if is_owner:
             return self.definitions
+        if extra_tools:
+            names = set(self.GUEST_TOOLS) | set(extra_tools)
+            return [
+                item
+                for item in self.definitions
+                if item["function"]["name"] in names
+            ]
         if self._definitions_guest is None:
             self._definitions_guest = [
                 item
@@ -1197,9 +1215,33 @@ class Toolbox:
                 ["ref"],
             ),
             tool(
+                "thread_permalink",
+                "Get a shareable Slack permalink for a thread or message. Pass a permalink, channel:timestamp, or omit for the current thread. Owner/admin only.",
+                {
+                    "ref": {
+                        "type": "string",
+                        "description": "Slack permalink URL or channel:timestamp. Omit for the current thread.",
+                    }
+                },
+                [],
+            ),
+            tool(
                 "summarize_thread",
-                "Read messages in a Slack thread to provide a summary or context. Pass a permalink to the thread or omit to use current thread. Owner/admin only.",
-                {"ref": {"type": "string", "description": "Slack permalink URL, or omit for current thread."}},
+                "Read a whole Slack thread (paginates past 200 replies) and summarize it. Long threads are compressed slice by slice into one TLDR. Pass a permalink to the thread or omit to use the current thread. Owner/admin only, plus members in channels listed in AI_THREAD_SUMMARY_CHANNELS.",
+                {
+                    "ref": {
+                        "type": "string",
+                        "description": "Slack permalink URL, or omit for the current thread.",
+                    },
+                    "focus": {
+                        "type": "string",
+                        "description": "Optional angle, e.g. 'just decisions' or 'what did they say about pricing'.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max replies to read. Default THREAD_SUMMARY_MAX_MESSAGES (2000).",
+                    },
+                },
                 [],
             ),
             tool(
@@ -3984,8 +4026,6 @@ class Toolbox:
         return f"message in <#{cid}> from <@{user}> at {ts}:\n{text}"
 
     async def _tool_summarize_thread(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        if not _need_private(ctx):
-            return _private_denied("summarize threads")
         ref = str(args.get("ref") or "").strip()
         if ref:
             cid, ts = parse_slack_thread_ref(ref)
@@ -3995,35 +4035,85 @@ class Toolbox:
             return _error("no thread specified and not currently inside a thread")
         if not cid or not ts:
             return _error("could not parse channel and thread timestamp")
-        client = ctx.client
-        if cid.startswith("D") and ctx.user_client and client is not ctx.user_client:
-            client = ctx.user_client
-        try:
-            resp = await client.conversations_replies(channel=cid, ts=ts, limit=100)
-            msgs = (resp.get("messages") or []) if resp.get("ok") else []
-        except Exception as exc:  # noqa: BLE001
-            alt = ctx.user_client if client is not ctx.user_client else (ctx.bot_client or ctx.client)
-            if alt and alt is not client:
-                try:
-                    resp = await alt.conversations_replies(channel=cid, ts=ts, limit=100)
-                    msgs = (resp.get("messages") or []) if resp.get("ok") else []
-                except Exception as inner_exc:  # noqa: BLE001
-                    return _error(f"failed to read thread: {inner_exc}")
-            else:
-                return _error(f"failed to read thread: {exc}")
-        if not msgs:
-            return "thread has no messages or could not be read"
-        tz = tzinfo()
-        lines = []
-        for m in msgs:
-            u = m.get("user") or m.get("bot_id") or "unknown"
-            t = (m.get("text") or "").strip()
+        allowed = False
+        policy = getattr(ctx.settings, "thread_summary_allowed", None)
+        if callable(policy):
             try:
-                when = datetime.fromtimestamp(float(m.get("ts")), tz).strftime("%H:%M")
-            except Exception:
-                when = "?"
-            lines.append(f"<@{u}> ({when}): {t}")
-        return f"thread in <#{cid}> ({len(msgs)} messages):\n" + "\n".join(lines)[:MAX_TOOL_RESULT]
+                allowed = policy(cid) is True
+            except Exception:  # noqa: BLE001 - a broken policy must fail closed
+                allowed = False
+        if not _need_private(ctx) and not allowed:
+            return _error(
+                "only the owner/admin can summarize this thread. add the channel to "
+                "`AI_THREAD_SUMMARY_CHANNELS` to let members ask for a tldr."
+            )
+        client = self._thread_client(ctx, cid)
+        try:
+            limit = (
+                int(args["limit"])
+                if args.get("limit") is not None
+                else int(ctx.settings.thread_summary_max_messages)
+            )
+        except (KeyError, TypeError, ValueError):
+            limit = int(ctx.settings.thread_summary_max_messages)
+        limit = max(50, min(5000, limit))
+        focus = str(args.get("focus") or "").strip()[:300]
+        try:
+            digest = await summarize_thread(
+                client,
+                cid,
+                ts,
+                focus=focus,
+                max_messages=limit,
+                user_id=ctx.user_id,
+            )
+        except ValueError as exc:
+            return _error(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            alt = (
+                ctx.user_client
+                if client is not ctx.user_client
+                else (ctx.bot_client or ctx.client)
+            )
+            if not alt or alt is client:
+                return _error(f"failed to read thread: {exc}")
+            try:
+                digest = await summarize_thread(
+                    alt,
+                    cid,
+                    ts,
+                    focus=focus,
+                    max_messages=limit,
+                    user_id=ctx.user_id,
+                )
+            except Exception as inner_exc:  # noqa: BLE001
+                return _error(f"failed to read thread: {inner_exc}")
+        if not digest.messages:
+            return "thread has no messages or could not be read"
+        return format_digest(digest)
+
+    def _thread_client(self, ctx: ToolContext, channel: str):
+        """DMs need the user session; the bot token can't read them."""
+        if channel.startswith("D") and ctx.user_client and ctx.client is not ctx.user_client:
+            return ctx.user_client
+        return ctx.client
+
+    async def _tool_thread_permalink(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can fetch permalinks")
+        ref = str(args.get("ref") or "").strip()
+        if ref:
+            cid, ts = parse_slack_thread_ref(ref)
+        elif ctx.channel_id and ctx.thread_ts:
+            cid, ts = ctx.channel_id, ctx.thread_ts
+        else:
+            return _error("no thread specified and not currently inside a thread")
+        if not cid or not ts:
+            return _error("could not parse channel and thread timestamp")
+        link = await thread_permalink(self._thread_client(ctx, cid), cid, ts)
+        if not link:
+            return _error("slack did not return a permalink; is the bot in that channel?")
+        return _json({"permalink": link, "channel": cid, "thread_ts": ts})
 
     async def _tool_ocr_document(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
