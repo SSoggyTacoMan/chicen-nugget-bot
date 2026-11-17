@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -233,6 +234,7 @@ class AnswerHit:
     text: str
     score: int
     link: str | None = None
+    via: str = "keyword"
 
 
 @dataclass
@@ -458,6 +460,98 @@ def find_hits(
     return hits
 
 
+def _cosine(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = left_norm = right_norm = 0.0
+    for a, b in zip(left, right):
+        dot += a * b
+        left_norm += a * a
+        right_norm += b * b
+    if not left_norm or not right_norm:
+        return 0.0
+    return dot / math.sqrt(left_norm * right_norm)
+
+
+async def semantic_hits(
+    records: list[ThreadRecord],
+    question: str,
+    *,
+    permalink: str | None = None,
+    channel: str = "",
+    root_ts: str = "",
+    top_k: int = 3,
+    min_score: float = 0.30,
+) -> list[AnswerHit]:
+    """Embedding pass, for when the answer shares no words with the question.
+
+    "who handles billing?" vs "priya owns the stripe invoices" has no lexical
+    overlap, but the vectors are close. One batched embedding pass over the
+    replies (capped by THREAD_SUMMARY_MAX_MESSAGES) and one for the question.
+    Any failure falls back to the keyword pass and the question-aware slices.
+    """
+    agent = runtime.agent
+    memory = getattr(agent, "memory", None) if agent is not None else None
+    if memory is None or getattr(memory, "enabled", False) is not True:
+        return []
+    question = (question or "").strip()
+    if not question or not records:
+        return []
+    try:
+        question_vector, vectors = await asyncio.gather(
+            memory.embed(question),
+            memory.embed_many([record.text for record in records]),
+        )
+    except Exception:
+        logger.debug("semantic thread retrieval failed", exc_info=True)
+        return []
+    if not question_vector:
+        return []
+    scored: list[tuple[float, ThreadRecord]] = []
+    for record, vector in zip(records, vectors):
+        if not vector:
+            continue
+        score = _cosine(question_vector, vector)
+        if score >= min_score:
+            scored.append((score, record))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    hits: list[AnswerHit] = []
+    for score, record in scored[:top_k]:
+        hits.append(
+            AnswerHit(
+                ts=record.ts,
+                user=record.user,
+                author=record.author,
+                when=record.when,
+                text=record.text,
+                score=int(score * 1000),
+                link=_hit_link(permalink, record.ts, channel, root_ts),
+                via="semantic",
+            )
+        )
+    return hits
+
+
+def merge_hits(
+    lexical: list[AnswerHit],
+    semantic: list[AnswerHit],
+    *,
+    limit: int = MAX_HITS,
+) -> list[AnswerHit]:
+    """Exact matches first, then meaning matches, one hit per reply."""
+    merged: list[AnswerHit] = []
+    seen: set[str] = set()
+    for hit in [*lexical, *semantic]:
+        key = hit.ts or hit.text[:80]
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(hit)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
 def _hit_link(
     permalink: str | None,
     ts: str,
@@ -681,6 +775,11 @@ async def summarize_thread(
     last_ts = records[-1].ts if records else None
     link = await thread_permalink(client, channel, ts) if include_permalink else None
     question = (question or "").strip()[:500]
+    lexical = (
+        find_hits(records, question, permalink=link, channel=channel, root_ts=ts)
+        if question
+        else []
+    )
     digest = ThreadDigest(
         channel=channel,
         ts=ts,
@@ -691,17 +790,7 @@ async def summarize_thread(
         truncated=truncated,
         permalink=link,
         question=question,
-        hits=(
-            find_hits(
-                records,
-                question,
-                permalink=link,
-                channel=channel,
-                root_ts=ts,
-            )
-            if question
-            else []
-        ),
+        hits=lexical,
     )
     if not lines:
         return digest
@@ -711,6 +800,22 @@ async def summarize_thread(
     transcript, thinned = _thin_lines(transcript.split("\n"), budget * MAX_CHUNKS)
     digest.truncated = digest.truncated or thinned
     digest.transcript = "\n".join(transcript)
+
+    if (
+        question
+        and len(digest.transcript) > SMALL_THREAD_CHARS
+        and getattr(runtime.settings, "ai_enabled", False)
+    ):
+        # Only worth embedding when the transcript is too big to hand over
+        # whole. Small threads already reach the model intact.
+        semantic = await semantic_hits(
+            records,
+            question,
+            permalink=link,
+            channel=channel,
+            root_ts=ts,
+        )
+        digest.hits = merge_hits(lexical, semantic)
 
     if len(digest.transcript) <= SMALL_THREAD_CHARS:
         return digest
@@ -767,8 +872,10 @@ __all__ = [
     "fetch_thread",
     "find_hits",
     "format_digest",
+    "merge_hits",
     "question_keywords",
     "render_lines",
+    "semantic_hits",
     "summarize_thread",
     "thread_permalink",
 ]

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from bot.ai.memory import MemoryIndex
 from bot.ai.thread_summary import (
     ThreadDigest,
+    ThreadRecord,
     fetch_thread,
     format_digest,
     render_lines,
+    semantic_hits,
     summarize_thread,
 )
 from bot.runtime import runtime
@@ -324,3 +328,119 @@ def test_summarize_tool_forwards_the_question():
     text = asyncio.run(run())
     assert "thread in <#C1>" in text
     assert core.await_args.kwargs["question"] == "who has the code?"
+
+
+def test_embed_many_batches_and_preserves_order():
+    settings = MagicMock()
+    settings.ai_embedding_model = "test-embed"
+    settings.ai_api_key = "test-key"
+    settings.ai_base_url = "http://example.invalid"
+    llm = MagicMock()
+
+    async def create(model, input):
+        return SimpleNamespace(
+            data=[
+                SimpleNamespace(index=index, embedding=[float(index), 1.0])
+                for index in range(len(input))
+            ]
+        )
+
+    llm.embeddings.create = AsyncMock(side_effect=create)
+    index = MemoryIndex(settings, llm)
+    vectors = asyncio.run(index.embed_many(["a", "b", "c", "d", "e"], batch_size=2))
+
+    assert len(vectors) == 5
+    assert llm.embeddings.create.await_count == 3
+    # each batch reports indexes 0..1, mapped back to the global position
+    assert [vector[0] for vector in vectors] == [0.0, 1.0, 0.0, 1.0, 0.0]
+
+
+def test_semantic_hits_find_an_answer_with_no_shared_words():
+    old_agent = runtime.agent
+    memory = MagicMock()
+    memory.enabled = True
+    memory.embed = AsyncMock(return_value=[1.0, 0.0, 0.0])
+    memory.embed_many = AsyncMock(
+        return_value=[[0.92, 0.08, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    runtime.agent = MagicMock()
+    runtime.agent.memory = memory
+    records = [
+        ThreadRecord("1.0", "U1", "<@U1>", "now", "priya owns the stripe invoices"),
+        ThreadRecord("1.1", "U2", "<@U2>", "now", "lunch was fine"),
+        ThreadRecord("1.2", "U3", "<@U3>", "now", "the deploy is green"),
+    ]
+
+    async def run():
+        return await semantic_hits(
+            records,
+            "who handles billing?",
+            permalink="https://example.slack.com/archives/C1/p1",
+            channel="C1",
+            root_ts="1.0",
+        )
+
+    try:
+        hits = asyncio.run(run())
+    finally:
+        runtime.agent = old_agent
+
+    assert hits
+    assert hits[0].via == "semantic"
+    assert "priya" in hits[0].text
+    assert hits[0].link and "/p10" in hits[0].link
+
+
+def test_question_falls_back_to_semantics_when_keywords_miss():
+    old_agent, old_settings = runtime.agent, runtime.settings
+    agent = MagicMock()
+    agent.complete = AsyncMock(return_value="priya handles billing.")
+    memory = MagicMock()
+    memory.enabled = True
+    memory.embed = AsyncMock(return_value=[1.0, 0.0])
+    runtime.agent = agent
+    agent.memory = memory
+    runtime.settings = MagicMock()
+    runtime.settings.ai_enabled = True
+    runtime.settings.thread_summary_chunk_chars = 14000
+
+    messages = [
+        msg(f"170000{i:04d}.000001", f"U{i % 5}", "chatter " + "x" * 190)
+        for i in range(900)
+    ]
+    messages[411] = msg("1700041100.000001", "U7", "priya owns the stripe invoices now")
+
+    async def embed_many(texts):
+        vectors = []
+        for text in texts:
+            vectors.append([0.95, 0.05] if "priya" in text else [0.0, 1.0])
+        return vectors
+
+    memory.embed_many = AsyncMock(side_effect=embed_many)
+    pages = []
+    for start in range(0, len(messages), 200):
+        more = start + 200 < len(messages)
+        pages.append(
+            page(
+                messages[start : start + 200],
+                more=more,
+                cursor=str(start + 200) if more else "",
+            )
+        )
+    client = FakeSlack(pages, permalink="https://example.slack.com/archives/C1/p1")
+
+    async def run():
+        return await summarize_thread(
+            client, "C1", "1700000000.000001", question="who handles billing?"
+        )
+
+    try:
+        digest = asyncio.run(run())
+    finally:
+        runtime.agent, runtime.settings = old_agent, old_settings
+
+    # "billing" appears nowhere in the thread, so only the embedding pass can
+    # find priya's reply.
+    assert digest.hits
+    assert "priya" in digest.hits[0].text
+    assert digest.hits[0].via == "semantic"

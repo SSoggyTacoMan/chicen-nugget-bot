@@ -1227,7 +1227,7 @@ class Toolbox:
             ),
             tool(
                 "summarize_thread",
-                "Read a whole Slack thread (paginates past 200 replies), summarize it, and answer a specific question from it when asked. Long threads are compressed slice by slice into one TLDR, with a keyword pass over every reply for the question. Pass a permalink to the thread or omit to use the current thread. Owner/admin only, plus members in channels listed in AI_THREAD_SUMMARY_CHANNELS.",
+                "Read a whole Slack thread (paginates past 200 replies), summarize it, and answer a specific question from it when asked. Long threads are compressed slice by slice into one TLDR, with keyword and semantic scans over every reply for the question. Pass a permalink to the thread or omit to use the current thread. Owner/admin only, plus members in channels listed in AI_THREAD_SUMMARY_CHANNELS.",
                 {
                     "ref": {
                         "type": "string",

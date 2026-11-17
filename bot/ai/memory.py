@@ -54,6 +54,47 @@ class MemoryIndex:
             return None
         return list(response.data[0].embedding or [])
 
+    async def embed_many(
+        self,
+        texts: list[str],
+        *,
+        batch_size: int = 32,
+        concurrency: int = 3,
+    ) -> list[list[float] | None]:
+        """Embed many strings, preserving order.
+
+        Long-thread retrieval embeds every reply once; doing that one request
+        per message would be slow and rude, so this batches and runs a few
+        batches at a time. A failed batch returns ``None`` for its items
+        instead of taking the whole search down.
+        """
+        if not self.enabled or not texts:
+            return [None] * len(texts)
+        prepared = [((text or "").strip() or "(empty)")[:4000] for text in texts]
+        batches = [
+            (start, prepared[start : start + batch_size])
+            for start in range(0, len(prepared), batch_size)
+        ]
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+        vectors: list[list[float] | None] = [None] * len(prepared)
+
+        async def one(start: int, batch: list[str]) -> None:
+            async with semaphore:
+                try:
+                    response = await self.llm.embeddings.create(
+                        model=self.model, input=batch
+                    )
+                except Exception:
+                    logger.debug("batch embedding failed", exc_info=True)
+                    return
+                for item in response.data or []:
+                    index = start + int(getattr(item, "index", 0) or 0)
+                    if 0 <= index < len(vectors):
+                        vectors[index] = list(getattr(item, "embedding", None) or [])
+
+        await asyncio.gather(*(one(start, batch) for start, batch in batches))
+        return vectors
+
     async def remember(
         self,
         db: Database,
