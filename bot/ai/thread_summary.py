@@ -41,6 +41,8 @@ MAX_HITS = 5
 NOTE_CHARS = 900
 SMALL_THREAD_CHARS = 6000
 MAX_CHUNKS = 18
+DEEP_MAX_CHUNKS = 32
+DEEP_NOTE_CHARS = 600
 MAP_TOKENS = 450
 REDUCE_TOKENS = 900
 MAP_CONCURRENCY = 3
@@ -70,6 +72,19 @@ _MAP_SYSTEM_QUESTION = (
     "no preamble, no prose."
 )
 
+_DEEP_MAP_SYSTEM = (
+    "you are scanning one slice of a long Slack thread for one question, including "
+    "indirect mentions, synonyms and codenames. quote every candidate line exactly, "
+    "with who said it and when, one per line. do not explain or summarise. "
+    "if nothing could possibly be relevant, reply with exactly: NOTHING."
+)
+
+_EXPAND_SYSTEM = (
+    "turn the question into 5 short search phrasings that a keyword search or vector "
+    "search could match in a chat thread. include synonyms, acronyms, product names, "
+    "and the words people would actually type. one per line, no numbering, no commentary."
+)
+
 _REDUCE_SYSTEM = (
     "you are writing a TLDR of a long Slack thread for someone who was not in it. "
     "format: one sentence gist, then 3-6 bullets of what actually happened or was decided, "
@@ -80,9 +95,9 @@ _REDUCE_SYSTEM = (
 _REDUCE_SYSTEM_QUESTION = (
     "you are answering one question about a long Slack thread, for someone who was not in it. "
     "start with the direct answer and quote the exact line with the author and time. "
-    "if the notes and direct hits do not answer it, say you could not find it and say what "
-    "the thread does cover instead. then add at most two bullets of context. "
-    "no filler, no preamble. under 150 words. slack mrkdwn."
+    "if the notes and direct hits do not answer it, reply with exactly NO_ANSWER_FOUND on "
+    "the first line, then one line about what the thread does cover instead. "
+    "then add at most two bullets of context. no filler, no preamble. under 150 words. slack mrkdwn."
 )
 
 _QUESTION_STOPWORDS = {
@@ -251,6 +266,7 @@ class ThreadDigest:
     permalink: str | None = None
     question: str = ""
     hits: list[AnswerHit] | None = None
+    deep: bool = False
 
 
 def _ts_float(value: Any) -> float:
@@ -473,22 +489,38 @@ def _cosine(left: list[float], right: list[float]) -> float:
     return dot / math.sqrt(left_norm * right_norm)
 
 
+def _centroid(vectors: list[list[float] | None]) -> list[float] | None:
+    usable = [vector for vector in vectors if vector]
+    if not usable:
+        return None
+    width = min(len(vector) for vector in usable)
+    if not width:
+        return None
+    return [
+        sum(vector[index] for vector in usable) / len(usable)
+        for index in range(width)
+    ]
+
+
 async def semantic_hits(
     records: list[ThreadRecord],
     question: str,
     *,
+    variants: list[str] | None = None,
     permalink: str | None = None,
     channel: str = "",
     root_ts: str = "",
     top_k: int = 3,
     min_score: float = 0.30,
+    records_cache: dict[str, Any] | None = None,
 ) -> list[AnswerHit]:
     """Embedding pass, for when the answer shares no words with the question.
 
     "who handles billing?" vs "priya owns the stripe invoices" has no lexical
     overlap, but the vectors are close. One batched embedding pass over the
-    replies (capped by THREAD_SUMMARY_MAX_MESSAGES) and one for the question.
-    Any failure falls back to the keyword pass and the question-aware slices.
+    replies (capped by THREAD_SUMMARY_MAX_MESSAGES), one for the question and
+    any rephrasings, averaged into a centroid. Any failure falls back to the
+    keyword pass and the question-aware slices.
     """
     agent = runtime.agent
     memory = getattr(agent, "memory", None) if agent is not None else None
@@ -497,15 +529,28 @@ async def semantic_hits(
     question = (question or "").strip()
     if not question or not records:
         return []
+    query_texts = [
+        text.strip() for text in (variants or []) if text and text.strip()
+    ]
     try:
-        question_vector, vectors = await asyncio.gather(
-            memory.embed(question),
-            memory.embed_many([record.text for record in records]),
+        vectors = records_cache.get("vectors") if records_cache is not None else None
+        if vectors is None:
+            question_vector, vectors = await asyncio.gather(
+                memory.embed(question),
+                memory.embed_many([record.text for record in records]),
+            )
+            if records_cache is not None:
+                records_cache["vectors"] = vectors
+        else:
+            question_vector = await memory.embed(question)
+        variant_vectors = (
+            await memory.embed_many(query_texts) if query_texts else []
         )
     except Exception:
         logger.debug("semantic thread retrieval failed", exc_info=True)
         return []
-    if not question_vector:
+    query_vector = _centroid([question_vector, *variant_vectors])
+    if not query_vector:
         return []
     scored: list[tuple[float, ThreadRecord]] = []
     for record, vector in zip(records, vectors):
@@ -657,6 +702,94 @@ def _hit_block(hits: list[AnswerHit]) -> str:
     return "\n".join(lines)
 
 
+async def expand_question(question: str, user_id: str | None = None) -> list[str]:
+    """Rephrase a question for the deep pass: synonyms, acronyms, chat words."""
+    agent = runtime.agent
+    question = (question or "").strip()
+    if agent is None or not question:
+        return []
+    try:
+        text = await agent.complete(
+            system=_EXPAND_SYSTEM,
+            text=question[:500],
+            max_tokens=150,
+            user_id=user_id,
+        )
+    except Exception:
+        logger.debug("question expansion failed", exc_info=True)
+        return []
+    variants: list[str] = []
+    for line in (text or "").splitlines():
+        value = line.strip().lstrip("-•*0123456789.) ").strip()
+        if not value or len(value) < 3:
+            continue
+        if value.startswith("my ai brain") or "ai budget" in value:
+            continue
+        if value.lower() == question.lower() or value in variants:
+            continue
+        variants.append(value[:120])
+        if len(variants) >= 5:
+            break
+    return variants
+
+
+def _no_answer(summary: str) -> bool:
+    first = (summary or "").strip().splitlines()
+    return bool(first) and "NO_ANSWER_FOUND" in first[0].upper()
+
+
+def _clean_summary(summary: str) -> str:
+    """Turn the internal miss marker into a plain sentence for the model."""
+    text = (summary or "").strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if "NO_ANSWER_FOUND" in lines[0].upper():
+        rest = "\n".join(lines[1:]).strip()
+        text = "i couldn't find an answer to that in this thread."
+        if rest:
+            text = f"{text}\n{rest}"
+    return text
+
+
+async def _collect_hits(
+    records: list[ThreadRecord],
+    question: str,
+    *,
+    deep: bool,
+    permalink: str | None,
+    channel: str,
+    root_ts: str,
+    user_id: str | None,
+    records_cache: dict[str, Any] | None = None,
+) -> list[AnswerHit]:
+    """Keyword hits (every rephrasing in deep mode) plus semantic hits."""
+    variants = await expand_question(question, user_id) if deep else []
+    lexical: list[AnswerHit] = []
+    for text in [question, *variants]:
+        lexical.extend(
+            find_hits(
+                records,
+                text,
+                permalink=permalink,
+                channel=channel,
+                root_ts=root_ts,
+            )
+        )
+    lexical = merge_hits(lexical, [], limit=MAX_HITS)
+    semantic = await semantic_hits(
+        records,
+        question,
+        variants=variants,
+        permalink=permalink,
+        channel=channel,
+        root_ts=root_ts,
+        min_score=0.25 if deep else 0.30,
+        records_cache=records_cache,
+    )
+    return merge_hits(lexical, semantic)
+
+
 async def _summarise_lines(
     channel: str,
     lines: list[str],
@@ -666,11 +799,14 @@ async def _summarise_lines(
     hits: list[AnswerHit],
     user_id: str | None,
     chunk_chars: int,
-) -> str:
+    deep: bool = False,
+) -> tuple[str, bool]:
     agent = runtime.agent
     if agent is None:
-        return ""
-    chunks = _chunks(lines, max(2000, chunk_chars))
+        return "", False
+    limit = max(2000, chunk_chars) * (DEEP_MAX_CHUNKS if deep else MAX_CHUNKS)
+    scanned, thinned = _thin_lines(lines, limit)
+    chunks = _chunks(scanned, max(2000, chunk_chars))
     focus_line = f"focus: {focus.strip()[:300]}\n" if focus.strip() else ""
     question = question.strip()[:500]
     headers: list[str] = []
@@ -679,6 +815,12 @@ async def _summarise_lines(
     if question:
         headers.append(f"question: {question}")
     header = "\n".join(headers)
+    map_system = (
+        _DEEP_MAP_SYSTEM
+        if deep and question
+        else (_MAP_SYSTEM_QUESTION if question else _MAP_SYSTEM)
+    )
+    note_chars = DEEP_NOTE_CHARS if deep else NOTE_CHARS
     notes: list[str] = []
     if len(chunks) == 1:
         notes = chunks
@@ -694,7 +836,7 @@ async def _summarise_lines(
                     parts.append(header)
                 parts.append(chunk)
                 return await agent.complete(
-                    system=_MAP_SYSTEM_QUESTION if question else _MAP_SYSTEM,
+                    system=map_system,
                     text="\n".join(parts),
                     max_tokens=MAP_TOKENS,
                     user_id=user_id,
@@ -715,9 +857,9 @@ async def _summarise_lines(
                 continue
             if question and text.rstrip(" .").upper() == "NOTHING":
                 continue
-            notes.append(_clip(text, NOTE_CHARS))
+            notes.append(_clip(text, note_chars))
         if not notes and not hits:
-            return ""
+            return ("NO_ANSWER_FOUND", thinned) if question else ("", thinned)
 
     body = "\n\n---\n\n".join(notes)
     if question:
@@ -726,7 +868,7 @@ async def _summarise_lines(
             f"question: {question}",
             "",
             "direct hits:",
-            _hit_block(hits) or "(no keyword hits)",
+            _hit_block(hits) or "(no keyword or semantic hits)",
             "",
             "notes:",
             body or "(no slice answered this question)",
@@ -746,7 +888,7 @@ async def _summarise_lines(
         max_tokens=REDUCE_TOKENS,
         user_id=user_id,
     )
-    return summary.strip()
+    return summary.strip(), thinned
 
 
 async def summarize_thread(
@@ -756,11 +898,18 @@ async def summarize_thread(
     *,
     focus: str = "",
     question: str = "",
+    deep: bool = False,
     max_messages: int = 2000,
     user_id: str | None = None,
     include_permalink: bool = True,
 ) -> ThreadDigest:
-    """Fetch a whole thread and either return its transcript or a TLDR."""
+    """Fetch a whole thread and either return its transcript or a TLDR.
+
+    With a question, the answer comes back alongside the tldr. ``deep`` adds
+    query expansion, a full scan of every slice (no thinning) and quote-first
+    slices. A normal pass that ends in NO_ANSWER_FOUND escalates to deep once
+    on its own, so an indirect question still gets a second, better look.
+    """
     messages, truncated = await fetch_thread(
         client, channel, ts, max_messages=max_messages
     )
@@ -775,11 +924,6 @@ async def summarize_thread(
     last_ts = records[-1].ts if records else None
     link = await thread_permalink(client, channel, ts) if include_permalink else None
     question = (question or "").strip()[:500]
-    lexical = (
-        find_hits(records, question, permalink=link, channel=channel, root_ts=ts)
-        if question
-        else []
-    )
     digest = ThreadDigest(
         channel=channel,
         ts=ts,
@@ -790,49 +934,70 @@ async def summarize_thread(
         truncated=truncated,
         permalink=link,
         question=question,
-        hits=lexical,
+        hits=[],
+        deep=deep,
     )
     if not lines:
         return digest
 
-    transcript = "\n".join(lines)
-    budget = max(4000, int(getattr(runtime.settings, "thread_summary_chunk_chars", 14000) or 14000))
-    transcript, thinned = _thin_lines(transcript.split("\n"), budget * MAX_CHUNKS)
-    digest.truncated = digest.truncated or thinned
-    digest.transcript = "\n".join(transcript)
+    budget = max(
+        4000,
+        int(getattr(runtime.settings, "thread_summary_chunk_chars", 14000) or 14000),
+    )
+    # The cheap pass covers the whole thread or a head+tail sample of it. A
+    # small thread reaches the model intact, so no retrieval is needed.
+    display, display_thinned = _thin_lines(lines, budget * MAX_CHUNKS)
+    digest.transcript = "\n".join(display)
 
-    if (
-        question
-        and len(digest.transcript) > SMALL_THREAD_CHARS
-        and getattr(runtime.settings, "ai_enabled", False)
-    ):
-        # Only worth embedding when the transcript is too big to hand over
-        # whole. Small threads already reach the model intact.
-        semantic = await semantic_hits(
-            records,
-            question,
-            permalink=link,
-            channel=channel,
-            root_ts=ts,
+    if question:
+        digest.hits = find_hits(
+            records, question, permalink=link, channel=channel, root_ts=ts
         )
-        digest.hits = merge_hits(lexical, semantic)
 
-    if len(digest.transcript) <= SMALL_THREAD_CHARS:
+    if len("\n".join(lines)) <= SMALL_THREAD_CHARS:
         return digest
 
     if not getattr(runtime.settings, "ai_enabled", False):
+        digest.truncated = digest.truncated or display_thinned
         return digest
 
-    summary = await _summarise_lines(
-        channel,
-        transcript,
-        focus=focus,
-        question=question,
-        hits=digest.hits or [],
-        user_id=user_id,
-        chunk_chars=budget,
-    )
-    digest.summary = summary[:8000]
+    records_cache: dict[str, Any] = {}
+
+    async def answer(use_deep: bool) -> tuple[list[AnswerHit], str, bool]:
+        hits = digest.hits or []
+        if question:
+            hits = await _collect_hits(
+                records,
+                question,
+                deep=use_deep,
+                permalink=link,
+                channel=channel,
+                root_ts=ts,
+                user_id=user_id,
+                records_cache=records_cache,
+            )
+        summary, thinned = await _summarise_lines(
+            channel,
+            lines,
+            focus=focus,
+            question=question,
+            hits=hits,
+            user_id=user_id,
+            chunk_chars=budget,
+            deep=use_deep,
+        )
+        return hits, summary, thinned
+
+    hits, summary, thinned = await answer(deep)
+    if question and not deep and _no_answer(summary):
+        logger.info("thread answer missed in %s, escalating to deep scan", channel)
+        deep = True
+        hits, summary, thinned = await answer(True)
+
+    digest.deep = deep
+    digest.hits = hits
+    digest.summary = _clean_summary(summary)[:8000]
+    digest.truncated = digest.truncated or thinned
     return digest
 
 
@@ -849,6 +1014,8 @@ def format_digest(digest: ThreadDigest) -> str:
     header = " · ".join(meta)
     if digest.truncated:
         header += " · truncated"
+    if digest.deep:
+        header += " · deep scan"
     parts = [header]
     if digest.permalink:
         parts.append(f"permalink: {digest.permalink}")
@@ -869,6 +1036,7 @@ __all__ = [
     "ThreadDigest",
     "ThreadRecord",
     "build_records",
+    "expand_question",
     "fetch_thread",
     "find_hits",
     "format_digest",

@@ -477,7 +477,8 @@ message shortcuts: **explain this** and **summarize thread**. both answer in the
 
 - `@nugget tldr` inside a thread, `:thread:` on a reply, or the **summarize thread** shortcut all use it.
 - it does both jobs at once: a tldr, and a direct answer when you ask a specific question ("who has the domain renewal code?"). the question runs a keyword pass and a semantic (embedding) pass over every reply *before* anything is thinned, so a single line in the middle of 2,000 survives even when it shares no words with the question ("who handles billing?" → "priya owns the stripe invoices"). hits come back quoted with the author and time, and link to that reply. if embeddings aren't configured, the keyword pass and question-aware slices still run.
-- pass a permalink to summarize a thread you are not in, `question` for a direct question, `focus` to steer the tldr ("just decisions"), and `limit` to cap replies.
+- **deep mode** for the questions that still hide: `deep=true` first rephrases the question into search variants, then scans *every* slice with no thinning (up to `DEEP_MAX_CHUNKS`), using quote-first slices instead of summaries. a normal pass that ends in `NO_ANSWER_FOUND` escalates to deep on its own, once. it costs more and takes longer, and it's the right switch for "did anyone ever mention…" where the wording won't match.
+- pass a permalink to summarize a thread you are not in, `question` for a direct question, `deep` when the first answer missed, `focus` to steer the tldr ("just decisions"), and `limit` to cap replies.
 - `thread_permalink` returns a shareable link. `send_dm` forwards the tldr and link to someone.
 - owner/admin only by default. list channels in `AI_THREAD_SUMMARY_CHANNELS` to let members ask for a tldr there (`*` for all). admins still need `ADMIN_PRIVATE_ACCESS` outside those channels.
 

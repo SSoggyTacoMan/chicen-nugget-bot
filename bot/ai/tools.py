@@ -1227,7 +1227,7 @@ class Toolbox:
             ),
             tool(
                 "summarize_thread",
-                "Read a whole Slack thread (paginates past 200 replies), summarize it, and answer a specific question from it when asked. Long threads are compressed slice by slice into one TLDR, with keyword and semantic scans over every reply for the question. Pass a permalink to the thread or omit to use the current thread. Owner/admin only, plus members in channels listed in AI_THREAD_SUMMARY_CHANNELS.",
+                "Read a whole Slack thread (paginates past 200 replies), summarize it, and answer a specific question from it when asked. Long threads are compressed slice by slice into one TLDR, with keyword and semantic scans over every reply for the question. Set deep=true for a slower, quote-first scan that rephrases the question and reads every slice without thinning. Pass a permalink to the thread or omit to use the current thread. Owner/admin only, plus members in channels listed in AI_THREAD_SUMMARY_CHANNELS.",
                 {
                     "ref": {
                         "type": "string",
@@ -1236,6 +1236,10 @@ class Toolbox:
                     "question": {
                         "type": "string",
                         "description": "A specific question to answer from the thread, e.g. 'who has the domain renewal code'. Also returns the tldr.",
+                    },
+                    "deep": {
+                        "type": "boolean",
+                        "description": "Slower, more thorough question mode: expands the question into search phrasings, scans every slice without thinning, and returns verified quotes. Use for indirect questions, or when a normal pass says it couldn't find the answer.",
                     },
                     "focus": {
                         "type": "string",
@@ -4063,6 +4067,7 @@ class Toolbox:
         limit = max(50, min(5000, limit))
         focus = str(args.get("focus") or "").strip()[:300]
         question = str(args.get("question") or "").strip()[:500]
+        deep = bool(args.get("deep", False))
         try:
             digest = await summarize_thread(
                 client,
@@ -4070,6 +4075,7 @@ class Toolbox:
                 ts,
                 focus=focus,
                 question=question,
+                deep=deep,
                 max_messages=limit,
                 user_id=ctx.user_id,
             )
@@ -4090,6 +4096,7 @@ class Toolbox:
                     ts,
                     focus=focus,
                     question=question,
+                    deep=deep,
                     max_messages=limit,
                     user_id=ctx.user_id,
                 )

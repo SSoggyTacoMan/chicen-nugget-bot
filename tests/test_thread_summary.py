@@ -322,12 +322,15 @@ def test_summarize_tool_forwards_the_question():
     async def run():
         with patch("bot.ai.tools.summarize_thread", core):
             return await box.execute(
-                "summarize_thread", {"question": "who has the code?"}, ctx
+                "summarize_thread",
+                {"question": "who has the code?", "deep": True},
+                ctx,
             )
 
     text = asyncio.run(run())
     assert "thread in <#C1>" in text
     assert core.await_args.kwargs["question"] == "who has the code?"
+    assert core.await_args.kwargs["deep"] is True
 
 
 def test_embed_many_batches_and_preserves_order():
@@ -444,3 +447,158 @@ def test_question_falls_back_to_semantics_when_keywords_miss():
     assert digest.hits
     assert "priya" in digest.hits[0].text
     assert digest.hits[0].via == "semantic"
+
+
+def _deep_thread(big=True):
+    messages = [
+        msg(f"170000{i:04d}.000001", f"U{i % 7}", "chatter " + "x" * 190)
+        for i in range(1500 if big else 300)
+    ]
+    messages[750 if big else 150] = msg(
+        "1700000750.000001", "U9", "the thing is 4417, do not share"
+    )
+    pages = []
+    for start in range(0, len(messages), 200):
+        more = start + 200 < len(messages)
+        pages.append(
+            page(
+                messages[start : start + 200],
+                more=more,
+                cursor=str(start + 200) if more else "",
+            )
+        )
+    return pages
+
+
+def _deep_agent():
+    agent = MagicMock()
+
+    async def complete(**kwargs):
+        system = kwargs["system"]
+        text = kwargs["text"]
+        if "turn the question into 5" in system:
+            return "release window\nshipping plan\nlaunch timing"
+        if "scanning one slice" in system:
+            if "4417" in text:
+                return "- <@U9> (now): the thing is 4417, do not share"
+            return "NOTHING"
+        if "answering one question" in system:
+            if "4417" in text:
+                return "the launch secret is 4417 (<@U9>)."
+            return "NO_ANSWER_FOUND\nthis thread covers other things."
+        return "tldr"
+
+    agent.complete = AsyncMock(side_effect=complete)
+    return agent
+
+
+def test_deep_mode_reads_slices_the_normal_pass_thins():
+    old_agent, old_settings = runtime.agent, runtime.settings
+    agent = _deep_agent()
+    memory = MagicMock()
+    memory.enabled = False  # force the deterministic map path
+    agent.memory = memory
+    runtime.agent = agent
+    runtime.settings = MagicMock()
+    runtime.settings.ai_enabled = True
+    runtime.settings.thread_summary_chunk_chars = 14000
+    client = FakeSlack(_deep_thread(), permalink="https://example.slack.com/archives/C1/p1")
+
+    async def run():
+        return await summarize_thread(
+            client,
+            "C1",
+            "1700000000000001",
+            question="what's the launch secret?",
+            deep=True,
+        )
+
+    try:
+        digest = asyncio.run(run())
+    finally:
+        runtime.agent, runtime.settings = old_agent, old_settings
+
+    assert digest.deep is True
+    assert "4417" in digest.summary
+    assert "deep scan" in format_digest(digest)
+    deep_slices = [
+        call.kwargs["text"]
+        for call in agent.complete.await_args_list
+        if "including indirect mentions" in call.kwargs["system"]
+    ]
+    assert any("4417" in text for text in deep_slices)
+
+
+def test_normal_miss_escalates_to_deep_once():
+    old_agent, old_settings = runtime.agent, runtime.settings
+    agent = _deep_agent()
+    memory = MagicMock()
+    memory.enabled = False
+    agent.memory = memory
+    runtime.agent = agent
+    runtime.settings = MagicMock()
+    runtime.settings.ai_enabled = True
+    runtime.settings.thread_summary_chunk_chars = 14000
+    client = FakeSlack(_deep_thread(), permalink="https://example.slack.com/archives/C1/p1")
+
+    async def run():
+        return await summarize_thread(
+            client, "C1", "1700000000000001", question="what's the launch secret?"
+        )
+
+    try:
+        digest = asyncio.run(run())
+    finally:
+        runtime.agent, runtime.settings = old_agent, old_settings
+
+    assert digest.deep is True
+    assert "4417" in digest.summary
+    systems = [call.kwargs["system"] for call in agent.complete.await_args_list]
+    assert any(
+        "scanning one slice" in system and "including indirect mentions" not in system
+        for system in systems
+    )
+    assert any("including indirect mentions" in system for system in systems)
+    reductions = [
+        call.kwargs["text"]
+        for call in agent.complete.await_args_list
+        if "answering one question" in call.kwargs["system"]
+    ]
+    assert len(reductions) == 1
+
+
+def test_empty_handed_miss_is_plain_language():
+    old_agent, old_settings = runtime.agent, runtime.settings
+    agent = MagicMock()
+
+    async def complete(**kwargs):
+        system = kwargs["system"]
+        if "turn the question into 5" in system:
+            return "release window\nshipping plan"
+        if "scanning one slice" in system:
+            return "NOTHING"
+        return "NO_ANSWER_FOUND\nthis thread is about something else."
+
+    agent.complete = AsyncMock(side_effect=complete)
+    memory = MagicMock()
+    memory.enabled = False
+    agent.memory = memory
+    runtime.agent = agent
+    runtime.settings = MagicMock()
+    runtime.settings.ai_enabled = True
+    runtime.settings.thread_summary_chunk_chars = 14000
+    client = FakeSlack(_deep_thread(), permalink="https://example.slack.com/archives/C1/p1")
+
+    async def run():
+        return await summarize_thread(
+            client, "C1", "1700000000000001", question="what's the launch secret?"
+        )
+
+    try:
+        digest = asyncio.run(run())
+    finally:
+        runtime.agent, runtime.settings = old_agent, old_settings
+
+    assert digest.deep is True
+    assert digest.summary.startswith("i couldn't find")
+    assert "NO_ANSWER_FOUND" not in format_digest(digest)
