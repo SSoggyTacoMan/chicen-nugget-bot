@@ -18,7 +18,7 @@ if something feels off, `/nugget doctor` is the first stop. it checks scopes, to
 - dm chats: one thread per conversation, with `/nugget chats`, `/nugget chat new` and follow-up detection
 - secret chats: `/nugget secret` keeps a conversation in memory only, read-only tools, discreet notification previews and an opt-in `--burn`
 - search across slack messages and files, plus channel join, leave, create, topic, invite and pin tools
-- reaction shortcuts and message shortcuts for research, explain and thread summaries
+- reaction shortcuts and message shortcuts for research, explain, thread tldr and question answering
 - persistent code sandboxes with file edits, background jobs, uploads and branch push
 - github reads and writes: prs, issues, comments, reviews, close/reopen, merge and push
 - optional watchers: GitHub Actions failures, GitHub notifications, new email and URL uptime
@@ -466,21 +466,21 @@ if chromium is missing, the tool says so instead of taking the bot down.
 react with:
 
 - `:mag:` to research a message
-- `:thread:` to summarize it
+- `:thread:` to summarize it, or answer a question from its thread
 - `:pushpin:` to pin it (owner/admin only)
 
-message shortcuts: **explain this** and **summarize thread**. both answer in the thread.
+message shortcuts: **explain this** and **summarize thread**. both answer in the thread. the long-threads section below covers asking a specific question.
 
 ### long threads
 
 `summarize_thread` follows Slack's reply cursor until the thread is exhausted, keeping the newest `THREAD_SUMMARY_MAX_MESSAGES` (default 2000). a 1,000-reply thread is read whole, then compressed slice by slice and reduced into one tldr, so the answer is not a guess from the last few lines and not a dump of the first 100 replies.
 
 - `@nugget tldr` inside a thread, `:thread:` on a reply, or the **summarize thread** shortcut all use it.
-- it does both jobs at once: a tldr, and a direct answer when you ask a specific question ("who has the domain renewal code?"). the question runs a keyword pass and a semantic (embedding) pass over every reply *before* anything is thinned, so a single line in the middle of 2,000 survives even when it shares no words with the question ("who handles billing?" → "priya owns the stripe invoices"). hits come back quoted with the author and time, and link to that reply. if embeddings aren't configured, the keyword pass and question-aware slices still run.
-- **deep mode** for the questions that still hide: `deep=true` first rephrases the question into search variants, then scans *every* slice with no thinning (up to `DEEP_MAX_CHUNKS`), using quote-first slices instead of summaries. a normal pass that ends in `NO_ANSWER_FOUND` escalates to deep on its own, once. it costs more and takes longer, and it's the right switch for "did anyone ever mention…" where the wording won't match.
+- it does both jobs at once: a tldr, and a direct answer when you ask a specific question ("who has the domain renewal code?"). the question runs a keyword pass and a semantic (embedding) pass over every reply *before* anything is thinned, so a single line in the middle of 2,000 survives even when it shares no words with the question ("who handles billing?" → "priya owns the stripe invoices"). hits come back quoted with the author and time, and link to that reply. the semantic pass uses `AI_EMBEDDING_MODEL`, the same index as memory. if embeddings aren't configured, the keyword pass and question-aware slices still run.
+- **deep mode** for the questions that still hide: `deep=true` first rephrases the question into search variants, then scans *every* slice with no thinning (up to 32 slices, ~448k characters), using quote-first slices instead of summaries. a normal pass that ends in `NO_ANSWER_FOUND` escalates to deep on its own, once. it costs more and takes longer, and it's the right switch for "did anyone ever mention…" where the wording won't match.
 - pass a permalink to summarize a thread you are not in, `question` for a direct question, `deep` when the first answer missed, `focus` to steer the tldr ("just decisions"), and `limit` to cap replies.
 - `thread_permalink` returns a shareable link. `send_dm` forwards the tldr and link to someone.
-- owner/admin only by default. list channels in `AI_THREAD_SUMMARY_CHANNELS` to let members ask for a tldr there (`*` for all). admins still need `ADMIN_PRIVATE_ACCESS` outside those channels.
+- knobs: `THREAD_SUMMARY_MAX_MESSAGES` (default 2000), `THREAD_SUMMARY_CHUNK_CHARS` (default 14000, the slice size for compression and deep scans) and `AI_THREAD_SUMMARY_CHANNELS` (empty = owner/admin only; comma ids or `*` for members). admins still need `ADMIN_PRIVATE_ACCESS` outside those channels.
 
 ## the jev gate
 
