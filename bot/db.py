@@ -228,6 +228,11 @@ def _rank_with_numpy(
     ]
 
 
+def _like_escape(value: str) -> str:
+    """Escape LIKE wildcards so user text matches literally (use with ESCAPE '\\')."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -351,7 +356,10 @@ class Database:
         self._write("DELETE FROM kv WHERE key = ?", (key,))
 
     def kv_prefix(self, prefix: str) -> list[tuple[str, str]]:
-        rows = self._all("SELECT key, value FROM kv WHERE key LIKE ? ORDER BY key", (f"{prefix}%",))
+        rows = self._all(
+            "SELECT key, value FROM kv WHERE key LIKE ? ESCAPE '\\' ORDER BY key",
+            (f"{_like_escape(prefix)}%",),
+        )
         return [(r["key"], r["value"]) for r in rows]
 
     # -------------------------------------------------------------- members
@@ -555,10 +563,10 @@ class Database:
         return rows
 
     def search_messages(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
-        like = f"%{query}%"
+        like = f"%{_like_escape(query)}%"
         return self._all(
             "SELECT conversation, role, user_id, text, created_at FROM messages "
-            "WHERE text LIKE ? ORDER BY id DESC LIMIT ?",
+            "WHERE text LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?",
             (like, max(1, limit)),
         )
 
@@ -571,13 +579,14 @@ class Database:
         )
 
     def clear_history_prefix(self, prefix: str) -> int:
+        pattern = _like_escape(prefix) + "%"
         self._execute(
-            "DELETE FROM memory_vectors WHERE conversation LIKE ?",
-            (prefix + "%",),
+            "DELETE FROM memory_vectors WHERE conversation LIKE ? ESCAPE '\\'",
+            (pattern,),
         )
         return self._execute(
-            "DELETE FROM messages WHERE conversation LIKE ?",
-            (prefix + "%",),
+            "DELETE FROM messages WHERE conversation LIKE ? ESCAPE '\\'",
+            (pattern,),
         )
 
     def clear_all_history(self) -> int:
@@ -726,15 +735,19 @@ class Database:
         return count > 0
 
     def delete_notes_matching(self, query: str, user_id: str | None = None) -> int:
-        like = f"%{query}%"
+        like = f"%{_like_escape(query)}%"
         if user_id:
-            return self._execute("DELETE FROM notes WHERE user_id = ? AND text LIKE ?", (user_id, like))
-        return self._execute("DELETE FROM notes WHERE text LIKE ?", (like,))
+            return self._execute(
+                "DELETE FROM notes WHERE user_id = ? AND text LIKE ? ESCAPE '\\'",
+                (user_id, like),
+            )
+        return self._execute("DELETE FROM notes WHERE text LIKE ? ESCAPE '\\'", (like,))
 
     def search_notes(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
-        like = f"%{query}%"
+        like = f"%{_like_escape(query)}%"
         return self._all(
-            "SELECT id, text, created_at FROM notes WHERE text LIKE ? ORDER BY id DESC LIMIT ?",
+            "SELECT id, text, created_at FROM notes WHERE text LIKE ? ESCAPE '\\' "
+            "ORDER BY id DESC LIMIT ?",
             (like, max(1, limit)),
         )
 

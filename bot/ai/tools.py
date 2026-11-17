@@ -4194,6 +4194,12 @@ class Toolbox:
             except Exception as exc:  # noqa: BLE001
                 return _error(f"github notifications error: {exc}")
 
+        if target and action != "user" and not re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:#\d+)?", target
+        ):
+            # `target` goes into an authenticated API path; "../" or "?" would
+            # let the model reach other endpoints with the stored token.
+            return _error("target must be 'owner/repo'")
         if not target:
             if action == "user":
                 return _error("username is required for action='user'")
@@ -4432,24 +4438,15 @@ class Toolbox:
         commit = await manager.exec(
             sandbox_name,
             "git add -A && "
-            "git -c user.email=boi@localhost -c user.name='Chicen Nugget Boi' "
-            f"commit -m {shlex.quote(message)}",
+            "git -c core.hooksPath=/dev/null "
+            "-c user.email=boi@localhost -c user.name='Chicen Nugget Boi' "
+            f"commit --no-verify -m {shlex.quote(message)}",
             timeout=60,
         )
         if commit.code != 0:
             return _error(
                 f"git commit failed: {(commit.stderr or commit.stdout)[:800]}"
             )
-
-        remote = await manager.exec(sandbox_name, "git remote get-url origin", timeout=20)
-        if remote.code != 0:
-            added = await manager.exec(
-                sandbox_name,
-                f"git remote add origin https://github.com/{repo}.git",
-                timeout=20,
-            )
-            if added.code != 0:
-                return _error(f"could not add git remote: {added.stderr[:500]}")
 
         askpass = info.path / ".tmp" / "git-askpass.sh"
         manager.write(
@@ -4466,9 +4463,12 @@ class Toolbox:
         try:
             push = await manager.exec(
                 sandbox_name,
-                "git -c credential.helper= "
+                "git -c credential.helper= -c core.hooksPath=/dev/null "
                 f"-c core.askPass={shlex.quote(str(askpass))} "
-                f"push origin HEAD:refs/heads/{branch}",
+                # Push to an explicit GitHub URL, never the sandbox's `origin`:
+                # the agent can repoint that, and the token would follow it.
+                f"push --no-verify {shlex.quote(f'https://github.com/{repo}.git')} "
+                f"HEAD:refs/heads/{branch}",
                 timeout=120,
                 extra_env={
                     "GITHUB_TOKEN": token,
@@ -4699,13 +4699,22 @@ class Toolbox:
         forbidden_names = {".env", "id_rsa", "id_ed25519"}
         forbidden_exts = {".pem", ".key", ".db", ".sqlite", ".sqlite3"}
 
+        forbidden_dirs = {"data", "logs", "instances", ".git"}
+
         def is_forbidden(p: Path) -> bool:
             name = p.name.lower()
             if name in forbidden_names or name.startswith(".env"):
                 return True
             if p.suffix.lower() in forbidden_exts:
                 return True
-            return False
+            # sqlite sidecars and timestamped backups (bot.db-wal, bot.db.bak.123)
+            if ".db" in name or ".sqlite" in name:
+                return True
+            try:
+                parts = p.resolve().relative_to(repo_root).parts
+            except ValueError:
+                return True
+            return bool(parts) and parts[0].lower() in forbidden_dirs
 
         if action == "list":
             if not target_path.exists():

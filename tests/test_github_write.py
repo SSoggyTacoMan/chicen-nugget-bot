@@ -162,7 +162,10 @@ def test_github_write_pushes_sandbox_branch(tmp_path):
         )
         assert "pushed `boi/fix`" in pushed
         assert manager.written[0] == ".tmp/git-askpass.sh"
-        assert any("push origin HEAD:refs/heads/boi/fix" in cmd for cmd, _ in manager.commands)
+        assert any(
+            "push --no-verify https://github.com/owner/repo.git HEAD:refs/heads/boi/fix" in cmd
+            for cmd, _ in manager.commands
+        )
 
     asyncio.run(run())
 

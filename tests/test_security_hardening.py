@@ -148,3 +148,26 @@ def test_no_hardcoded_api_keys_in_the_repo():
         if pattern.search(text):
             offenders.append(str(path.relative_to(root)))
     assert not offenders, f"hardcoded api keys in {offenders}"
+
+
+def test_like_wildcards_are_matched_literally(tmp_path):
+    from bot.db import Database
+
+    db = Database(tmp_path / "like.db")
+    db.init()
+    db.add_message("ch:C1:a", "user", "U1", "100% sure")
+    db.add_message("ch:C1:a", "user", "U1", "plenty")
+    assert [m["text"] for m in db.search_messages("%")] == ["100% sure"]
+    db.kv_set("a_b", "1")
+    db.kv_set("axb", "2")
+    assert [k for k, _ in db.kv_prefix("a_")] == ["a_b"]
+
+
+def test_slack_file_urls_are_restricted_to_slack_hosts():
+    from bot.slack_api import is_slack_file_url
+
+    assert is_slack_file_url("https://files.slack.com/files-pri/T1-F1/a.png")
+    assert not is_slack_file_url("http://files.slack.com/a.png")
+    assert not is_slack_file_url("https://evil.example/files.slack.com")
+    assert not is_slack_file_url("https://files.slack.com.evil.example/a.png")
+    assert not is_slack_file_url("https://user:pw@files.slack.com/a.png")

@@ -55,6 +55,24 @@ async def is_private_host(hostname: str) -> bool:
     return False
 
 
+_SLACK_FILE_HOSTS = (".slack.com", ".slack-edge.com", ".slack-files.com")
+
+
+def is_slack_file_url(url: str) -> bool:
+    """True for https URLs on Slack's own file hosts (safe to send a Slack token to)."""
+    parsed = urlparse(str(url or ""))
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return False
+    return any(host == suffix[1:] or host.endswith(suffix) for suffix in _SLACK_FILE_HOSTS)
+
+
+async def slack_host_filter(request: httpx.Request) -> None:
+    """Request hook: refuse any hop (including redirects) that leaves Slack's hosts."""
+    if not is_slack_file_url(str(request.url)):
+        raise ValueError(f"blocked non-slack host for an authenticated download: {request.url.host}")
+
+
 async def ssrf_filter(request: httpx.Request) -> None:
     host = request.url.host
     if not host or await is_private_host(host):
@@ -544,12 +562,14 @@ async def fetch_slack_images(
         slack_headers = {"Authorization": f"Bearer {token}"}
         if cookie:
             slack_headers["Cookie"] = f"d={cookie}"
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as http:
+        async with httpx.AsyncClient(
+            timeout=20, follow_redirects=True, event_hooks={"request": [slack_host_filter]}
+        ) as http:
             for f in images:
                 url = f.get("url_private_download") or f.get("url_private")
                 mimetype = f.get("mimetype", "image/png")
                 size = f.get("size", 0)
-                if not url or (size and size > 15 * 1024 * 1024):
+                if not url or not is_slack_file_url(url) or (size and size > 15 * 1024 * 1024):
                     continue
                 try:
                     resp = await http.get(url, headers=slack_headers)
@@ -678,12 +698,18 @@ async def transcribe_slack_audio(
 
             url = f.get("url_private_download") or f.get("url_private")
             size = f.get("size", 0)
-            if not url or not token or (size and size > 25 * 1024 * 1024):
+            if not url or not token or not is_slack_file_url(url) or (size and size > 25 * 1024 * 1024):
                 transcripts.append(f"[Voice message attached: {name}, could not download]")
                 continue
 
             try:
-                dl = await http.get(url, headers=slack_headers)
+                # Separate client: the Slack token must never follow a redirect off Slack.
+                async with httpx.AsyncClient(
+                    timeout=30,
+                    follow_redirects=True,
+                    event_hooks={"request": [slack_host_filter]},
+                ) as slack_http:
+                    dl = await slack_http.get(url, headers=slack_headers)
                 if dl.status_code != 200 or not dl.content:
                     logger.warning("failed to fetch slack audio %s: HTTP %s", url, dl.status_code)
                     transcripts.append(f"[Voice message attached: {name}, download HTTP {dl.status_code}]")

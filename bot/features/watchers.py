@@ -17,7 +17,7 @@ import httpx
 from bot import integrations
 from bot.features.proactive import is_quiet_now, note_proactive, proactive_available
 from bot.runtime import runtime
-from bot.slack_api import post
+from bot.slack_api import post, ssrf_filter
 
 logger = logging.getLogger(__name__)
 
@@ -293,7 +293,11 @@ async def _urls() -> None:
 
 async def _url_up(url: str, timeout: int) -> bool:
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as http:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            event_hooks={"request": [ssrf_filter]},
+        ) as http:
             response = await http.get(url)
         return response.status_code < 400
     except Exception:  # noqa: BLE001
