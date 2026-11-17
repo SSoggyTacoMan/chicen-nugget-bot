@@ -147,6 +147,14 @@ invite it to the welcome, logs and panel channels, plus the private tier-2 chann
 
 run `/nugget setup`, or ask the bot to open the setup panel. secrets go into slack modals, never normal messages.
 
+you don't have to type the slash command either. talk to it normally in a dm:
+
+- `nugget start a secret chat about rust` starts one, `/nugget end` or `nugget end` closes it.
+- `nugget set up welcomer` starts a guided setup: it asks the questions one at a time in chat and saves each answer as you go. the same works for `setup ai`, `setup voice`, `setup images`, `setup watchers`, `setup storage`, `setup channels` and `setup fallback`.
+- any other `/nugget` subcommand works the same way (`remind 10m standup`, `chat new project`, `config welcomer off`, `chats`, `stats`, `help`).
+
+credentials still go through the modals. say `nugget setup github` and it dms you the button panel instead of asking for a token in chat.
+
 | integration | command |
 |---|---|
 | google workspace | `/nugget setup google` |

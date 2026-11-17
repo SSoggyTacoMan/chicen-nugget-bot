@@ -577,6 +577,16 @@ async def cmd_config(ack, command, client) -> None:
         "email_port": "imap_port",
         "email_user": "imap_user",
         "email_password": "imap_password",
+        "voice": "tts_voice",
+        "language": "tts_language",
+        "tts": "tts_model",
+        "image_model": "imagine_model",
+        "imagine": "imagine_model",
+        "memory_days": "memory_retention_days",
+        "sandbox_days": "sandbox_ttl_days",
+        "min_free_gb": "storage_min_free_gb",
+        "autojoin": "auto_join_channels",
+        "welcomer": "welcomer",
     }
     known_keys = [
         "recaps",
@@ -587,15 +597,19 @@ async def cmd_config(ack, command, client) -> None:
         "welcomer",
         "watched_channel_ids",
         "welcome_message",
+        "welcome_public",
+        "welcome_dm",
         "welcome_dm_enabled",
+        "welcome_dm_once",
         "welcome_thread_reply",
         "welcome_thread_text",
         "welcome_ping_auto_add",
         "welcome_ping_button",
-        "welcome_dm",
         "welcome_ping",
         "usergroup_id",
+        "usergroup_prompt",
         "usergroup_prompt_text",
+        "usergroup_prompt_once",
         "tier2",
         "access_channel_id",
         "admin_channel_id",
@@ -611,6 +625,30 @@ async def cmd_config(ack, command, client) -> None:
         "ai_assistant_fallback_model",
         "ai_code_model",
         "ai_code_fallback_model",
+        "ai_router_base_url",
+        "ai_router_models",
+        "tts_model",
+        "tts_voice",
+        "tts_language",
+        "tts_style",
+        "tts_max_chars",
+        "transcribe_model",
+        "transcribe_fallback_model",
+        "imagine_model",
+        "imagine_fallback_model",
+        "imagine_cost_usd",
+        "watch_github_ci",
+        "watch_github_notifications",
+        "watch_email",
+        "watch_urls",
+        "watch_github_ci_interval",
+        "watch_github_notifications_interval",
+        "watch_email_interval",
+        "watch_url_interval",
+        "memory_retention_days",
+        "sandbox_ttl_days",
+        "storage_min_free_gb",
+        "auto_join_channels",
         "google_access_token",
         "google_refresh_token",
         "google_client_id",
@@ -774,6 +812,45 @@ async def cmd_config(ack, command, client) -> None:
         else:
             m = re.search(r"[CG][A-Z0-9]{8,}", raw_val, re.IGNORECASE)
             norm = m.group(0).upper() if m else raw_val.strip("#")
+    elif key == "auto_join_channels":
+        if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0", "clear"}:
+            norm = ""
+        else:
+            tokens = [part for part in re.split(r"[\s,]+", raw_val) if part]
+            by_name: dict[str, str] = {}
+            if any(not re.search(r"[CG][A-Z0-9]{8,}", part, re.IGNORECASE) for part in tokens):
+                by_name = {
+                    (channel.get("name") or "").lower(): channel["id"]
+                    for channel in await all_channels(client)
+                    if channel.get("id") and channel.get("name")
+                }
+            resolved_auto: list[str] = []
+            for part in tokens:
+                match = re.search(r"[CG][A-Z0-9]{8,}", part, re.IGNORECASE)
+                channel_id = (
+                    match.group(0).upper()
+                    if match
+                    else by_name.get(part.lstrip("#").lower())
+                )
+                if channel_id and channel_id not in resolved_auto:
+                    resolved_auto.append(channel_id)
+            norm = ",".join(resolved_auto)
+    elif key in {
+        "usergroup_id",
+        "welcome_ping",
+        "weather_location",
+        "watch_urls",
+        "ai_router_models",
+        "tts_style",
+        "repo_url",
+        "github_username",
+    }:
+        # Free-text settings: "off" means clear, not the word "false".
+        norm = (
+            ""
+            if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0", "clear", "-"}
+            else raw_val
+        )
     elif key in {"recap_channel_id", "recap_private_channel_id"}:
         if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0"}:
             norm = "none"
@@ -802,6 +879,15 @@ async def cmd_config(ack, command, client) -> None:
         else:
             mentions = ", ".join(f"<#{cid}>" for cid in norm.split(",") if cid)
             msg = f":white_check_mark: welcomer now watches: {mentions}."
+        await _say(client, command, msg, ephemeral=True)
+        return
+
+    if key == "auto_join_channels":
+        if not norm:
+            msg = ":white_check_mark: auto-join cleared: no channels will be joined on startup."
+        else:
+            mentions = ", ".join(f"<#{cid}>" for cid in norm.split(",") if cid)
+            msg = f":white_check_mark: will auto-join: {mentions}."
         await _say(client, command, msg, ephemeral=True)
         return
 

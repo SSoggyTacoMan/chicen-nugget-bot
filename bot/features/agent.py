@@ -467,6 +467,8 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
             except Exception:
                 logger.exception("dm agent turn failed")
                 answer = "something broke on my side. check my logs?"
+        if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
+            return
         sent = await _post_chunks(
             client,
             event["channel"],

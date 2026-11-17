@@ -11,6 +11,7 @@ import logging
 import re
 import secrets
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -50,6 +51,390 @@ INTEGRATION_NAMES: dict[str, str] = {
     "slack": "your Slack profile",
 }
 CONFIG_NAMES = {"ai", "voice", "images", "welcome", "fallback", "watchers", "storage", "channels"}
+
+
+@dataclass(frozen=True)
+class SetupQuestion:
+    """One question in a conversational setup flow.
+
+    ``required`` questions are asked in order, one at a time. Optional ones are
+    offered once the required answers are in, so a ten-field modal becomes a
+    short chat instead of an interrogation.
+    """
+
+    key: str
+    ask: str
+    accepts: str
+    required: bool = False
+
+
+@dataclass(frozen=True)
+class SetupGuide:
+    title: str
+    intro: str
+    questions: tuple[SetupQuestion, ...]
+    note: str = ""
+
+
+CHAT_SETUP_AREAS: dict[str, SetupGuide] = {
+    "welcome": SetupGuide(
+        title="welcome & ping group",
+        intro=(
+            "welcomes live in the channels i watch. every message can use "
+            "`{user}`, `{channel}`, `{bot}` and `{name}`."
+        ),
+        questions=(
+            SetupQuestion(
+                "watched_channel_ids",
+                "which channels should i welcome people in? give me #names, ids, "
+                "`all` for every channel i'm in, or `off`.",
+                "#general, #doggy-taco-fellas, a comma list, `all`, or `off`",
+                required=True,
+            ),
+            SetupQuestion(
+                "welcome_public",
+                "should i post a welcome message in the channel when someone joins?",
+                "on or off",
+                required=True,
+            ),
+            SetupQuestion(
+                "welcome_dm_enabled",
+                "should i also DM each new member a welcome?",
+                "on or off",
+                required=True,
+            ),
+            SetupQuestion(
+                "welcome_message",
+                "what should the public welcome say?",
+                "text with {user} / {channel}; `default` keeps the current one",
+            ),
+            SetupQuestion(
+                "welcome_dm",
+                "what should the welcome DM say?",
+                "text with {user} / {channel} / {bot}",
+            ),
+            SetupQuestion(
+                "welcome_dm_once",
+                "DM new members only on their first ever join?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "welcome_thread_reply",
+                "want a small reply in the thread under the join ping?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "welcome_thread_text",
+                "what should that thread reply say?",
+                "text, e.g. `hey {user} :wave:`",
+            ),
+            SetupQuestion(
+                "welcome_ping",
+                "any fixed ping to add to every welcome?",
+                "a user/usergroup mention, or `off`",
+            ),
+            SetupQuestion(
+                "usergroup_id",
+                "is there a ping group (Slack usergroup id, looks like S0123ABCD) "
+                "new members should be offered?",
+                "usergroup id, or `off`",
+            ),
+            SetupQuestion(
+                "welcome_ping_auto_add",
+                "auto-add joiners to that ping group?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "welcome_ping_button",
+                "put a join/leave ping-group button in the welcome?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "usergroup_prompt",
+                "ask new members to join the ping group?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "usergroup_prompt_text",
+                "what should that ping-group ask say?",
+                "text",
+            ),
+        ),
+        note=(
+            "`/nugget setup welcome` still opens the full modal, and a "
+            "per-channel welcome override lives there too. mention that once at the end."
+        ),
+    ),
+    "ai": SetupGuide(
+        title="AI & behavior",
+        intro="models take effect on new turns. `default` keeps what is set now.",
+        questions=(
+            SetupQuestion(
+                "recaps",
+                "want daily recaps?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "thread_followups",
+                "should i reply in threads i'm already part of without being tagged?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "ambient_ai",
+                "should i ever chime in unprompted in channels?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "welcomer",
+                "keep the welcomer / onboarding flow on?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "personal_updates",
+                "send you the private digest and recap reminder DMs?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "ai_model",
+                "which model should the bot use?",
+                "a model id, or `default`",
+            ),
+            SetupQuestion(
+                "ai_assistant_model",
+                "which model should Boi (your personal assistant) use?",
+                "a model id, or `default`",
+            ),
+        ),
+    ),
+    "voice": SetupGuide(
+        title="voice",
+        intro="qwen3 tts powers `/nugget speak` and the `speak` tool.",
+        questions=(
+            SetupQuestion(
+                "tts_model",
+                "which tts model?",
+                "a model id, or `default`",
+            ),
+            SetupQuestion(
+                "tts_voice",
+                "which voice?",
+                "Aiden, Ryan, Serena, Vivian, Dylan, Eric, Uncle_fu, Ono_anna, or Sohee",
+            ),
+            SetupQuestion(
+                "tts_language",
+                "which language?",
+                "auto, English, Chinese, Japanese, Korean, French, German, Italian, Spanish, Portuguese, or Russian",
+            ),
+        ),
+        note="leave style, char cap and transcription models out unless asked.",
+    ),
+    "images": SetupGuide(
+        title="images",
+        intro="nano banana models power `/nugget imagine` and the image tool.",
+        questions=(
+            SetupQuestion(
+                "imagine_model",
+                "which image model should i use by default?",
+                "a model from the images setup list",
+            ),
+            SetupQuestion(
+                "imagine_fallback_model",
+                "want a fallback image model?",
+                "a model id or `none`",
+            ),
+            SetupQuestion(
+                "imagine_cost_usd",
+                "how much should each image count against the daily budget, in USD?",
+                "a number like `0.04`",
+            ),
+        ),
+    ),
+    "fallback": SetupGuide(
+        title="fallback AI",
+        intro="only used when the main provider returns a quota or payment error.",
+        questions=(
+            SetupQuestion(
+                "ai_router_base_url",
+                "what is the fallback base URL?",
+                "an https URL",
+            ),
+            SetupQuestion(
+                "ai_router_models",
+                "which fallback models, in order?",
+                "one model id per line",
+            ),
+        ),
+        note=(
+            "the API key is a secret and cannot be typed in chat. finish by sending "
+            "the fallback setup panel with `integration_setup` so they can paste the key "
+            "into the modal."
+        ),
+    ),
+    "watchers": SetupGuide(
+        title="watchers",
+        intro="watchers baseline on first run and honor quiet hours plus a daily cap.",
+        questions=(
+            SetupQuestion(
+                "watch_github_ci",
+                "watch failed GitHub Actions runs?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "watch_github_notifications",
+                "watch new GitHub notifications?",
+                "on or off",
+            ),
+            SetupQuestion(
+                "watch_email",
+                "watch new unread email? (email must already be connected)",
+                "on or off",
+            ),
+            SetupQuestion(
+                "watch_urls",
+                "any URLs i should watch for changes?",
+                "comma-separated https links, or `off`",
+            ),
+        ),
+        note="intervals are optional; only set them if they ask.",
+    ),
+    "storage": SetupGuide(
+        title="storage",
+        intro="`0` disables a retention rule. `/nugget storage prune` applies it now.",
+        questions=(
+            SetupQuestion(
+                "memory_retention_days",
+                "how many days of conversation history should i keep?",
+                "a number, `0` to keep forever",
+            ),
+            SetupQuestion(
+                "sandbox_ttl_days",
+                "how many days should sandbox workspaces stick around?",
+                "a number",
+            ),
+            SetupQuestion(
+                "storage_min_free_gb",
+                "warn when free disk drops below how many GB?",
+                "a number",
+            ),
+        ),
+    ),
+    "channels": SetupGuide(
+        title="auto-join channels",
+        intro="public channels i should join on startup. private ones still need an invite.",
+        questions=(
+            SetupQuestion(
+                "auto_join_channels",
+                "which public channels should i auto-join?",
+                "#names, comma-separated ids, or `off`",
+            ),
+        ),
+    ),
+}
+
+# Friendly names people actually type, mapped onto the guide keys.
+CHAT_SETUP_ALIASES: dict[str, str] = {
+    "welcomer": "welcome",
+    "welcome": "welcome",
+    "onboarding": "welcome",
+    "greeting": "welcome",
+    "welcome_message": "welcome",
+    "ai": "ai",
+    "behavior": "ai",
+    "behaviour": "ai",
+    "models": "ai",
+    "voice": "voice",
+    "tts": "voice",
+    "image": "images",
+    "images": "images",
+    "imagine": "images",
+    "fallback": "fallback",
+    "9router": "fallback",
+    "watchers": "watchers",
+    "watcher": "watchers",
+    "storage": "storage",
+    "retention": "storage",
+    "channels": "channels",
+    "autochannels": "channels",
+    "auto_join": "channels",
+}
+
+
+def chat_setup_area(name: str) -> str | None:
+    """Resolve a typed setup area, e.g. ``welcomer`` or ``Voice``."""
+    cleaned = re.sub(r"[^a-z0-9]+", "_", (name or "").strip().lower()).strip("_")
+    if not cleaned:
+        return None
+    return CHAT_SETUP_ALIASES.get(cleaned, cleaned if cleaned in CHAT_SETUP_AREAS else None)
+
+
+def _current_setting(key: str) -> str:
+    db = runtime.db
+    if db is not None:
+        value = db.kv_get(f"config:{key}")
+        if value is not None:
+            return value or "(cleared)"
+    default = getattr(runtime.settings, key, None)
+    if isinstance(default, bool):
+        return "on" if default else "off"
+    if isinstance(default, (frozenset, list, tuple, set)):
+        joined = ", ".join(str(item) for item in default)
+        return joined or "(none)"
+    if default is None:
+        return "(not set)"
+    text = str(default).strip()
+    return text or "(not set)"
+
+
+def chat_setup_script(area: str) -> str | None:
+    """Model-facing script for a guided setup conversation.
+
+    The model asks the required questions one at a time and applies each answer
+    with ``bot_config action=set``. No secret ever belongs in this path.
+    """
+    resolved = chat_setup_area(area)
+    guide = CHAT_SETUP_AREAS.get(resolved or "")
+    if guide is None:
+        return None
+
+    lines = [
+        f"guided chat setup: {guide.title} (area: {resolved})",
+        guide.intro,
+        "",
+        "how to run it:",
+        "- ask the required questions in order, ONE short question per message. never dump the whole list.",
+        "- after each real answer, apply it with `bot_config` `action=set`, then ask the next one.",
+        "- keep the current value when they say skip / whatever / default / idk.",
+        "- after the required ones, offer the optional tweaks in a single short line and stop if they don't care.",
+        "- when done, summarize what changed in one or two lines. do not repeat the whole config.",
+        f"- if you lose track mid-flow, call `nugget_command` with `setup {resolved}` again to re-read this script.",
+    ]
+    required = [q for q in guide.questions if q.required]
+    optional = [q for q in guide.questions if not q.required]
+
+    def describe(index: int, question: SetupQuestion) -> list[str]:
+        current = _current_setting(question.key)
+        lines_out = [
+            f"{index}. ask: {question.ask}",
+            f"   apply: bot_config action=set key={question.key} value=<answer>",
+            f"   accepts: {question.accepts}",
+            f"   current: {current}",
+        ]
+        return lines_out
+
+    lines.append("")
+    if required:
+        lines.append("required:")
+        for index, question in enumerate(required, 1):
+            lines.extend(describe(index, question))
+    if optional:
+        lines.append("optional (offer together, don't ask one by one):")
+        for index, question in enumerate(optional, 1):
+            lines.extend(describe(index, question))
+    if guide.note:
+        lines.append("")
+        lines.append(f"note: {guide.note}")
+    return "\n".join(lines)
+
 
 
 def register(app) -> None:

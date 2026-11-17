@@ -203,7 +203,13 @@ async def _deliver(reminder: dict) -> None:
 
     target = reminder["target"]
     if target.startswith("dm:"):
-        await post(client, target[3:], text)
+        # DMs follow the identity the owner actually talks to: Boi when the
+        # assistant account is configured, the bot app otherwise. Falling back
+        # keeps reminders working if the user token loses chat:write.
+        dm_client = runtime.user_client or client
+        sent = await post(dm_client, target[3:], text)
+        if not sent and dm_client is not client:
+            await post(client, target[3:], text)
     else:
         await post(client, target, text)
     logger.info("delivered reminder %s to %s", reminder["id"], target)

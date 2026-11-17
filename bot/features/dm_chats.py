@@ -256,6 +256,12 @@ def secret_intent(text: str) -> tuple[str, str] | None:
             flags=re.IGNORECASE,
         )
         return ("start", _title(tail))
+    if prefixed:
+        lowered = cleaned.lower()
+        if lowered in {"end", "end chat", "end secret", "end secret chat"}:
+            return ("end", "")
+        if lowered.startswith(("end", "burn")) and "burn" in lowered:
+            return ("burn", "")
     if _SECRET_BURN_RE.match(cleaned):
         return ("burn", "")
     if _SECRET_END_RE.match(cleaned):

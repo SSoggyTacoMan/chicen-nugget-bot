@@ -1408,6 +1408,21 @@ class Toolbox:
                 ["action"],
             ),
             tool(
+                "nugget_command",
+                "Run any /nugget subcommand on the owner's behalf from natural chat, so nobody has to type the slash command. Covers secret and normal chats, reminders, polls, config, stats, setup and the rest. A setup area (like `setup welcome`) starts a guided chat instead of a modal: this returns the questions to ask, one at a time. Owner/admin only.",
+                {
+                    "command": {
+                        "type": "string",
+                        "description": "Command text after `/nugget`, e.g. 'secret about rust', 'chat new project', 'setup welcome', 'config welcomer off', 'remind 10m standup', 'chats'.",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Required for destructive commands (forget, burn, close a poll, disconnect an integration). Only true after the owner explicitly said yes.",
+                    },
+                },
+                ["command"],
+            ),
+            tool(
                 "image_access",
                 "List, add or remove people allowed to use image generation. Admins always have access. Owner/admin only.",
                 {
@@ -5326,6 +5341,15 @@ class Toolbox:
             "email_port": "imap_port",
             "email_user": "imap_user",
             "email_password": "imap_password",
+            "voice": "tts_voice",
+            "language": "tts_language",
+            "tts": "tts_model",
+            "image_model": "imagine_model",
+            "imagine": "imagine_model",
+            "memory_days": "memory_retention_days",
+            "sandbox_days": "sandbox_ttl_days",
+            "min_free_gb": "storage_min_free_gb",
+            "autojoin": "auto_join_channels",
         }
         key = key_aliases.get(raw_key, raw_key)
         known_keys = [
@@ -5336,15 +5360,19 @@ class Toolbox:
             "welcomer",
             "watched_channel_ids",
             "welcome_message",
+            "welcome_public",
+            "welcome_dm",
             "welcome_dm_enabled",
+            "welcome_dm_once",
             "welcome_thread_reply",
             "welcome_thread_text",
             "welcome_ping_auto_add",
             "welcome_ping_button",
-            "welcome_dm",
             "welcome_ping",
             "usergroup_id",
+            "usergroup_prompt",
             "usergroup_prompt_text",
+            "usergroup_prompt_once",
             "tier2",
             "access_channel_id",
             "admin_channel_id",
@@ -5361,6 +5389,30 @@ class Toolbox:
             "ai_assistant_fallback_model",
             "ai_code_model",
             "ai_code_fallback_model",
+            "ai_router_base_url",
+            "ai_router_models",
+            "tts_model",
+            "tts_voice",
+            "tts_language",
+            "tts_style",
+            "tts_max_chars",
+            "transcribe_model",
+            "transcribe_fallback_model",
+            "imagine_model",
+            "imagine_fallback_model",
+            "imagine_cost_usd",
+            "watch_github_ci",
+            "watch_github_notifications",
+            "watch_email",
+            "watch_urls",
+            "watch_github_ci_interval",
+            "watch_github_notifications_interval",
+            "watch_email_interval",
+            "watch_url_interval",
+            "memory_retention_days",
+            "sandbox_ttl_days",
+            "storage_min_free_gb",
+            "auto_join_channels",
             "google_access_token",
             "google_refresh_token",
             "google_client_id",
@@ -5487,6 +5539,37 @@ class Toolbox:
                 else:
                     match = re.search(r"[CG][A-Z0-9]{8,}", value, re.IGNORECASE)
                     normalized_val = match.group(0).upper() if match else value.strip("#")
+            elif key == "auto_join_channels":
+                if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0", "clear"}:
+                    normalized_val = ""
+                else:
+                    parts = [part.strip() for part in re.split(r"[,\s]+", value) if part.strip()]
+                    ids: list[str] = []
+                    for part in parts:
+                        match = re.search(r"[CG][A-Z0-9]{8,}", part, re.IGNORECASE)
+                        token = (
+                            match.group(0).upper()
+                            if match
+                            else await self._resolve_channel(ctx, part)
+                        )
+                        if token and token not in ids:
+                            ids.append(token)
+                    normalized_val = ",".join(ids)
+            elif key in {
+                "usergroup_id",
+                "welcome_ping",
+                "weather_location",
+                "watch_urls",
+                "ai_router_models",
+                "tts_style",
+                "repo_url",
+                "github_username",
+            }:
+                # Free-text settings: "off" means clear, not the word "false".
+                if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0", "clear", "-"}:
+                    normalized_val = ""
+                else:
+                    normalized_val = value
             elif key in {"recap_channel_id", "recap_private_channel_id"}:
                 if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0"}:
                     normalized_val = "none"
@@ -5514,6 +5597,12 @@ class Toolbox:
                     return "welcomer will now greet joins/leaves in every channel the bot is in."
                 mentions = ", ".join(f"<#{cid}>" for cid in normalized_val.split(",") if cid)
                 return f"welcomer now watches: {mentions}."
+
+            if key == "auto_join_channels":
+                if not normalized_val:
+                    return "auto-join cleared: i won't join any channels on startup."
+                mentions = ", ".join(f"<#{cid}>" for cid in normalized_val.split(",") if cid)
+                return f"i'll auto-join: {mentions}."
 
             if key in {
                 "ai_model",
@@ -5581,6 +5670,126 @@ class Toolbox:
             return f"updated *{key}* to `{normalized_val}`."
 
         return _error(f"unknown action '{action}'")
+
+    async def _tool_nugget_command(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        """Route natural chat text through the real /nugget subcommands."""
+        if not _need_owner(ctx):
+            return _error("only the owner/admin can run nugget commands")
+        raw = str(args.get("command") or "").strip()
+        if not raw:
+            return _error("command is required")
+        confirm = bool(args.get("confirm"))
+
+        from bot import integrations as feature_integrations
+        from bot.features import router as command_router
+        from bot.features import setup as setup_feature
+
+        canonical = command_router.normalize_message_command(raw, allow_bare=True)
+        if canonical is None:
+            return _error(
+                f"`{raw}` isn't a /nugget command. try `/nugget help` for the list, "
+                "or answer the question directly if this wasn't a command."
+            )
+        if not canonical:
+            return _error("command is required")
+
+        head, _, rest = canonical.partition(" ")
+        head = head.lower()
+        rest = rest.strip()
+
+        if head in {"ask", "summarize", "summary"}:
+            return _error(
+                "that command would start another AI turn from inside this one. "
+                "just answer directly instead."
+            )
+
+        # ---- setup: prefer a guided chat over a modal --------------------
+        if head in {"setup", "connect", "integrations"}:
+            action = rest.partition(" ")[0].strip().lower()
+            extra = rest.partition(" ")[2].strip().lower()
+            area = setup_feature.chat_setup_area(action) if action else None
+            if area:
+                if not ctx.is_dm:
+                    return _error(
+                        "setup is private. don't ask those questions in a channel: "
+                        "tell them to dm you and start it there. nothing changed."
+                    )
+                script = setup_feature.chat_setup_script(area)
+                if script:
+                    return script
+            if action in {"", "panel", "home", "help", "?"}:
+                return await self._tool_integration_setup({"action": "panel"}, ctx)
+            if action == "status":
+                return await self._tool_integration_setup({"action": "status"}, ctx)
+            if action == "disconnect":
+                if not confirm:
+                    return _error(
+                        "disconnecting removes stored credentials. ask the owner "
+                        "first, then call again with confirm=true."
+                    )
+                return await self._tool_integration_setup(
+                    {"action": "disconnect", "integration": extra or "all"}, ctx
+                )
+            if action in feature_integrations.SETUP_AREAS:
+                return await self._tool_integration_setup(
+                    {"action": "panel", "integration": action}, ctx
+                )
+            areas = ", ".join(sorted(feature_integrations.SETUP_AREAS))
+            return _error(f"unknown setup area. try one of: {areas}.")
+
+        destructive = (
+            head == "forget"
+            or head == "pollclose"
+            or (head == "end" and "burn" in rest.lower())
+            or (head == "chat" and rest.lower().startswith("close"))
+        )
+        if destructive and not confirm:
+            return _error(
+                "that one is destructive. ask the owner to confirm in one line, "
+                "then call again with confirm=true only after they say yes."
+            )
+
+        from bot.features.dm_chats import bot_dm
+
+        # Keep the answer and the command's own posts in the same identity you
+        # are talking to: Boi in a Boi DM, the bot app everywhere else.
+        client = ctx.client or ctx.bot_client
+        channel = ctx.channel_id or ctx.user_id
+        private_heads = {
+            "secret",
+            "end",
+            "chat",
+            "chats",
+            "newchat",
+            "forget",
+            "config",
+            "settings",
+            "imageaccess",
+            "images",
+            "access",
+            "accesspanel",
+            "panel",
+            "pending",
+        }
+        if not ctx.is_dm and head in private_heads:
+            # private commands belong in the bot's DM, never a public channel
+            channel = await bot_dm(client, ctx.user_id, channel)
+
+        ran, ran_text = await command_router.run_command_text(
+            canonical,
+            client=client,
+            user_id=ctx.user_id,
+            channel_id=channel,
+            thread_ts=ctx.thread_ts,
+            allow_bare=True,
+        )
+        if not ran:
+            return _error(f"couldn't run `/nugget {canonical}`")
+        return (
+            f"ran `/nugget {ran_text}`. it posted its own message, so don't repeat "
+            "or paraphrase it. if it already said everything, reply with exactly "
+            "[NO_REPLY]. otherwise one short line."
+        )
 
     async def _tool_system_diagnostics(self, args: dict[str, Any], ctx: ToolContext) -> str:
         if not _need_owner(ctx):
