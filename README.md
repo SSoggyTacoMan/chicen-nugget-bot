@@ -32,7 +32,7 @@ if something feels off, `/nugget doctor` is the first stop. it checks scopes, to
 - timers, alarms, reminders, tasks and durable notes for boi and the bot
 - post-huddle summaries from slack ai notes
 - ordered 9router fallback models when hack club ai quota runs out
-- a message starting with `# ` is ignored, always. manual mute switch
+- `/nugget mute` stops every reply to you until you unmute. a message starting with `# ` is ignored, always, as a one-message opt-out
 
 ## how it fits
 
@@ -373,10 +373,10 @@ DMs used to be one endless conversation. Now each DM chat is its own thread, roo
 | slack | `search_slack`, `fetch_slack_message`, `thread_permalink`, `summarize_thread`, `get_channel_history`, `lookup_user`, `lookup_channel`, `manage_channel`, `send_dm`, `post_message`, `slack_status`, `slack_dnd`, `slack_react`, `slack_activity` |
 | personal | `google_calendar`, `gmail`, `google_drive`, `mac_control`, `check_emails`, `daily_briefing`, `api_request` |
 | setup | `integration_setup` |
-| workspace | `flaron`, `pending_access_requests`, `get_stats`, `bot_config` |
-| memory | `remember`, `recall`, `forget`, `search_memory`, `manage_tasks`, `remind`, `list_reminders`, `cancel_reminder` |
-| media | `generate_image`, `make_chart`, `make_deck` |
-| misc | `get_weather`, `public_holidays`, `roll_dice`, `dog_fact`, `taco_recipe`, `urban_dict`, `nugget_fact` |
+| workspace | `flaron`, `pending_access_requests`, `get_stats`, `bot_config`, `nugget_command`, `image_access` |
+| memory | `remember`, `recall`, `forget`, `search_memory`, `manage_tasks`, `remind`, `timer`, `alarm`, `list_reminders`, `cancel_reminder` |
+| media | `generate_image`, `speak`, `make_chart`, `make_deck` |
+| misc | `get_weather`, `public_holidays`, `roll_dice`, `dog_fact`, `taco_recipe`, `urban_dict` (dm only), `nugget_fact` |
 
 owner and admin checks happen in code against the real slack sender. the prompt can't grant permissions on its own. tools whose integration isn't connected are omitted from the model's tool list entirely.
 
@@ -560,7 +560,8 @@ everything lives under `/nugget`. `/nugget help` is the full list.
 | `/nugget secret [title]` | unsaved in-memory chat, web tools only | anyone (dm) |
 | `/nugget end [--burn]` | end a secret chat, optionally delete my replies | anyone (dm) |
 | `/nugget summarize [n]` | ai catch-up for this channel | ai channels |
-| `/nugget imagine <prompt>` | generate an image | admin |
+| `/nugget imagine <prompt>` | generate an image | image allowlist |
+| `/nugget imageaccess [list|add @user|remove @user]` | manage who may generate images | admin |
 | `/nugget speak <text>` | generate a qwen3 voice clip | admin |
 | `/nugget huddle` | summarize the last huddle with slack ai notes | admin |
 | `/nugget config` | runtime settings | admin |
@@ -663,7 +664,7 @@ isolation details:
 
 the workspace follows the [Hack Club Code of Conduct](https://hackclub.com/conduct). the prompt has a conduct section, but the important parts are enforced in code too:
 
-- **leaving people alone is durable.** a standing "leave me alone" (or `/nugget mute`) is stored in `user_optouts`. the bot then skips that person's DMs, mentions, thread follow-ups, reactions and ambient messages until they run `/nugget unmute` (or say "unmute" / "come back"). a one-off "shut up" only skips that turn.
+- **leaving people alone is durable.** a standing "leave me alone" (or `/nugget mute`) is stored in `user_optouts`. the bot then skips that person's DMs, mentions, thread follow-ups, reactions, shortcuts and ambient messages until they run `/nugget unmute` (or say "unmute" / "come back"). a one-off "shut up" only skips that turn.
 - **public replies are screened.** the gate's `safe` question runs on the bot's own text before it is posted in a channel, in addition to the ambient check on incoming messages.
 - **reports go to a human.** `/nugget report [what happened]` DMs the owner and moderators. the bot does not investigate, decide, or promise confidentiality, and it always names the real routes: `conduct@hackclub.com`, Shroud on Slack, or `eps@hackclub.com`.
 - **unmoderated sources stay private.** `urban_dict` is DM-only, and image prompts (`/imagine` and the `generate_image` tool) go through the same safety review before the model is called.
