@@ -3,6 +3,8 @@ import random
 from bot.utils.dice import roll
 from bot.utils.text import (
     asks_for_silence,
+    asks_to_be_left_alone,
+    asks_to_come_back,
     chat_chunks,
     chunk_text,
     extract_id,
@@ -144,6 +146,26 @@ def test_is_ignored_message():
     assert is_ignored_message("  # manual opt out")
     assert not is_ignored_message("what does # mean in markdown")
     assert not is_ignored_message("#nospace")
+
+
+def test_standing_silence_is_durable():
+    assert asks_to_be_left_alone("leave me alone")
+    assert asks_to_be_left_alone("please leave me be")
+    assert asks_to_be_left_alone("dont talk to me again")
+    assert asks_to_be_left_alone("stop messaging me")
+    assert asks_to_be_left_alone("stop replying to me")
+    assert asks_to_be_left_alone("i don't want you to reply to me")
+    # one-off grumbles still belong to the turn, not a permanent opt-out
+    assert not asks_to_be_left_alone("shut up lol")
+    assert not asks_to_be_left_alone("stop replying to that thread")
+    assert not asks_to_be_left_alone("the api is down")
+
+
+def test_come_back_is_explicit():
+    assert asks_to_come_back("unmute")
+    assert asks_to_come_back("ok come back")
+    assert asks_to_come_back("you can talk to me again")
+    assert not asks_to_come_back("you never come back with my coffee")
 
 
 def test_chat_chunks_splits_paragraphs_and_keeps_code_together():

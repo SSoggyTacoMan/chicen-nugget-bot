@@ -42,6 +42,12 @@ def test_guest_tool_schema_excludes_owner_tools():
     assert box.definitions_for(is_owner=False) is box.definitions_for(is_owner=False)
 
 
+def test_urban_dict_is_dm_only():
+    box = Toolbox(MagicMock())
+    out = asyncio.run(box.execute("urban_dict", {"term": "test"}, _ctx(is_dm=False)))
+    assert "dm-only" in out
+
+
 def test_github_info_is_owner_only():
     box = Toolbox(MagicMock())
     result = asyncio.run(box.execute("github_info", {"action": "repo", "target": "o/r"}, _ctx()))

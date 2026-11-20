@@ -32,6 +32,8 @@ from bot.slack_api import (
 from bot.utils.text import (
     MAX_SLACK_TEXT,
     asks_for_silence,
+    asks_to_be_left_alone,
+    asks_to_come_back,
     chat_chunks,
     chunk_options,
     disarm_broadcasts,
@@ -135,6 +137,57 @@ async def _post_chunks(
     return sent
 
 
+async def _respect_optout(event: dict[str, Any], client) -> bool:
+    """True when the sender opted out and this event should be dropped.
+
+    A standing "leave me alone" is stored in sqlite, so it survives restarts and
+    silences DMs, mentions, thread follow-ups and ambient replies. The only way
+    back is an explicit unmute: `/nugget unmute`, or "unmute" / "come back" in a
+    message.
+    """
+    db = runtime.db
+    user_id = event.get("user")
+    if db is None or not user_id or not db.is_opted_out(user_id):
+        return False
+    text = event.get("text") or ""
+    if not asks_to_come_back(text):
+        return True
+    db.opt_in(user_id)
+    logger.info("opt-out cleared for %s", user_id)
+    channel = event.get("channel")
+    if channel:
+        await post(
+            client,
+            channel,
+            "back. i'll stay out of the way unless you ask.",
+            thread_ts=event.get("thread_ts"),
+        )
+    return True
+
+
+async def _note_silence(
+    *,
+    user_id: str,
+    text: str,
+    is_dm: bool,
+    channel: str | None,
+    thread_ts: str | None,
+    client,
+) -> None:
+    """Persist a standing request to be left alone, without pestering them."""
+    if not asks_to_be_left_alone(text) or runtime.db is None:
+        return
+    runtime.db.opt_out(user_id, source="asked")
+    logger.info("standing opt-out recorded for %s", user_id)
+    if is_dm and channel:
+        await post(
+            client,
+            channel,
+            "ok. i'll leave you alone. `/nugget unmute` when you want me back.",
+            thread_ts=thread_ts,
+        )
+
+
 async def on_message(event: dict[str, Any], client) -> None:
     _prune_tracking()
     subtype = event.get("subtype")
@@ -151,6 +204,9 @@ async def on_message(event: dict[str, Any], client) -> None:
         return
     user_id = event.get("user")
     if not user_id or user_id == runtime.bot_user_id or (runtime.user_id and user_id == runtime.user_id):
+        return
+
+    if await _respect_optout(event, client):
         return
 
     channel_type = event.get("channel_type")
@@ -184,6 +240,8 @@ async def on_app_mention(event: dict[str, Any], client) -> None:
     if not user_id or user_id == runtime.bot_user_id or (runtime.user_id and user_id == runtime.user_id):
         return
     channel = event.get("channel") or ""
+    if await _respect_optout(event, client):
+        return
     # DM mentions are handled by the message event.
     if channel.startswith("D"):
         return
@@ -233,6 +291,8 @@ async def on_reaction_added(event: dict[str, Any], client) -> None:
     if not channel or not ts or not user_id:
         return
     if user_id in {runtime.bot_user_id, runtime.user_id}:
+        return
+    if runtime.db is not None and runtime.db.is_opted_out(user_id):
         return
     if item_user in {runtime.bot_user_id, runtime.user_id}:
         return
@@ -309,6 +369,8 @@ async def on_reaction_added(event: dict[str, Any], client) -> None:
                 trigger="reaction",
                 client=client,
                 secret=secret,
+                public_veto=not is_dm,
+                safety_review=not is_dm,
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return
@@ -357,6 +419,8 @@ async def _reaction_message(
 async def _handle_dm(event: dict[str, Any], client) -> None:
     settings = runtime.settings
     user_id = event["user"]
+    if runtime.db is not None and runtime.db.is_opted_out(user_id):
+        return
     allowed = user_id == settings.owner_user_id or (
         settings.ai_allow_admins and settings.is_admin(user_id)
     )
@@ -405,6 +469,14 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
             await post(client, event["channel"], "no secret chat is active.")
         return
     if asks_for_silence(text) or is_ignored_message(text):
+        await _note_silence(
+            user_id=user_id,
+            text=text,
+            is_dm=True,
+            channel=event.get("channel"),
+            thread_ts=event.get("thread_ts"),
+            client=client,
+        )
         return
     retry = user_retry_after(user_id)
     if retry:
@@ -599,6 +671,8 @@ async def _handle_thread_continuation(event: dict[str, Any], client) -> None:
     thread_ts = event.get("thread_ts")
     user_id = event.get("user")
     if not channel or not thread_ts or not user_id:
+        return
+    if runtime.db is not None and runtime.db.is_opted_out(user_id):
         return
     if not _ai_allowed(event):
         return
@@ -806,6 +880,8 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
 
     if not channel or not user_id or not text:
         return
+    if runtime.db is not None and runtime.db.is_opted_out(user_id):
+        return
     if runtime.agent is None or runtime.gate is None or not settings.ai_enabled:
         return
     if not settings.ai_allowed(channel) or not settings.ambient_allowed(channel):
@@ -906,12 +982,22 @@ async def _handle_channel(
         return False
     if not settings.ai_enabled or runtime.agent is None:
         return False
+    if runtime.db is not None and runtime.db.is_opted_out(user_id):
+        return False
     text = text.strip()
     if not text and not images:
         text = "hey"
     elif not text and images:
         text = "Look at this image."
     if asks_for_silence(text) or is_ignored_message(text):
+        await _note_silence(
+            user_id=user_id,
+            text=text,
+            is_dm=False,
+            channel=channel,
+            thread_ts=thread_ts or event.get("thread_ts"),
+            client=client,
+        )
         return False
     retry = user_retry_after(user_id)
     if retry:
@@ -947,6 +1033,7 @@ async def _handle_channel(
                 images=images,
                 context=context,
                 public_veto=event.get("channel_type") == "channel",
+                safety_review=True,
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return False

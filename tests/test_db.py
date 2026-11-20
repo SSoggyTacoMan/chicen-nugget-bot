@@ -142,3 +142,26 @@ def test_notes_crud_and_matching(tmp_path):
     assert db.get_note(id3) is not None
 
 
+def test_optouts_are_durable(tmp_path):
+    path = tmp_path / "test.db"
+    db = Database(path)
+    db.init()
+
+    assert db.is_opted_out("U1") is False
+    assert db.is_opted_out("") is False
+
+    db.opt_out("U1", "asked")
+    db.opt_out("U1", "asked again")  # idempotent
+    assert db.is_opted_out("U1") is True
+    assert db.optouts() == ["U1"]
+
+    db.close()
+    reopened = Database(path)
+    reopened.init()
+    assert reopened.is_opted_out("U1") is True
+
+    assert reopened.opt_in("U1") is True
+    assert reopened.is_opted_out("U1") is False
+    assert reopened.opt_in("U1") is False
+
+

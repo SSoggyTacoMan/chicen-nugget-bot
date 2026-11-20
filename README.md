@@ -380,7 +380,7 @@ DMs used to be one endless conversation. Now each DM chat is its own thread, roo
 
 owner and admin checks happen in code against the real slack sender. the prompt can't grant permissions on its own. tools whose integration isn't connected are omitted from the model's tool list entirely.
 
-`search_slack` uses the user session for real workspace search and falls back to local history. `manage_channel` lists, inspects, joins, leaves, creates, sets topic/purpose, invites, pins and lists members.
+`search_slack` uses the user session for real workspace search, scans the named channel's recent history when search misses (pass `channel`, or use `in:#channel`), then falls back to local history. `manage_channel` lists, inspects, joins, leaves, creates, sets topic/purpose, invites, pins and lists members.
 
 ### sandbox
 
@@ -484,13 +484,14 @@ message shortcuts: **explain this** and **summarize thread**. both answer in the
 
 ## the jev gate
 
-a bot that replies to everything is noise. jev is a typed classifier, not another chat model. for an unaddressed message it answers six questions in one pass:
+a bot that replies to everything is noise. jev is a typed classifier, not another chat model. for an unaddressed message it answers seven questions in one pass:
 
 | question | purpose |
 |---|---|
 | `should_reply` | would a reply add something? |
 | `addressed` | is it aimed at the bot? |
 | `spam` | is it spam, a mass ping or a link dump? |
+| `safe` | is it appropriate for an all-ages Hack Club Slack? |
 | `needs_tools` | does a correct answer need live data or an action? |
 | `kind` | question, help, feedback, celebration, bot, chatter, spam, other |
 | `recipient` | bot, someone else, everyone |
@@ -499,6 +500,7 @@ decision:
 
 ```text
 ambient: reply = not spam
+        and appropriate
         and (aimed_at_bot
              or (assist and worth_replying and recipient != someone_else))
 
@@ -506,6 +508,8 @@ assist = kind is help/feedback, or a question that needs live data/tools
 ```
 
 a message aimed at another person never triggers an agent turn unless the bot is also addressed. short follow-ups in a thread where the bot spoke last bypass the gate. `needs_tools` becomes a hint so the model fetches data instead of guessing.
+
+the `safe` question is also run on the bot's own public replies and generated posts before posting (`AI_GATE_SAFETY_THRESHOLD`, default `0.5`). a confident "not appropriate" suppresses the message instead of broadcasting it. this is a filter on top of the prompt, not a replacement for it: if jev is unreachable the reply is allowed through, because the ambient gate already fails closed and going silent on every classifier hiccup would break mentions. turning `AI_GATE_ENABLED=false` turns off the screen as well.
 
 mentions carry the last few channel or thread lines as context, so a tagged one-word message ("advice?") can still see what it refers to. thread follow-ups work the same way, with a cooldown (`AI_THREAD_COOLDOWN`) and the same "is this actually for me" checks (`bot/features/followup.py`).
 
@@ -546,6 +550,9 @@ everything lives under `/nugget`. `/nugget help` is the full list.
 | `/nugget timer <duration> [label]` | countdown timer | anyone |
 | `/nugget alarm daily <HH:MM> [label]` | daily alarm | anyone |
 | `/nugget pinggroup [join|leave|panel]` | manage or post the ping-group panel | anyone / admin |
+| `/nugget mute` | stop every reply to you until you unmute | anyone |
+| `/nugget unmute` | undo a mute | anyone |
+| `/nugget report [what happened]` | privately relay a conduct report to the owner and moderators | anyone |
 | `/nugget poll "q" "a" "b"` | live button poll | anyone |
 | `/nugget ask <question>` | one-shot ai answer | ai channels |
 | `/nugget chats` | list your dm chats, one thread each | anyone (dm) |
@@ -652,9 +659,21 @@ isolation details:
 
 `ENV_FILE` defaults to the local `.env`.
 
+## conduct and safety
+
+the workspace follows the [Hack Club Code of Conduct](https://hackclub.com/conduct). the prompt has a conduct section, but the important parts are enforced in code too:
+
+- **leaving people alone is durable.** a standing "leave me alone" (or `/nugget mute`) is stored in `user_optouts`. the bot then skips that person's DMs, mentions, thread follow-ups, reactions and ambient messages until they run `/nugget unmute` (or say "unmute" / "come back"). a one-off "shut up" only skips that turn.
+- **public replies are screened.** the gate's `safe` question runs on the bot's own text before it is posted in a channel, in addition to the ambient check on incoming messages.
+- **reports go to a human.** `/nugget report [what happened]` DMs the owner and moderators. the bot does not investigate, decide, or promise confidentiality, and it always names the real routes: `conduct@hackclub.com`, Shroud on Slack, or `eps@hackclub.com`.
+- **unmoderated sources stay private.** `urban_dict` is DM-only, and image prompts (`/imagine` and the `generate_image` tool) go through the same safety review before the model is called.
+- **the bot is not a moderator.** it never rules on a report, speaks for Hack Club HQ, or asks someone to prove harassment in a public channel.
+
+these are guardrails, not a substitute for moderation. a classifier can miss things; the prompt, the provider filters, and the humans in the loop are the layers around it.
+
 ## data and security
 
-- storage: one sqlite file at `data/bot.db`. conversation history, notes, reminders, polls, access requests, runtime settings, semantic memory vectors, dm chat titles and secret-chat markers, and a key/value store. secret-chat message content is never written here.
+- storage: one sqlite file at `data/bot.db`. conversation history, notes, reminders, polls, access requests, runtime settings, semantic memory vectors, dm chat titles and secret-chat markers, conduct opt-outs, and a key/value store. secret-chat message content is never written here.
 - retention: history is per conversation and trimmed to `AI_HISTORY_LIMIT` turns. `/nugget forget` wipes the active chat (or `all` DM chats), including semantic vectors. delete `data/bot.db` to reset everything.
 - logs: stdout plus rotating files in `logs/`. tool arguments and reply text can show up in debug logs.
 - secrets: tokens go through slack modals. never paste a token into chat. if you do, rotate it.

@@ -38,6 +38,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from bot import image_access, integrations
 from bot.ai import images, tts
 from bot.ai.browser import BrowserError, BrowserManager
+from bot.ai.gate import Gate
 from bot.ai.sandbox import SandboxError, SandboxManager, safe_env, safe_name
 from bot.ai.thread_summary import (
     format_digest,
@@ -757,10 +758,14 @@ class Toolbox:
             ),
             tool(
                 "search_slack",
-                "Search Slack messages and files across the workspace. Uses the connected user session for full workspace search and falls back to local conversation history. Owner/admin only.",
+                "Search Slack messages and files across the workspace. Uses the connected user session for full workspace search and falls back to a recent-history scan of the given channel, then local conversation history. Owner/admin only.",
                 {
                     "query": {"type": "string", "description": "Slack search query, supports in:#channel, from:@user, before:, after:, etc."},
                     "count": {"type": "integer", "description": "Max results, 1-20."},
+                    "channel": {
+                        "type": "string",
+                        "description": "Optional channel id or #name. When workspace search comes back empty, this channel's recent messages are scanned for the query.",
+                    },
                     "kind": {
                         "type": "string",
                         "enum": ["messages", "files", "all"],
@@ -2049,20 +2054,90 @@ class Toolbox:
         kind = str(args.get("kind") or "messages").lower().strip()
         if kind not in {"messages", "files", "all"}:
             kind = "messages"
+        channel_value = str(args.get("channel") or "").strip()
+        if not channel_value:
+            in_channel = re.search(r"\bin:(#?[A-Za-z0-9_\-.]+)", query, re.IGNORECASE)
+            if in_channel:
+                channel_value = in_channel.group(1)
+
+        async def scan_channel_history() -> list[dict[str, Any]]:
+            """Slack search misses some messages (bot posts, exact ids); scan recent history."""
+            if not channel_value:
+                return []
+            channel_id = await self._resolve_channel(ctx, channel_value)
+            if not channel_id:
+                return []
+            needle = re.sub(r"\b(?:in|from|before|after|during|with|has|is):\S+", " ", query.lower())
+            tokens = [token for token in re.split(r"\s+", needle) if len(token) >= 2] or [query.lower()]
+            clients = []
+            primary = (
+                ctx.user_client
+                if channel_id.startswith("D") and ctx.user_client
+                else ctx.client
+            )
+            for candidate in (primary, ctx.user_client, ctx.bot_client):
+                if candidate is not None and candidate not in clients:
+                    clients.append(candidate)
+            for client in clients:
+                found: list[dict[str, Any]] = []
+                latest: str | None = None
+                try:
+                    for _ in range(3):
+                        kwargs: dict[str, Any] = {"channel": channel_id, "limit": 200}
+                        if latest:
+                            kwargs.update(latest=latest, inclusive=False)
+                        response = await client.conversations_history(**kwargs)
+                        messages = response.get("messages") or []
+                        for message in messages:
+                            text = (message.get("text") or "")
+                            haystack = text.lower()
+                            if text and all(token in haystack for token in tokens):
+                                found.append(
+                                    {
+                                        "text": text[:800],
+                                        "user": message.get("user") or message.get("bot_id"),
+                                        "channel": channel_value.lstrip("#"),
+                                        "channel_id": channel_id,
+                                        "ts": message.get("ts"),
+                                    }
+                                )
+                                if len(found) >= count:
+                                    return found
+                        if not response.get("has_more") or not messages:
+                            break
+                        latest = messages[-1].get("ts")
+                        if not latest:
+                            break
+                except Exception as exc:  # noqa: BLE001 - try the next client
+                    logger.info("slack history scan failed: %s", error_code(exc))
+                    continue
+                if found:
+                    return found
+                return []
+            return []
 
         def message_rows(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return [
-                {
-                    "text": (match.get("text") or "")[:800],
-                    "user": match.get("user"),
-                    "username": match.get("username"),
-                    "channel": (match.get("channel") or {}).get("name"),
-                    "channel_id": (match.get("channel") or {}).get("id"),
-                    "permalink": match.get("permalink"),
-                    "ts": match.get("ts"),
-                }
-                for match in matches[:count]
-            ]
+            rows = []
+            for match in matches[:count]:
+                channel = match.get("channel")
+                if isinstance(channel, dict):
+                    channel_name = channel.get("name")
+                    channel_id = channel.get("id")
+                else:
+                    channel_name = channel
+                    channel_id = match.get("channel_id")
+                rows.append(
+                    {
+                        "text": (match.get("text") or "")[:800],
+                        "user": match.get("user"),
+                        "username": match.get("username"),
+                        "channel": channel_name,
+                        "channel_id": channel_id,
+                        "permalink": match.get("permalink"),
+                        "ts": match.get("ts"),
+                    }
+                )
+            return rows
 
         def file_rows(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return [
@@ -2094,6 +2169,8 @@ class Toolbox:
                     )
                     messages = (((response.get("messages") or {}).get("matches")) or [])
                     files = (((response.get("files") or {}).get("matches")) or [])
+                    if not messages and not files and channel_value:
+                        messages = await scan_channel_history()
                     if not messages and not files:
                         return "no slack messages or files matched that search."
                     return _json(
@@ -2111,13 +2188,29 @@ class Toolbox:
             except Exception as exc:  # noqa: BLE001
                 logger.info("slack search failed: %s", error_code(exc))
 
+        # Workspace search missed it: look at the named channel's recent history.
+        # This catches bot-posted messages and exact ids that Slack search skips.
+        scanned = await scan_channel_history()
+        if scanned:
+            return _json(
+                {
+                    "source": f"recent history scan of {channel_value.lstrip('#')}",
+                    "messages": message_rows(scanned),
+                }
+            )
+
         # No user session or Slack search unavailable: search what the bot has
         # stored locally. This only covers conversations the bot was part of.
         rows = ctx.db.search_messages(query, count)
         if not rows:
+            where = (
+                f" in #{channel_value.lstrip('#')} (scanned recent history)"
+                if channel_value
+                else ""
+            )
             return (
-                "no slack results. full workspace search needs the Boi user session "
-                "(SLACK_USER_TOKEN); local history has no match either."
+                f"no slack results for {query!r}{where}. full workspace search needs "
+                "the Boi user session (SLACK_USER_TOKEN); local history has no match either."
             )
         return _json(
             {
@@ -3729,6 +3822,9 @@ class Toolbox:
         prompt = str(args.get("prompt") or "").strip()
         if not prompt:
             return _error("prompt is required")
+        gate = runtime.gate or Gate(ctx.settings, budget=getattr(runtime, "budget", None))
+        if not await gate.review_public(prompt, user_id=ctx.user_id):
+            return _error("i can't generate that one. image prompts have to stay sfw and respectful.")
         ratio = str(args.get("ratio") or "1:1").strip()
         if ratio not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
             ratio = "1:1"
@@ -5353,6 +5449,10 @@ class Toolbox:
         )
 
     async def _tool_urban_dict(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not ctx.is_dm:
+            # Urban Dictionary is unmoderated, so it stays out of shared
+            # channels where the workspace includes people of all ages.
+            return _error("urban dictionary is dm-only. ask me in a dm.")
         term = str(args.get("term") or "").strip()
         if not term:
             return _error("term is required")

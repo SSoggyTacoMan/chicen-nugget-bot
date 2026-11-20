@@ -134,6 +134,7 @@ class Settings:
     ai_gate_min_confidence: float
     ai_gate_addressed_confidence: float
     ai_gate_spam_threshold: float
+    ai_gate_safety_threshold: float
     ai_ambient_channels: frozenset[str]
     ai_ambient_cooldown: int
     ai_thread_cooldown: int
@@ -466,6 +467,9 @@ def load_settings() -> Settings:
         ai_gate_min_confidence=_float("AI_GATE_MIN_CONFIDENCE", 0.5),
         ai_gate_addressed_confidence=_float("AI_GATE_ADDRESSED_CONFIDENCE", 0.6),
         ai_gate_spam_threshold=_float("AI_GATE_SPAM_THRESHOLD", 0.7),
+        ai_gate_safety_threshold=max(
+            0.0, min(1.0, _float("AI_GATE_SAFETY_THRESHOLD", 0.5))
+        ),
         ai_ambient_channels=frozenset(_list("AI_AMBIENT_CHANNELS")),
         ai_ambient_cooldown=max(0, _int("AI_AMBIENT_COOLDOWN", 120)),
         ai_thread_cooldown=max(0, _int("AI_THREAD_COOLDOWN", 120)),

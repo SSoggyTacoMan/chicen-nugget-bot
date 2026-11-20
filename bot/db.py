@@ -179,6 +179,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks (user_id, done);
+
+CREATE TABLE IF NOT EXISTS user_optouts (
+    user_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -433,6 +439,37 @@ class Database:
             (f"{_like_escape(prefix)}%",),
         )
         return [(r["key"], self._unseal(r["key"], r["value"]) or "") for r in rows]
+
+    # ------------------------------------------------------------- opt-outs
+    def opt_out(self, user_id: str, source: str = "") -> None:
+        """Remember that someone asked to be left alone.
+
+        This is the durable half of the code of conduct's "leave them alone"
+        rule: a single "shut up" only skips one turn, but "leave me alone"
+        persists until the person explicitly comes back.
+        """
+        if not user_id:
+            return
+        self._write(
+            "INSERT INTO user_optouts (user_id, created_at, source) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO NOTHING",
+            (user_id, iso(), source),
+        )
+
+    def opt_in(self, user_id: str) -> bool:
+        """Clear an opt-out. Returns True when one existed."""
+        if not user_id:
+            return False
+        return self._execute("DELETE FROM user_optouts WHERE user_id = ?", (user_id,)) > 0
+
+    def is_opted_out(self, user_id: str | None) -> bool:
+        if not user_id:
+            return False
+        row = self._one("SELECT 1 AS present FROM user_optouts WHERE user_id = ?", (user_id,))
+        return row is not None
+
+    def optouts(self) -> list[str]:
+        return [row["user_id"] for row in self._all("SELECT user_id FROM user_optouts ORDER BY user_id")]
 
     # -------------------------------------------------------------- members
     def record_join(

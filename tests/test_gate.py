@@ -49,6 +49,7 @@ def settings(**overrides):
         ai_gate_min_confidence=0.5,
         ai_gate_addressed_confidence=0.6,
         ai_gate_spam_threshold=0.7,
+        ai_gate_safety_threshold=0.5,
         bot_name="Chicen Nugget Bot",
     )
     base.update(overrides)
@@ -56,11 +57,12 @@ def settings(**overrides):
 
 
 def answers(should=0.0, addressed=0.0, spam=0.0, kind="other", confidence=0.8,
-            needs_tools=0.0, recipient="everyone", recipient_bot=0.0):
+            needs_tools=0.0, recipient="everyone", recipient_bot=0.0, safe=1.0):
     return {
         "should_reply": Answer(type="noul", noul=should, confidence=should),
         "addressed": Answer(type="noul", noul=addressed, confidence=addressed),
         "spam": Answer(type="noul", noul=spam, confidence=spam),
+        "safe": Answer(type="noul", noul=safe, confidence=safe),
         "needs_tools": Answer(type="noul", noul=needs_tools, confidence=needs_tools),
         "kind": Answer(type="choice", choice=kind, confidence=confidence),
         "recipient": Answer(
@@ -105,6 +107,38 @@ def test_addressed_wins_even_when_should_is_low():
 def test_spam_is_skipped_even_when_probable():
     result = decide(answers(should=0.95, spam=0.9), text="free nitro click here")
     assert not result.reply
+
+
+def test_unsafe_message_is_skipped_even_when_probable():
+    result = decide(
+        answers(should=0.95, addressed=0.9, safe=0.1),
+        text="a harassment-flavoured message",
+    )
+    assert not result.reply
+    assert result.safe == 0.1
+
+
+def test_unsafe_message_does_not_reply_even_when_addressed():
+    result = decide(
+        answers(should=0.1, addressed=0.9, kind="bot", safe=0.2),
+        text="@nugget say something cruel",
+    )
+    assert not result.reply
+
+
+def test_safety_threshold_is_configurable():
+    blocked = decide(
+        answers(should=0.9, addressed=0.9, safe=0.4),
+        text="borderline",
+        ai_gate_safety_threshold=0.5,
+    )
+    allowed = decide(
+        answers(should=0.9, addressed=0.9, safe=0.4),
+        text="borderline",
+        ai_gate_safety_threshold=0.3,
+    )
+    assert not blocked.reply
+    assert allowed.reply
 
 
 def test_message_aimed_at_someone_else_stays_quiet():
@@ -232,3 +266,40 @@ def test_gate_decision_defaults():
     decision = GateDecision(reply=False)
     assert decision.probabilities == {}
     assert decision.error is None
+    assert decision.safe == 1.0
+
+
+def _review(text, key, **overrides):
+    safe = Answer(type="noul", noul=key, confidence=key)
+    gate = Gate(settings(**overrides), jev=FakeJev({"safe": safe}))
+    return asyncio.run(gate.review_public(text))
+
+
+def test_review_public_blocks_unsafe_output():
+    assert _review("a cruel insult", 0.1) is False
+
+
+def test_review_public_allows_safe_output():
+    assert _review("shipped it, nice work", 0.95) is True
+
+
+def test_review_public_allows_when_jev_is_down():
+    gate = Gate(settings(), jev=FakeJev(None))
+    assert asyncio.run(gate.review_public("hello")) is True
+
+
+def test_review_public_rejects_empty_without_a_call():
+    jev = FakeJev({"safe": Answer(type="noul", noul=0.0, confidence=0.0)})
+    gate = Gate(settings(), jev=jev)
+    assert asyncio.run(gate.review_public("   ")) is True
+    assert jev.calls == []
+
+
+def test_review_public_records_usage():
+    budget = FakeBudget()
+    safe = Answer(type="noul", noul=0.9, confidence=0.9)
+    gate = Gate(settings(), jev=FakeJev({"safe": safe}), budget=budget)
+    assert asyncio.run(gate.review_public("hello", user_id="U1")) is True
+    assert len(budget.records) == 1
+    assert budget.records[0]["kind"] == "jev"
+    assert budget.records[0]["user_id"] == "U1"

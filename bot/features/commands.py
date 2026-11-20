@@ -95,6 +95,11 @@ HELP = """*{bot}: everything lives under `/nugget`*
 • `/nugget todo done <id>` - complete a task
 • `/nugget todo rm <id>` - remove a task
 
+*conduct*
+• `/nugget mute` - stop me replying to you until you unmute
+• `/nugget unmute` - let me answer you again
+• `/nugget report [what happened]` - privately relay a conduct report to the owner and moderators
+
 *developer & admin*
 • `/nugget sysinfo` - admin: host diagnostics (RAM, CPU, disk, commit)
 • `/nugget storage [prune]` - admin: data usage and retention cleanup

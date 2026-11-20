@@ -15,6 +15,7 @@ import httpx
 from bot import image_access
 from bot.ai import images as image_settings
 from bot.ai import tts
+from bot.ai.gate import Gate
 from bot.ai.limits import user_retry_after
 from bot.runtime import runtime
 from bot.slack_api import error_code, post, post_ephemeral
@@ -80,7 +81,18 @@ async def cmd_ask(ack, command, client) -> None:
     await _post_answer(client, channel, user, question, answer)
 
 
+async def _public_allowed(text: str, user: str) -> bool:
+    """Screen generated text before it is posted in a shared channel."""
+    gate = runtime.gate or Gate(runtime.settings, budget=getattr(runtime, "budget", None))
+    return await gate.review_public(text, user_id=user)
+
+
 async def _post_answer(client, channel: str, user: str, question: str, answer: str) -> None:
+    if not channel.startswith("D") and not await _public_allowed(answer, user):
+        await post_ephemeral(
+            client, channel, user, "i can't post that answer here. try rephrasing?"
+        )
+        return
     max_fragments, delay = chunk_options(runtime.settings)
     chunks = chat_chunks(
         disarm_broadcasts(format_mrkdwn(answer)),
@@ -148,6 +160,11 @@ async def cmd_summarize(ack, command, client) -> None:
         user_id=user,
     )
     header = f":newspaper: *catch-up for <#{channel}>* - last {len(transcript)} messages"
+    if not await _public_allowed(summary, user):
+        await post_ephemeral(
+            client, channel, user, "that catch-up isn't something i should post here."
+        )
+        return
     max_fragments, delay = chunk_options(runtime.settings)
     chunks = chat_chunks(
         disarm_broadcasts(format_mrkdwn(summary)),
@@ -288,6 +305,15 @@ async def cmd_imagine(ack, command, client) -> None:
             "usage: `/imagine a tiny nugget astronaut --wide` (ratios: `--square`, `--wide`, `--tall`, `--ratio 4:3`)",
         )
         return
+    gate = runtime.gate or Gate(settings, budget=getattr(runtime, "budget", None))
+    if not await gate.review_public(prompt, user_id=user):
+        await post_ephemeral(
+            client,
+            channel,
+            user,
+            "i can't make that one. image prompts have to stay sfw and respectful.",
+        )
+        return
     retry = user_retry_after(user)
     if retry:
         await post_ephemeral(client, channel, user, f"slow down a lil, try again in {retry}s :3")
@@ -376,6 +402,9 @@ async def cmd_speak(ack, command, client) -> None:
         return
 
     clipped = tts.clip_text(text, cfg.max_chars)
+    if not channel.startswith("D") and not await _public_allowed(clipped, user):
+        await post_ephemeral(client, channel, user, "i can't say that here. try different words.")
+        return
     await post_ephemeral(client, channel, user, ":microphone: recording…")
     try:
         audio, _, extension = await tts.synthesize(clipped, settings, db=runtime.db)

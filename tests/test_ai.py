@@ -456,6 +456,127 @@ def test_agent_reply_with_images(tmp_path):
     asyncio.run(run())
 
 
+def test_agent_reply_suppresses_unsafe_public_output(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.agent import Agent
+    from bot.db import Database
+    from bot.runtime import runtime
+
+    db = Database(str(tmp_path / "agent_safety.db"))
+    db.init()
+    settings = MagicMock()
+    settings.bot_name = "nugget"
+    settings.ai_enabled = True
+    settings.ai_api_key = "test-key"
+    settings.ai_base_url = "https://ai.hackclub.com/proxy/v1"
+    settings.ai_model = "test-model"
+    settings.ai_fallback_model = ""
+    settings.ai_assistant_model = "assistant-model"
+    settings.ai_assistant_fallback_model = ""
+    settings.ai_gate_model = "test-gate"
+    settings.ai_max_context_chars = 1000
+    settings.ai_history_limit = 5
+    settings.owner_user_id = "U_OWNER"
+    settings.repo_url = "https://github.com/repo"
+    settings.is_admin.return_value = False
+
+    agent = Agent(settings, db, client=AsyncMock(), user_client=None, bot_user_id="U_BOT")
+
+    async def fake_chat(messages, *args, **kwargs):
+        res = MagicMock()
+        choice = MagicMock()
+        choice.message.content = "an unsafe reply"
+        choice.message.tool_calls = []
+        res.choices = [choice]
+        return res, "primary"
+
+    agent._chat = fake_chat
+
+    old_gate = getattr(runtime, "gate", None)
+    gate = MagicMock()
+    gate.review_public = AsyncMock(return_value=False)
+    runtime.gate = gate
+    try:
+        answer = asyncio.run(
+            agent.reply(
+                conversation="ch:C1:1.0",
+                user_id="U1",
+                text="say something unsafe",
+                channel_id=None,
+                thread_ts="1.0",
+                is_dm=False,
+                safety_review=True,
+            )
+        )
+    finally:
+        runtime.gate = old_gate
+
+    assert answer == ""
+    gate.review_public.assert_awaited_once()
+
+
+def test_agent_reply_skips_safety_review_in_dms(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.ai.agent import Agent
+    from bot.db import Database
+    from bot.runtime import runtime
+
+    db = Database(str(tmp_path / "agent_safety_dm.db"))
+    db.init()
+    settings = MagicMock()
+    settings.bot_name = "nugget"
+    settings.ai_enabled = True
+    settings.ai_api_key = "test-key"
+    settings.ai_base_url = "https://ai.hackclub.com/proxy/v1"
+    settings.ai_model = "test-model"
+    settings.ai_fallback_model = ""
+    settings.ai_assistant_model = "assistant-model"
+    settings.ai_assistant_fallback_model = ""
+    settings.ai_gate_model = "test-gate"
+    settings.ai_max_context_chars = 1000
+    settings.ai_history_limit = 5
+    settings.owner_user_id = "U_OWNER"
+    settings.repo_url = "https://github.com/repo"
+    settings.is_admin.return_value = False
+
+    agent = Agent(settings, db, client=AsyncMock(), user_client=None, bot_user_id="U_BOT")
+
+    async def fake_chat(messages, *args, **kwargs):
+        res = MagicMock()
+        choice = MagicMock()
+        choice.message.content = "a private answer"
+        choice.message.tool_calls = []
+        res.choices = [choice]
+        return res, "primary"
+
+    agent._chat = fake_chat
+
+    old_gate = getattr(runtime, "gate", None)
+    gate = MagicMock()
+    gate.review_public = AsyncMock(return_value=False)
+    runtime.gate = gate
+    try:
+        answer = asyncio.run(
+            agent.reply(
+                conversation="dm:U1",
+                user_id="U1",
+                text="say something",
+                channel_id="D1",
+                thread_ts=None,
+                is_dm=True,
+            )
+        )
+    finally:
+        runtime.gate = old_gate
+
+    assert answer == "a private answer"
+    gate.review_public.assert_not_awaited()
+
+
 def test_fetch_slack_images_from_text_urls():
     import asyncio
     from unittest.mock import MagicMock, patch

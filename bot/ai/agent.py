@@ -15,6 +15,7 @@ from bot import integrations
 from bot.ai import images as image_settings
 from bot.ai import tts
 from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens, utc_day
+from bot.ai.gate import Gate
 from bot.ai.memory import MemoryIndex
 from bot.ai.providers import FallbackProvider, fallback_provider
 from bot.ai.tools import Toolbox, ToolContext, format_now, get_user_memory_prompt
@@ -30,7 +31,69 @@ logger = logging.getLogger(__name__)
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system.md"
 PROMPT_DIGEST_KEY = "persona_digest"
 MAX_TOOL_ROUNDS = 6
+MAX_IDENTICAL_TOOL_CALLS = 2
 MAX_TOOL_RESULT = 7000
+
+# Appended when a turn runs out of tool rounds (or repeats itself). Without it
+# the model used to send "i got stuck in a tool loop" to the user instead of
+# answering from the tool results it already had.
+FORCE_ANSWER_NUDGE = (
+    "you are out of tool calls for this turn. answer now in one or two short lines "
+    "using what the tools already returned. if a tool returned nothing, say that "
+    "plainly. never mention tool names, never write '(calls ...)', and never offer "
+    "to run it again."
+)
+
+# Some models write "(calls search_slack ...)" as prose instead of making the
+# tool call. Feeding that back makes the next round call the real tool.
+PSEUDO_TOOL_NUDGE = (
+    "you wrote about calling a tool, waiting on one, or rerunning it instead of "
+    "using it. a tool call blocks until it returns, so there is no pending result. "
+    "do not narrate tools and do not show their names. make the real tool call now, "
+    "or answer in one line with what you already know (including 'nothing matched')."
+)
+
+_PSEUDO_TOOL_RE = re.compile(
+    r"(?:^|[\s(\[])"
+    r"(?:calls?|calling|invokes?|invoking|runs?|running|uses?|using|reruns?|rerunning)"
+    r"\s+[`'\"]?(?P<name>[a-z][a-z0-9_]{2,})",
+    re.IGNORECASE,
+)
+
+# A tool call blocks until it returns. Anything "still loading" or queued for a
+# rerun is the model stalling, not a real state.
+_STALLED_STATUS_RE = re.compile(
+    r"\bi(?:'ll| will)\s+(?:rerun|re-run|try again|check again)\b"
+    r"|\bi\s+(?:don'?t|do not)\s+have\s+(?:a|the)\s+result\b"
+    r"|\b(?:still|yet)\s+(?:waiting|loading|running|searching)\b"
+    r"|\bsearch(?:ing)?\s+(?:is|still)\s+(?:running|loading|pending)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_pseudo_tool_call(text: str, tool_names: frozenset[str] | set[str]) -> bool:
+    """True when the model described or stalled on a tool instead of using it."""
+    if not text:
+        return False
+    if _STALLED_STATUS_RE.search(text):
+        return True
+    if not tool_names:
+        return False
+    names = {name.lower() for name in tool_names}
+    return any(
+        match.group("name").lower() in names
+        for match in _PSEUDO_TOOL_RE.finditer(text)
+    )
+
+
+def tool_call_signature(name: str, arguments: str | None) -> str:
+    """Stable identity for a tool call, so an identical repeat is detectable."""
+    try:
+        parsed = json.loads(arguments or "{}")
+        args = json.dumps(parsed, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        args = (arguments or "").strip()
+    return f"{name}:{args}"
 
 
 def is_quota_error(exc: Exception) -> bool:
@@ -86,9 +149,25 @@ CODE_HINT_RE = re.compile(
 )
 SIMPLE_CHAT_RE = re.compile(
     r"\b(?:search|look\s+up|check|find|open|run|build|deploy|fix|review|"
-    r"summar(?:y|ize|ise)|remind|schedule|email|calendar|github|pr|repo|"
-    r"sandbox|file|image|chart|deck|hackatime|weather|docs?|link|upload|"
-    r"download|browser|api)\b",
+    r"summar(?:y|ize|ise)|tldr|recap|catch\s*up|remind|schedule|email|"
+    r"calendar|github|pr|repo|sandbox|file|image|chart|deck|hackatime|"
+    r"weather|docs?|link|upload|download|browser|api)\b",
+    re.IGNORECASE,
+)
+# Small talk can skip tools. Anything that points at workspace data ("is 42253
+# in #confessions yet") must not, or the fast model has no way to look it up and
+# starts narrating a tool call instead.
+SMALL_TALK_RE = re.compile(
+    r"^(?:hi|hey|hello|yo|sup|gm|gn|good\s+(?:morning|night)|what'?s\s+up|"
+    r"wassup|how\s+are\s+you|how'?s\s+it\s+going|who\s+are\s+you|"
+    r"what\s+are\s+you|thanks|thank\s+you|ty|lol|lmao|nice|cool|ok|okay|"
+    r"sure|yes|no|nah|yeah|yep|nope|same|fair|true|real|bet|word)\b",
+    re.IGNORECASE,
+)
+DATA_HINT_RE = re.compile(
+    r"#\w|\b(?:thread|channel|slack|confession|message|posted|search|find|"
+    r"look\s*up|anyone|someone|did|does|has|have|yet|still|latest|recent|"
+    r"number|id|tldr|recap|summary)\b|\d{3,}",
     re.IGNORECASE,
 )
 
@@ -201,6 +280,7 @@ class Agent:
         images: list[str] | None = None,
         context: str = "",
         public_veto: bool = False,
+        safety_review: bool = False,
         client: AsyncWebClient | None = None,
         secret: Any | None = None,
     ) -> str:
@@ -368,9 +448,19 @@ class Agent:
                 extra_tools = frozenset({"summarize_thread"})
         except Exception:  # noqa: BLE001 - a broken policy must fail closed
             extra_tools = frozenset()
+        tool_names = self._visible_tool_names(
+            is_owner=ctx.is_owner or ctx.is_admin,
+            ephemeral=secret is not None,
+            extra_tools=extra_tools,
+        )
         used_fallback = False
+        seen_calls: dict[str, int] = {}
+        rounds = 0
+        stalled = False
+        nudged = False
         try:
-            for _ in range(MAX_TOOL_ROUNDS):
+            while rounds < MAX_TOOL_ROUNDS:
+                rounds += 1
                 response, provider = await self._chat(
                     messages,
                     tools=not fast_chat,
@@ -385,45 +475,89 @@ class Agent:
                 used_fallback = used_fallback or provider == "fallback"
                 message = response.choices[0].message
                 tool_calls = message.tool_calls or []
-                if tool_calls:
-                    fast_chat = False
-                    payload: dict[str, Any] = {
-                        "role": "assistant",
-                        "content": message.content or "",
-                        "tool_calls": [
-                            {
-                                "id": call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": call.function.name,
-                                    "arguments": call.function.arguments or "{}",
-                                },
-                            }
-                            for call in tool_calls
-                        ],
-                    }
-                    messages.append(payload)
-                    for call in tool_calls:
-                        try:
-                            args = json.loads(call.function.arguments or "{}")
-                        except json.JSONDecodeError:
-                            args = {}
-                        result = await self.toolbox.execute(call.function.name, args, ctx)
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": call.id,
-                                "content": result[:MAX_TOOL_RESULT],
-                            }
-                        )
-                    if any(call.function.name in CODE_TOOLS for call in tool_calls):
-                        code_mode = True
-                    continue
+                content = (message.content or "").strip()
 
-                answer = (message.content or "").strip()
-                break
-            else:
-                answer = "i got stuck in a tool loop. try asking again, maybe a little smaller."
+                if not tool_calls:
+                    if looks_like_pseudo_tool_call(content, tool_names):
+                        if nudged:
+                            # It keeps narrating instead of acting. Drop the bad
+                            # text and force a real answer below.
+                            logger.info("model kept writing pseudo tool calls")
+                            stalled = True
+                            break
+                        nudged = True
+                        # It wanted a tool. The fast path has tools off, which is
+                        # what makes models narrate calls in the first place.
+                        fast_chat = False
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": PSEUDO_TOOL_NUDGE})
+                        continue
+                    answer = content
+                    break
+
+                fast_chat = False
+                signatures = [
+                    tool_call_signature(call.function.name, call.function.arguments)
+                    for call in tool_calls
+                ]
+                if any(
+                    seen_calls.get(sig, 0) >= MAX_IDENTICAL_TOOL_CALLS
+                    for sig in signatures
+                ):
+                    logger.info("tool loop: identical call repeated, forcing an answer")
+                    stalled = True
+                    break
+                for sig in signatures:
+                    seen_calls[sig] = seen_calls.get(sig, 0) + 1
+
+                payload: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": message.content or "",
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.function.name,
+                                "arguments": call.function.arguments or "{}",
+                            },
+                        }
+                        for call in tool_calls
+                    ],
+                }
+                messages.append(payload)
+                for call in tool_calls:
+                    try:
+                        args = json.loads(call.function.arguments or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    result = await self.toolbox.execute(call.function.name, args, ctx)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": result[:MAX_TOOL_RESULT],
+                        }
+                    )
+                if any(call.function.name in CODE_TOOLS for call in tool_calls):
+                    code_mode = True
+
+            if stalled or not answer:
+                answer = await self._final_answer(
+                    messages,
+                    user_id=user_id,
+                    is_user_identity=is_user_identity,
+                    code=code_mode,
+                    fast=fast_chat,
+                    is_owner=ctx.is_owner or ctx.is_admin,
+                    ephemeral=secret is not None,
+                    extra_tools=extra_tools,
+                )
+            if answer and looks_like_pseudo_tool_call(answer, tool_names):
+                logger.info("dropped an answer that narrated a tool call")
+                answer = ""
+            if not answer and trigger not in {"ambient", "thread_followup"}:
+                answer = "couldn't get a clean answer out of that. mind rephrasing?"
         except BudgetExceeded as exc:
             logger.warning("ai budget exhausted: %s", exc)
             answer = _budget_text(exc)
@@ -434,6 +568,13 @@ class Agent:
             )
 
         answer = format_mrkdwn(answer)
+        if safety_review and answer and answer.strip() not in {"[NO_REPLY]", "NO_REPLY"}:
+            gate = getattr(runtime, "gate", None)
+            if gate is None:
+                gate = Gate(self.settings, budget=self.budget)
+            if not await gate.review_public(answer, user_id=user_id):
+                logger.info("conduct veto: suppressed an unsafe public reply")
+                return ""
         if public_veto and answer and PRIVATE_DETAIL_RE.search(answer):
             logger.info("public veto: suppressed answer with internal details")
             return ""
@@ -458,9 +599,73 @@ class Agent:
                     text=answer,
                 )
             return answer
-        if trigger == "mention" and not answer:
+        if not answer and trigger in {
+            "mention",
+            "dm",
+            "mpim_mention",
+            "named",
+            "reaction",
+            "shortcut",
+        }:
             return "hmm, i blanked. try again?"
         return ""
+
+    def _visible_tool_names(
+        self,
+        *,
+        is_owner: bool,
+        ephemeral: bool,
+        extra_tools: frozenset[str],
+    ) -> frozenset[str]:
+        """Names this caller can actually call, for spotting narrated calls."""
+        try:
+            definitions = self.toolbox.definitions_for(
+                is_owner=is_owner,
+                ephemeral=ephemeral,
+                extra_tools=extra_tools,
+            )
+        except Exception:  # detection is best-effort
+            logger.debug("could not list tool names", exc_info=True)
+            return frozenset()
+        return frozenset(
+            name
+            for item in definitions
+            if (name := str((item.get("function") or {}).get("name") or ""))
+        )
+
+    async def _final_answer(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        user_id: str,
+        is_user_identity: bool,
+        code: bool,
+        fast: bool,
+        is_owner: bool,
+        ephemeral: bool,
+        extra_tools: frozenset[str],
+    ) -> str:
+        """Ask for a plain answer with tools off, so a loop can't swallow the turn."""
+        final_messages = list(messages)
+        final_messages.append({"role": "system", "content": FORCE_ANSWER_NUDGE})
+        try:
+            response, _ = await self._chat(
+                final_messages,
+                tools=False,
+                user_id=user_id,
+                is_user_identity=is_user_identity,
+                code=code,
+                fast=fast,
+                is_owner=is_owner,
+                ephemeral=ephemeral,
+                extra_tools=extra_tools,
+            )
+        except (BudgetExceeded, QuotaExhausted):
+            raise
+        except Exception:  # the caller has a friendly fallback
+            logger.warning("forced final answer failed", exc_info=True)
+            return ""
+        return (response.choices[0].message.content or "").strip()
 
     async def complete(
         self,
@@ -537,9 +742,11 @@ class Agent:
             return False
         if len(clean) > 180 or clean.count("\n") > 2:
             return False
-        if CODE_HINT_RE.search(clean) or SIMPLE_CHAT_RE.search(clean):
-            return False
         if "http://" in clean or "https://" in clean or "`" in clean:
+            return False
+        if DATA_HINT_RE.search(clean) and not SMALL_TALK_RE.search(clean):
+            return False
+        if CODE_HINT_RE.search(clean) or SIMPLE_CHAT_RE.search(clean):
             return False
         return True
 
@@ -886,4 +1093,12 @@ async def owner_label(client, user_id: str) -> str:
     return display_name(user)
 
 
-__all__ = ["Agent", "fit_history", "owner_label", "sync_prompt_digest", "tzinfo"]
+__all__ = [
+    "Agent",
+    "fit_history",
+    "looks_like_pseudo_tool_call",
+    "owner_label",
+    "sync_prompt_digest",
+    "tool_call_signature",
+    "tzinfo",
+]

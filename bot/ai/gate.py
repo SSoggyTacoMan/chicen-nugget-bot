@@ -76,6 +76,18 @@ community bot should not engage with? False for normal conversation, jokes,
 questions, and people sharing their work.
 """
 
+SAFETY = """\
+Would this be appropriate in an all-ages Hack Club Slack?
+True for normal conversation, jokes, questions, code, projects, respectful
+disagreement, and someone asking for help with or reporting harassment.
+Judge the intent, not the topic: describing or reporting a problem is not the
+same as causing it.
+False when it contains harassment, bullying, slurs, hate, threats,
+discrimination, sexual content, unwelcome romantic or sexual advances, someone
+else's private personal information, spam, ads, fraud, or an attempt to
+escalate a conflict or rally people against someone.
+"""
+
 KIND_INSTRUCTIONS = "What kind of message is this?"
 
 KIND_CRITERIA = {
@@ -93,6 +105,7 @@ QUESTIONS: dict[str, dict[str, Any]] = {
     "should_reply": {"type": "noul", "instructions": SHOULD_REPLY},
     "addressed": {"type": "noul", "instructions": ADDRESSED},
     "spam": {"type": "noul", "instructions": SPAM},
+    "safe": {"type": "noul", "instructions": SAFETY},
     "needs_tools": {"type": "noul", "instructions": NEEDS_TOOLS},
     "kind": {
         "type": "choice",
@@ -115,6 +128,7 @@ class GateDecision:
     should_reply: float = 0.0
     addressed: float = 0.0
     spam: float = 0.0
+    safe: float = 1.0
     needs_tools: float = 0.0
     kind: str = "other"
     kind_confidence: float = 0.0
@@ -200,6 +214,7 @@ class Gate:
         should = answers.get("should_reply")
         addressed = answers.get("addressed")
         spam = answers.get("spam")
+        safe = answers.get("safe")
         needs_tools = answers.get("needs_tools")
         kind = answers.get("kind")
         recipient = answers.get("recipient")
@@ -209,6 +224,9 @@ class Gate:
         p_should = should.probability
         p_addressed = addressed.probability if addressed else 0.0
         p_spam = spam.probability if spam else 0.0
+        # Older/partial responses without a safety answer are treated as safe;
+        # the question is new, but a missing answer should not silence the bot.
+        p_safe = safe.probability if safe else 1.0
         p_needs_tools = needs_tools.probability if needs_tools else 0.0
         recipient_choice = recipient.choice if recipient and recipient.choice else "everyone"
         kind_choice = kind.choice if kind and kind.choice else "other"
@@ -217,6 +235,7 @@ class Gate:
         directed = p_addressed >= self.settings.ai_gate_addressed_confidence
         aimed = directed or p_recipient_bot >= self.settings.ai_gate_addressed_confidence
         spammy = p_spam >= self.settings.ai_gate_spam_threshold
+        unsafe = p_safe < _safety_threshold(self.settings)
         helpful = p_should >= self.settings.ai_gate_min_confidence
         # Ambient messages must be aimed at the bot (or answer a bot turn).
         # Thread follow-ups can still be helpful without a direct mention.
@@ -224,7 +243,7 @@ class Gate:
             assist = kind_choice in {"help", "feedback"} or (
                 kind_choice == "question" and p_needs_tools >= 0.6
             )
-            reply = not spammy and (
+            reply = not spammy and not unsafe and (
                 aimed
                 or (
                     assist
@@ -236,7 +255,7 @@ class Gate:
         else:
             # Never spend an agent turn on a message aimed at someone else unless the
             # speaker is clearly directing it at the bot too.
-            reply = not spammy and (
+            reply = not spammy and not unsafe and (
                 aimed or (helpful and recipient_choice != "someone_else")
             )
 
@@ -245,6 +264,7 @@ class Gate:
             should_reply=p_should,
             addressed=p_addressed,
             spam=p_spam,
+            safe=p_safe,
             needs_tools=p_needs_tools,
             kind=kind_choice,
             kind_confidence=kind.confidence if kind else 0.0,
@@ -254,12 +274,13 @@ class Gate:
             probabilities=kind.probabilities if kind else {},
         )
         logger.info(
-            "jev %s p=%.2f addressed=%.2f aimed_at=%s spam=%.2f needs_tools=%.2f kind=%s (%.2f) for %r",
+            "jev %s p=%.2f addressed=%.2f aimed_at=%s spam=%.2f safe=%.2f needs_tools=%.2f kind=%s (%.2f) for %r",
             "YES" if reply else "NO",
             p_should,
             p_addressed,
             recipient_choice,
             p_spam,
+            p_safe,
             p_needs_tools,
             decision.kind,
             decision.kind_confidence,
@@ -284,6 +305,58 @@ class Gate:
             )
         ).reply
 
+    async def review_public(self, text: str, *, user_id: str = "") -> bool:
+        """True when the bot's own text is safe to post in a public channel.
+
+        This is the output half of the conduct check: the gate screens incoming
+        ambient messages, but wrapped mentions and DMs can still produce a reply
+        that should not be broadcast. A confident "not appropriate" suppresses
+        the message. If Jev is unavailable we let it through: the provider and
+        the prompt are still there, and going silent on every classifier hiccup
+        would break normal mentions.
+        """
+        threshold = _safety_threshold(self.settings)
+        if not text.strip() or threshold <= 0:
+            return True
+        if not getattr(self.settings, "ai_gate_enabled", True):
+            # The screen rides on the classifier; if an operator turns the
+            # classifier off entirely, don't add a timeout to every reply.
+            return True
+        result: JevResult | None = None
+        try:
+            async with asyncio.timeout(self.settings.ai_gate_timeout + 1):
+                result = await self.jev.ask(
+                    state=_state(text, "a public channel", "the bot", None),
+                    questions={"safe": QUESTIONS["safe"]},
+                )
+        except Exception as exc:  # noqa: BLE001 - allow on transport failure
+            logger.warning("safety review failed: %s", exc)
+            return True
+        if result is None:
+            return True
+        if self.budget is not None:
+            self.budget.record(
+                kind="jev",
+                model=result.model or self.settings.ai_gate_model,
+                user_id=user_id,
+                prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+            )
+        answer = result.answers.get("safe")
+        if answer is None:
+            return True
+        safe = answer.probability >= threshold
+        if not safe:
+            logger.warning("safety review blocked a public reply (p=%.2f)", answer.probability)
+        return safe
+
+
+def _safety_threshold(settings: Any) -> float:
+    try:
+        return float(getattr(settings, "ai_gate_safety_threshold", 0.5))
+    except (TypeError, ValueError):
+        return 0.5
+
 
 def _state(
     text: str,
@@ -303,13 +376,14 @@ def _state(
 
 __all__ = [
     "ADDRESSED",
-    "Gate",
-    "GateDecision",
     "NEEDS_TOOLS",
     "QUESTIONS",
     "RECIPIENT_CRITERIA",
     "RECIPIENT_INSTRUCTIONS",
+    "SAFETY",
     "SHOULD_REPLY",
     "SPAM",
+    "Gate",
+    "GateDecision",
     "_state",
 ]

@@ -18,6 +18,7 @@ def test_reaction_research_routes_to_agent():
     runtime.settings.bot_user_id = "UBOT"
     runtime.settings.owner_user_id = "UOWNER"
     runtime.db = MagicMock()
+    runtime.db.is_opted_out.return_value = False
     _last_reaction.clear()
     client = AsyncMock()
 
@@ -88,6 +89,7 @@ def test_message_shortcut_runs_agent():
     runtime.settings.ai_enabled = True
     runtime.settings.ai_allowed.return_value = True
     runtime.db = MagicMock()
+    runtime.db.is_opted_out.return_value = False
     client = AsyncMock()
 
     shortcut = {

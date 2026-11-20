@@ -50,6 +50,24 @@ def test_prompt_keeps_the_persona():
     assert "system prompt" in text
 
 
+def test_prompt_keeps_the_conduct_rules():
+    text = PROMPT_PATH.read_text(encoding="utf-8")
+    lower = text.lower()
+    assert "hackclub.com/conduct" in text
+    # the real reporting routes, not a vague "talk to a real person"
+    assert "conduct@hackclub.com" in text
+    assert "Shroud" in text
+    assert "eps@hackclub.com" in text
+    assert "/nugget report" in text
+    assert "/nugget mute" in text
+    # the rules that matter most in an all-ages workspace
+    assert "leave them alone" in lower
+    assert "no harassment" in lower
+    assert "no sexual content" in lower
+    assert "not a moderator" in lower
+    assert "assume good faith" in lower
+
+
 def test_every_trigger_has_words():
     assert set(TRIGGER_TEXT) == {"dm", "mention", "mpim_mention", "named", "reaction", "shortcut", "thread_followup", "ambient"}
     for value in TRIGGER_TEXT.values():

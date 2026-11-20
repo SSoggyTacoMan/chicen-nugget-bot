@@ -44,6 +44,7 @@ from bot.features.commands import (
     cmd_todo,
     cmd_whois,
 )
+from bot.features.conduct import cmd_mute, cmd_report, cmd_unmute
 from bot.features.dm_chats import (
     cmd_chat,
     cmd_chats,
@@ -127,6 +128,12 @@ SUBCOMMANDS: dict[str, Handler] = {
     "tts": cmd_speak,
     "imageaccess": cmd_imageaccess,
     "images": cmd_imageaccess,
+    "mute": cmd_mute,
+    "optout": cmd_mute,
+    "unmute": cmd_unmute,
+    "optin": cmd_unmute,
+    "report": cmd_report,
+    "conduct": cmd_report,
     "pinggroup": cmd_pinggroup,
     "pings": cmd_pinggroup,
     "fact": cmd_nugget,

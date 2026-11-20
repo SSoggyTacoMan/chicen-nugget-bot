@@ -62,6 +62,8 @@ async def _run_shortcut(
         return
     if user_retry_after(user_id):
         return
+    if runtime.db is not None and runtime.db.is_opted_out(user_id):
+        return
 
     root_ts = message.get("thread_ts") or ts
     is_dm = channel.startswith("D")
@@ -90,6 +92,8 @@ async def _run_shortcut(
                 trigger="shortcut",
                 client=client,
                 secret=secret,
+                public_veto=not is_dm,
+                safety_review=not is_dm,
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return

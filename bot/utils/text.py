@@ -119,10 +119,39 @@ _SILENCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The code of conduct says "if someone asks you to leave them alone, you must
+# leave them alone". These phrasings are standing requests, not one-turn ones,
+# so the caller records a durable opt-out instead of just skipping this reply.
+_STANDING_SILENCE_RE = re.compile(
+    r"\bleave\s+me\s+(?:alone|be)\b"
+    r"|\b(?:stop|quit)\s+(?:messaging|dm(?:ing)?|pming|contacting|bothering)\s+me\b"
+    r"|\b(?:stop|quit)\s+(?:replying|responding)\s+to\s+me\b"
+    r"|\b(?:don'?t|do\s+not)\s+(?:ever\s+)?(?:talk|speak|message|dm|reply|respond)\s+to\s+me\b"
+    r"|\b(?:i\s+don'?t|i\s+do\s+not)\s+want\s+(?:you\s+)?to\s+(?:talk|reply|respond|message)\b",
+    re.IGNORECASE,
+)
+
+_COME_BACK_RE = re.compile(
+    r"\b(?:unmute|un-mute)\b"
+    r"|\byou\s+can\s+talk\s+to\s+me\s+again\b"
+    r"|(?:^|[.!?,]\s*|\b(?:ok|okay)\s+)come\s+back\b",
+    re.IGNORECASE,
+)
+
 
 def asks_for_silence(text: str) -> bool:
     """True when someone explicitly asks the bot not to reply."""
     return bool(_SILENCE_RE.search(text or ""))
+
+
+def asks_to_be_left_alone(text: str) -> bool:
+    """True for a standing "leave me alone", which should persist."""
+    return bool(_STANDING_SILENCE_RE.search(text or ""))
+
+
+def asks_to_come_back(text: str) -> bool:
+    """True when an opted-out person explicitly invites the bot back."""
+    return bool(_COME_BACK_RE.search(text or ""))
 
 
 def is_ignored_message(text: str) -> bool:
