@@ -795,3 +795,58 @@ def test_speak_route_and_help():
     assert handler is router.cmd_speak
     assert rest == "hello there"
     assert router.resolve("tts hi")[0] is router.cmd_speak
+
+
+def test_setup_slash_panel_uses_ack(monkeypatch):
+    from bot.features import setup
+    from bot.runtime import runtime
+
+    monkeypatch.setattr(runtime, "settings", _setup_settings())
+    ack = AsyncMock()
+    client = AsyncMock()
+
+    async def run():
+        await setup.cmd_setup(
+            ack,
+            {
+                "text": "",
+                "user_id": "U_OWNER",
+                "channel_id": "D0BOI",
+                "trigger_id": "trigger-1",
+            },
+            client,
+        )
+
+    asyncio.run(run())
+
+    ack.assert_awaited_once()
+    assert ack.await_args.kwargs["text"] == "integration setup"
+    assert ack.await_args.kwargs["blocks"]
+    client.chat_postEphemeral.assert_not_called()
+
+
+def test_setup_chat_panel_still_posts(monkeypatch):
+    from bot.features import setup
+    from bot.runtime import runtime
+
+    monkeypatch.setattr(runtime, "settings", _setup_settings())
+    ack = AsyncMock()
+    client = AsyncMock()
+
+    async def run():
+        await setup.cmd_setup(
+            ack,
+            {
+                "text": "",
+                "user_id": "U_OWNER",
+                "channel_id": "D0BOI",
+                "trigger_id": "",
+                "response_url": "",
+            },
+            client,
+        )
+
+    asyncio.run(run())
+
+    ack.assert_awaited_once()
+    client.chat_postEphemeral.assert_awaited_once()

@@ -690,25 +690,36 @@ async def _say(client, command: dict[str, Any], text: str) -> None:
 
 # ------------------------------------------------------------------- /nugget setup
 async def cmd_setup(ack, command, client) -> None:
-    await ack()
     user_id = command.get("user_id")
-    if not _is_admin(user_id):
-        await _say(client, command, "only the owner/admin can set up integrations.")
-        return
-
     text = (command.get("text") or "").strip()
     parts = text.split()
     action = parts[0].lower() if parts else ""
 
-    if not action or action in {"panel", "home"}:
-        await post_ephemeral(
-            client,
-            command.get("channel_id") or user_id or "",
-            user_id or "",
-            "integration setup",
-            blocks=setup_panel_blocks(),
-        )
+    if not _is_admin(user_id):
+        await ack()
+        await _say(client, command, "only the owner/admin can set up integrations.")
         return
+
+    if not action or action in {"panel", "home"}:
+        # Respond through the slash-command ack. chat.postEphemeral needs the
+        # app to be in the conversation, which it isn't in a DM between the
+        # user and Boi; the silent fallback DM then looks like the command did
+        # nothing. the ack response renders in whatever conversation ran it.
+        blocks = setup_panel_blocks()
+        if command.get("trigger_id") or command.get("response_url"):
+            await ack(text="integration setup", blocks=blocks)
+        else:
+            await ack()
+            await post_ephemeral(
+                client,
+                command.get("channel_id") or user_id or "",
+                user_id or "",
+                "integration setup",
+                blocks=blocks,
+            )
+        return
+
+    await ack()
 
     if action == "status":
         await _say(client, command, _status())
