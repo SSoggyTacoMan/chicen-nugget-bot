@@ -804,6 +804,9 @@ def test_setup_slash_panel_uses_ack(monkeypatch):
     monkeypatch.setattr(runtime, "settings", _setup_settings())
     ack = AsyncMock()
     client = AsyncMock()
+    client.chat_postMessage = AsyncMock(
+        return_value=SimpleNamespace(data={"ok": True, "ts": "1.2"})
+    )
 
     async def run():
         await setup.cmd_setup(
@@ -820,18 +823,25 @@ def test_setup_slash_panel_uses_ack(monkeypatch):
     asyncio.run(run())
 
     ack.assert_awaited_once()
-    assert ack.await_args.kwargs["text"] == "integration setup"
-    assert ack.await_args.kwargs["blocks"]
+    assert "DMs" in ack.await_args.kwargs["text"]
+    assert "blocks" not in ack.await_args.kwargs
+    client.chat_postMessage.assert_awaited_once()
+    _, dm_kwargs = client.chat_postMessage.await_args
+    assert dm_kwargs["channel"] == "U_OWNER"
+    assert dm_kwargs["blocks"]
     client.chat_postEphemeral.assert_not_called()
 
 
-def test_setup_chat_panel_still_posts(monkeypatch):
+def test_setup_chat_panel_dms_instead(monkeypatch):
     from bot.features import setup
     from bot.runtime import runtime
 
     monkeypatch.setattr(runtime, "settings", _setup_settings())
     ack = AsyncMock()
     client = AsyncMock()
+    client.chat_postMessage = AsyncMock(
+        return_value=SimpleNamespace(data={"ok": True, "ts": "1.2"})
+    )
 
     async def run():
         await setup.cmd_setup(
@@ -849,7 +859,8 @@ def test_setup_chat_panel_still_posts(monkeypatch):
     asyncio.run(run())
 
     ack.assert_awaited_once()
-    client.chat_postEphemeral.assert_awaited_once()
+    client.chat_postMessage.assert_awaited_once()
+    client.chat_postEphemeral.assert_not_called()
 
 
 def test_setup_panel_action_ids_are_unique_per_block():

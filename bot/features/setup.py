@@ -703,20 +703,21 @@ async def cmd_setup(ack, command, client) -> None:
         return
 
     if not action or action in {"panel", "home"}:
-        # Respond through the slash-command ack. chat.postEphemeral needs the
-        # app to be in the conversation, which it isn't in a DM between the
-        # user and Boi; the silent fallback DM then looks like the command did
-        # nothing. the ack response renders in whatever conversation ran it.
+        # Setup is private. DM the panel and keep the channel reply to one
+        # short line, so a public channel never gets the setup UI. ack first
+        # so Slack gets its response well inside the 3 second window.
         blocks = setup_panel_blocks()
         if command.get("trigger_id") or command.get("response_url"):
-            await ack(text="integration setup", blocks=blocks)
+            await ack(text="sent the setup panel to your DMs.", response_type="ephemeral")
         else:
             await ack()
+        sent = await _dm(client, user_id or "", "integration setup", blocks)
+        if not sent:
             await post_ephemeral(
                 client,
                 command.get("channel_id") or user_id or "",
                 user_id or "",
-                "integration setup",
+                "couldn't DM you the setup panel. check that the app can message you.",
                 blocks=blocks,
             )
         return
