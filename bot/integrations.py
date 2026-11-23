@@ -404,7 +404,7 @@ def setup_panel_blocks(requested: str | None = None) -> list[dict[str, Any]]:
         {
             "type": "button",
             "text": {"type": "plain_text", "text": labels[key][0]},
-            "action_id": "setup_open",
+            "action_id": f"setup_open_{key}",
             "value": key,
         }
         for key in keys

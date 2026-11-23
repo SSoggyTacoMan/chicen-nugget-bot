@@ -107,3 +107,20 @@ def test_recap_channel_id_and_channel_override(tmp_path):
         runtime.db = old_db
         runtime.settings = old_settings
 
+
+
+def test_poll_blocks_have_unique_action_ids():
+    from bot.features.polls import _blocks
+
+    poll = {
+        "id": "abc123",
+        "question": "pick one",
+        "options": ["a", "b", "c", "d", "e"],
+        "closed": False,
+    }
+    blocks = _blocks(poll, [0, 0, 0, 0, 0], 0)
+    action_blocks = [block for block in blocks if block.get("type") == "actions"]
+    assert action_blocks
+    for block in action_blocks:
+        ids = [element["action_id"] for element in block["elements"]]
+        assert len(ids) == len(set(ids)), ids

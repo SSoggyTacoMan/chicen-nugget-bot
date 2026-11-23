@@ -850,3 +850,24 @@ def test_setup_chat_panel_still_posts(monkeypatch):
 
     ack.assert_awaited_once()
     client.chat_postEphemeral.assert_awaited_once()
+
+
+def test_setup_panel_action_ids_are_unique_per_block():
+    blocks = integrations.setup_panel_blocks()
+    action_blocks = [block for block in blocks if block.get("type") == "actions"]
+    assert action_blocks
+    for block in action_blocks:
+        ids = [element["action_id"] for element in block["elements"]]
+        assert len(ids) == len(set(ids)), ids
+
+
+def test_setup_panel_values_survive_unique_action_ids():
+    blocks = integrations.setup_panel_blocks()
+    pairs = {
+        (element["action_id"], element["value"])
+        for block in blocks
+        if block.get("type") == "actions"
+        for element in block["elements"]
+    }
+    assert ("setup_open_ai", "ai") in pairs
+    assert ("setup_open_google", "google") in pairs

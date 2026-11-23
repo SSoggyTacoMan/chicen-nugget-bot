@@ -17,7 +17,9 @@ MAX_OPTIONS = 5
 
 
 def register(app) -> None:
+    # old polls in history used one shared action_id
     app.action("poll_vote")(on_vote)
+    app.action(re.compile(r"^poll_vote_"))(on_vote)
     app.action("poll_unvote")(on_unvote)
 
 
@@ -70,7 +72,7 @@ def _blocks(poll: dict[str, Any], counts: list[int], total: int) -> list[dict[st
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": f"{idx + 1}. {option[:55]}"},
-                "action_id": "poll_vote",
+                "action_id": f"poll_vote_{idx}",
                 "value": f"{poll['id']}:{idx}",
             }
             for idx, option in enumerate(poll["options"])

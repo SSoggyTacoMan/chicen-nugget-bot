@@ -438,7 +438,9 @@ def chat_setup_script(area: str) -> str | None:
 
 
 def register(app) -> None:
+    # old panels in history used one shared action_id
     app.action("setup_open")(on_setup_open)
+    app.action(re.compile(r"^setup_open_"))(on_setup_open)
     app.action("setup_google_code")(on_google_code_button)
     app.action("setup_google_creds")(on_google_creds_button)
     app.view("setup_google_credentials")(on_google_credentials_submit)
