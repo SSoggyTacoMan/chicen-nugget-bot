@@ -371,6 +371,7 @@ async def on_reaction_added(event: dict[str, Any], client) -> None:
                 secret=secret,
                 public_veto=not is_dm,
                 safety_review=not is_dm,
+                message_ts=ts,
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return
@@ -536,6 +537,7 @@ async def _handle_dm(event: dict[str, Any], client) -> None:
                     trigger="dm",
                     images=images,
                     secret=secret,
+                    message_ts=message_ts,
                 )
             except Exception:
                 logger.exception("dm agent turn failed")
@@ -1034,6 +1036,7 @@ async def _handle_channel(
                 context=context,
                 public_veto=event.get("channel_type") == "channel",
                 safety_review=True,
+                message_ts=message_ts,
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return False

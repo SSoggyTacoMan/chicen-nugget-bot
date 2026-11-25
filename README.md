@@ -28,6 +28,7 @@ if something feels off, `/nugget doctor` is the first stop. it checks scopes, to
 - posting in the owner's name, either as a customized bot message or from their real account
 - jev, a small classifier that decides whether an unaddressed message deserves a reply
 - images, charts, powerpoint decks, recaps and polls
+- custom workspace emoji export: `/nugget emoji export :peak:` sends a downloadable png, privately in channels and as a normal file in DMs
 - custom welcome messages with per-channel overrides, thread replies and ping-group join/leave buttons
 - timers, alarms, reminders, tasks and durable notes for boi and the bot
 - post-huddle summaries from slack ai notes
@@ -227,6 +228,17 @@ the `manage_channel` tool can `kick` or `remove` a member from a channel when th
 
 the cost field only affects the bot's internal `/nugget budget`, not the provider's bill. runtime choices override `IMAGINE_MODEL` / `IMAGINE_FALLBACK_MODEL` / `AI_IMAGE_COST_USD`.
 
+### emoji export
+
+`/nugget emoji export :peak:` downloads a custom workspace emoji as a square png. `:peak:` alone works too, and you can pass up to five names or use `--size 512`, `--bg white`, `--bg black` or `--bg '#101010'`.
+
+- in a channel the png is previewed in an ephemeral message only the person who asked can see, and their message gets a ✅ reaction when it's done. slack only shows private files to people who can already access them, so the same png also lands in their dms as a normal downloadable file
+- in a dm it is a normal file message
+- transparency is preserved by default. `--bg` flattens it onto a solid color if you want a normal image background
+- animated gifs export their first frame
+- the `export_emoji` tool does the same from chat, so "boi export this :peak:" or a reply to a message containing a custom emoji works too
+- the bot reads the workspace emoji list with the `emoji:read` scope. if the app was installed before that scope existed, reinstall it from the manifest; until then the public flaron directory is used as a fallback
+
 ### huddles
 
 slack has no public api to start or join a huddle. the bot can read the post-huddle AI transcript instead:
@@ -375,7 +387,7 @@ DMs used to be one endless conversation. Now each DM chat is its own thread, roo
 | setup | `integration_setup` |
 | workspace | `flaron`, `pending_access_requests`, `get_stats`, `bot_config`, `nugget_command`, `image_access` |
 | memory | `remember`, `recall`, `forget`, `search_memory`, `manage_tasks`, `remind`, `timer`, `alarm`, `list_reminders`, `cancel_reminder` |
-| media | `generate_image`, `speak`, `make_chart`, `make_deck` |
+| media | `generate_image`, `speak`, `make_chart`, `make_deck`, `export_emoji` |
 | misc | `get_weather`, `public_holidays`, `roll_dice`, `dog_fact`, `taco_recipe`, `urban_dict` (dm only), `nugget_fact` |
 
 owner and admin checks happen in code against the real slack sender. the prompt can't grant permissions on its own. tools whose integration isn't connected are omitted from the model's tool list entirely.
@@ -561,6 +573,8 @@ everything lives under `/nugget`. `/nugget help` is the full list.
 | `/nugget end [--burn]` | end a secret chat, optionally delete my replies | anyone (dm) |
 | `/nugget summarize [n]` | ai catch-up for this channel | ai channels |
 | `/nugget imagine <prompt>` | generate an image | image allowlist |
+| `/nugget emoji export <name>` | download a custom emoji as a png | anyone |
+| `/nugget emoji :peak: [--bg white] [--size 512]` | export with an optional background or size | anyone |
 | `/nugget imageaccess [list|add @user|remove @user]` | manage who may generate images | admin |
 | `/nugget speak <text>` | generate a qwen3 voice clip | admin |
 | `/nugget huddle` | summarize the last huddle with slack ai notes | admin |
@@ -698,6 +712,7 @@ these are guardrails, not a substitute for moderation. a classifier can miss thi
 | no typing indicator | boi isn't configured, or the user token is invalid |
 | reminders never fire | fix `TIMEZONE` and recreate the reminder |
 | approval button does nothing | bot isn't in the admin channel |
+| emoji export can't find a custom emoji | use the exact shortcode from the picker; unicode emoji aren't workspace assets. if `emoji:read` was just added, reinstall the app from the manifest |
 
 ## project layout
 
@@ -707,6 +722,7 @@ bot/
   app.py                   startup, bolt wiring, user gateway
   config.py                settings and env parsing
   db.py                    sqlite schema, history, kv store
+  emoji_export.py          custom emoji lookup, png rendering and private delivery
   handlers.py              socket mode event registration
   slack_api.py             post, react, upload, retries
   user_gateway.py          user websocket, typing, dedup

@@ -94,6 +94,7 @@ async def _run_shortcut(
                 secret=secret,
                 public_veto=not is_dm,
                 safety_review=not is_dm,
+                message_ts=ts,
             )
         if not answer or answer.strip() in {"[NO_REPLY]", "NO_REPLY"}:
             return

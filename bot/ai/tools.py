@@ -35,7 +35,7 @@ from urllib.parse import quote, urlencode, urlparse
 import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
-from bot import image_access, integrations
+from bot import emoji_export, image_access, integrations
 from bot.ai import images, tts
 from bot.ai.browser import BrowserError, BrowserManager
 from bot.ai.gate import Gate
@@ -248,6 +248,9 @@ class ToolContext:
     owner_client: AsyncWebClient | None = None
     assistant_user_id: str = ""
     ephemeral: bool = False
+    trigger_text: str = ""
+    context_text: str = ""
+    message_ts: str | None = None
 
 
 class _TextExtractor(HTMLParser):
@@ -570,6 +573,7 @@ class Toolbox:
             "nugget_fact",
             "generate_image",
             "flaron",
+            "export_emoji",
             "public_holidays",
             "hackatime_stats",
             "dog_fact",
@@ -1185,6 +1189,25 @@ class Toolbox:
                     },
                 },
                 ["title", "slides"],
+            ),
+            tool(
+                "export_emoji",
+                "Export a custom workspace emoji as a downloadable PNG. In a channel the image goes to an ephemeral message only the requester can see, the png is also saved in their dms so Slack lets them download it, and their message gets a checkmark; in a DM it is just a normal file message. Pass `name` like `:peak:` or `peak`, or omit it to export the custom emoji from the message being replied to. After a successful export, output exactly [NO_REPLY] because the tool already delivered it.",
+                {
+                    "name": {
+                        "type": "string",
+                        "description": "Emoji shortcode or name, e.g. ':peak:' or 'peak'. Omit to use a custom emoji in the triggering or quoted message.",
+                    },
+                    "background": {
+                        "type": "string",
+                        "description": "Optional PNG background: 'transparent' (default), 'white', 'black', a color name, or a hex color like '#101010'.",
+                    },
+                    "size": {
+                        "type": "integer",
+                        "description": "Square output size in pixels, 64-1024. Default 512.",
+                    },
+                },
+                [],
             ),
             tool(
                 "flaron",
@@ -4054,6 +4077,96 @@ class Toolbox:
         except Exception as exc:  # noqa: BLE001
             return _error(f"failed to upload deck: {exc}")
         return f"deck uploaded: {title} ({len(raw_slides) + 1} slides)"
+
+    async def _tool_export_emoji(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not ctx.channel_id:
+            return _error("no channel or dm context to send the emoji export to")
+        raw_name = str(args.get("name") or "").strip()
+        if raw_name.lower().strip(": ") in {
+            "this",
+            "that",
+            "it",
+            "these",
+            "those",
+            "one",
+            "the emoji",
+            "emoji",
+        }:
+            raw_name = ""
+        candidates = [raw_name] if raw_name else emoji_export.emoji_names_in_text(
+            ctx.trigger_text
+        )
+        if not candidates:
+            # "export this" often points at the message above or the thread
+            # context, so prefer the latest emoji mentioned there.
+            candidates = list(
+                reversed(emoji_export.emoji_names_in_text(ctx.context_text))
+            )
+        if not candidates:
+            return _error(
+                "pass an emoji name like `:peak:`, or reply to a message that has a "
+                "custom emoji in it"
+            )
+
+        clients = [ctx.client, ctx.bot_client, ctx.user_client]
+        try:
+            size = int(args.get("size") or emoji_export.DEFAULT_EXPORT_SIZE)
+        except (TypeError, ValueError):
+            size = emoji_export.DEFAULT_EXPORT_SIZE
+        artifact = None
+        last_error: emoji_export.EmojiExportError | None = None
+        for candidate in candidates[:5]:
+            try:
+                artifact = await emoji_export.export_emoji(
+                    candidate,
+                    clients,
+                    size=size,
+                    background=str(args.get("background") or "").strip() or None,
+                    team_id=runtime.team_id,
+                )
+                break
+            except emoji_export.EmojiExportError as exc:
+                last_error = exc
+        if artifact is None:
+            return _error(str(last_error or "couldn't find that emoji"))
+
+        is_dm = ctx.is_dm or ctx.channel_id.startswith("D")
+        try:
+            result = await emoji_export.deliver_export(
+                ctx.client,
+                artifact,
+                channel=ctx.channel_id,
+                user_id=ctx.user_id,
+                is_dm=is_dm,
+                thread_ts=ctx.thread_ts,
+                message_ts=ctx.message_ts,
+                reaction_client=ctx.client,
+            )
+        except emoji_export.EmojiExportError as exc:
+            return _error(str(exc))
+        except Exception as exc:
+            logger.exception("emoji export delivery failed")
+            return _error(f"couldn't send the emoji export: {exc}")
+
+        where = (
+            "this dm"
+            if result.mode == "dm" and not result.fallback_dm
+            else "their dms"
+            if result.mode == "dm"
+            else "an ephemeral message only they can see"
+        )
+        if result.mode == "ephemeral" and result.dm_copy:
+            where += ", with a copy saved in their dms"
+        delivered = "the image is already delivered"
+        if result.mode != "dm" or result.fallback_dm:
+            delivered = "the image and checkmark are already delivered"
+        animated = " (first frame of an animated emoji)" if artifact.animated else ""
+        return (
+            f"exported :{artifact.name}: as a {artifact.width}x{artifact.height} png "
+            f"in {where}{animated}. {delivered}; do not post a public confirmation "
+            "or the image again. output exactly [NO_REPLY] unless they asked a "
+            "separate question."
+        )
 
     async def _tool_flaron(self, args: dict[str, Any], ctx: ToolContext) -> str:
         action = str(args.get("action") or "").lower().strip()

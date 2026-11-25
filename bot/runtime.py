@@ -33,6 +33,7 @@ class Runtime:
     owner_client: AsyncWebClient | None = None
     bot_user_id: str = ""
     bot_id: str = ""
+    team_id: str = ""
     user_id: str = ""
     owner_user_id: str = ""
     user_gateway: Any | None = None

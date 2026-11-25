@@ -151,7 +151,7 @@ SIMPLE_CHAT_RE = re.compile(
     r"\b(?:search|look\s+up|check|find|open|run|build|deploy|fix|review|"
     r"summar(?:y|ize|ise)|tldr|recap|catch\s*up|remind|schedule|email|"
     r"calendar|github|pr|repo|sandbox|file|image|chart|deck|hackatime|"
-    r"weather|docs?|link|upload|download|browser|api)\b",
+    r"weather|docs?|link|upload|download|browser|api|emoji|export)\b",
     re.IGNORECASE,
 )
 # Small talk can skip tools. Anything that points at workspace data ("is 42253
@@ -283,10 +283,12 @@ class Agent:
         safety_review: bool = False,
         client: AsyncWebClient | None = None,
         secret: Any | None = None,
+        message_ts: str | None = None,
     ) -> str:
         """Run one agent turn (with tools) and persist both sides of it."""
         if not self.settings.ai_enabled:
             return "my ai brain isn't configured yet. add AI_API_KEY and restart me."
+        trigger_text = text
         if context.strip():
             text = (
                 "[recent channel context, for reference]\n"
@@ -433,6 +435,9 @@ class Agent:
             owner_client=owner_client,
             assistant_user_id=active_identity_id,
             ephemeral=secret is not None,
+            trigger_text=trigger_text[:6000],
+            context_text=context[:6000],
+            message_ts=message_ts,
         )
 
         answer = ""

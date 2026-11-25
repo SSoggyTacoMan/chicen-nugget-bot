@@ -410,6 +410,7 @@ class UserGateway:
                     context=context,
                     public_veto=bool(not is_dm and not is_mpim),
                     client=self.user_client,
+                    message_ts=event.get("ts"),
                 )
         except Exception:
             logger.exception("user gateway agent turn failed")

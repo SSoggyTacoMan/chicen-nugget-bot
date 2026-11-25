@@ -60,6 +60,7 @@ async def run() -> None:
 
     runtime.bot_user_id = auth.get("user_id") or ""
     runtime.bot_id = auth.get("bot_id") or ""
+    runtime.team_id = auth.get("team_id") or ""
 
     auto_join = settings.auto_join_channels
     stored_join = db.kv_get("config:auto_join_channels")

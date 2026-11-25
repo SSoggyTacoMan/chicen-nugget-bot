@@ -9,7 +9,7 @@ import re
 import time
 from typing import Any
 
-from bot import image_access, integrations
+from bot import emoji_export, image_access, integrations
 from bot.ai.budget import utc_day
 from bot.ai.providers import fallback_provider
 from bot.features import retention
@@ -72,8 +72,10 @@ HELP = """*{bot}: everything lives under `/nugget`*
 • `/nugget schedule <#channel> <when> <text>` - admin scheduled message
 • `/nugget recap` - admin: post the daily recap prompt now
 
-*ai*
+*ai / media*
 • `/nugget ask <question>` - one-shot ai answer
+• `/nugget emoji export :peak:` - download a custom emoji as a png (private)
+• `/nugget emoji :peak: --bg white --size 512` - flatten a transparent png
 • `/nugget chats` - your DM chats, one thread each
 • `/nugget chat new [title]` - start a new DM chat
 • `/nugget chat use <n>` - switch to an earlier chat
@@ -260,6 +262,80 @@ async def cmd_whois(ack, command, client) -> None:
         f"• bot: `{str(user.get('is_bot')).lower()}` · admin: `{str(user.get('is_admin')).lower()}`",
     ]
     await _say(client, command, "\n".join(lines), ephemeral=True)
+
+
+# -------------------------------------------------------------------- emoji
+async def cmd_emoji(ack, command, client) -> None:
+    """Export a custom workspace emoji as a downloadable png."""
+    raw = (command.get("text") or "").strip()
+    head, _, rest = raw.partition(" ")
+    if head.lower() in {"export", "download", "get", "save", "png"}:
+        raw = rest.strip()
+    if not raw:
+        await ack()
+        await _say(client, command, _emoji_usage(), ephemeral=True)
+        return
+
+    try:
+        options = emoji_export.parse_export_args(raw)
+        emoji_export.parse_background(options.background)
+    except emoji_export.EmojiExportError as exc:
+        await ack()
+        await _say(client, command, str(exc), ephemeral=True)
+        return
+    if not options.names:
+        await ack()
+        await _say(client, command, _emoji_usage(), ephemeral=True)
+        return
+
+    names = options.names[:5]
+    pretty = ", ".join(f":{name}:" for name in names)
+    # An immediate ack is the "working" signal for a slash command: channels
+    # don't have a message to react to.
+    await ack(
+        text=f":white_check_mark: exporting {pretty}…",
+        response_type="ephemeral",
+    )
+
+    channel = command["channel_id"]
+    user = command["user_id"]
+    is_dm = channel.startswith("D")
+    clients = [client, runtime.user_client, runtime.client]
+    for name in names:
+        try:
+            artifact = await emoji_export.export_emoji(
+                name,
+                clients,
+                size=options.size,
+                background=options.background,
+                team_id=runtime.team_id,
+            )
+            await emoji_export.deliver_export(
+                client,
+                artifact,
+                channel=channel,
+                user_id=user,
+                is_dm=is_dm,
+                thread_ts=command.get("thread_ts") or None,
+                reaction_client=runtime.client if not is_dm else None,
+            )
+        except emoji_export.EmojiExportError as exc:
+            await _say(client, command, f":x: {exc}", ephemeral=not is_dm)
+        except Exception:
+            logger.exception("emoji export failed for %s", name)
+            await _say(
+                client,
+                command,
+                f":x: couldn't export `:{name}:`. check my logs?",
+                ephemeral=not is_dm,
+            )
+
+
+def _emoji_usage() -> str:
+    return (
+        "usage: `/nugget emoji export :peak:` or `/nugget emoji :peak:`\n"
+        "optional: `--bg white|black|#101010`, `--size 512`, `--transparent`"
+    )
 
 
 # ----------------------------------------------------------------- reminders
