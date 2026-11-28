@@ -155,6 +155,19 @@ def test_chat_raises_quota_error_when_fallback_also_fails(tmp_path):
     assert exc.value.kind == "upstream"
 
 
+def test_quota_error_without_fallback_asks_to_configure_one(tmp_path):
+    agent, _, _ = _agent(tmp_path)
+    agent._fallback = lambda: None
+
+    with pytest.raises(QuotaExhausted) as exc:
+        asyncio.run(
+            agent._chat([{"role": "user", "content": "hello"}], tools=False)
+        )
+    assert exc.value.fallback is None
+    message = agent._friendly_error(exc.value)
+    assert "add a fallback endpoint" in message
+
+
 def test_non_quota_primary_error_does_not_use_fallback(tmp_path):
     agent, _, fallback_client = _agent(tmp_path)
     agent.llm.chat.completions.create = AsyncMock(

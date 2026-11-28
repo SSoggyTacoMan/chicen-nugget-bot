@@ -926,11 +926,11 @@ class Agent:
         if not providers:
             raise QuotaExhausted(
                 "hack club ai is unavailable",
-                "no fallback endpoint configured",
                 kind=quota_kind or KIND_UNKNOWN,
             )
 
         last_error: Exception | None = None
+        fallback_error: Exception | None = None
         for provider_name, client, provider_models in providers:
             if provider_name == "fallback" and quota_error is None:
                 continue
@@ -984,6 +984,8 @@ class Agent:
                     raise
                 except Exception as exc:  # noqa: BLE001 - provider errors are retried
                     last_error = exc
+                    if provider_name == "fallback":
+                        fallback_error = exc
                     kind = classify_quota_error(exc)
                     if provider_name == "primary" and kind:
                         quota_error = exc
@@ -1008,7 +1010,7 @@ class Agent:
         if quota_error is not None:
             raise QuotaExhausted(
                 str(quota_error)[:160],
-                str(last_error)[:160] if last_error else None,
+                str(fallback_error)[:160] if fallback_error else None,
                 kind=quota_kind or KIND_UNKNOWN,
             )
         raise last_error or RuntimeError("no ai model configured")
