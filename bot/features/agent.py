@@ -8,6 +8,7 @@ import re
 import time
 from typing import Any
 
+from bot import ambient
 from bot.ai.limits import user_retry_after
 from bot.features import dm_chats
 from bot.features.followup import (
@@ -873,9 +874,9 @@ async def _mention_context(event: dict[str, Any], client) -> str:
 
 async def _maybe_ambient(event: dict[str, Any], client) -> None:
     """Let jev decide whether an unaddressed channel message deserves a reply."""
-    if runtime.db and runtime.db.kv_get("config:ambient_ai") == "false":
-        return
     settings = runtime.settings
+    if not ambient.enabled(runtime.db):
+        return
     channel = event.get("channel")
     user_id = event.get("user")
     text = (event.get("text") or "").strip()
@@ -886,7 +887,7 @@ async def _maybe_ambient(event: dict[str, Any], client) -> None:
         return
     if runtime.agent is None or runtime.gate is None or not settings.ai_enabled:
         return
-    if not settings.ai_allowed(channel) or not settings.ambient_allowed(channel):
+    if not ambient.allowed(settings, runtime.db, channel):
         return
     # mentions are handled by app_mention, threads by _handle_thread_continuation
     if event.get("thread_ts"):

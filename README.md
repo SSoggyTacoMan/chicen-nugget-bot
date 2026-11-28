@@ -13,7 +13,7 @@ if something feels off, `/nugget doctor` is the first stop. it checks scopes, to
 
 ## what it does
 
-- mentions, name calls like "hey nugget", dms, group dms, thread follow-ups and optional ambient replies
+- mentions, name calls like "hey nugget", dms, group dms, thread follow-ups and optional ambient replies with a per-channel whitelist
 - quoted and shared messages: Slack hides the original in attachments, so it is read back into the prompt as a quote instead of being dropped
 - dm chats: one thread per conversation, with `/nugget chats`, `/nugget chat new` and follow-up detection
 - secret chats: `/nugget secret` keeps a conversation in memory only, read-only tools, discreet notification previews and an opt-in `--burn`
@@ -532,6 +532,8 @@ a thread can belong to both identities. whoever spoke last answers an unmentione
 the prompt also gives the model a public-channel veto: it can return `[NO_REPLY]` for messages that were not for it or would overshare. public replies containing sandbox, token, host, `.env`, sqlite, setup or model details are suppressed before posting.
 
 mentions and dms skip the gate. errors and timeouts fail closed. `AI_AMBIENT_CHANNELS=*` turns ambient replies on everywhere the bot is a member.
+
+ambient replies can be narrowed without a restart. `/nugget config ambient off` (or telling the bot to only answer when pinged) sets `config:ambient_ai=false` and stops unprompted chiming-in everywhere; mentions, name calls, DMs and thread follow-ups keep working. `config:ambient_channels` is the runtime allowlist: channel ids or `#names`, `*` for everywhere, or `none`. setting a non-empty list turns ambient replies back on in those channels. the env var stays the default until the first runtime override, and all of it also lives under `/nugget setup ai`.
 
 ## spend limits
 

@@ -11,7 +11,7 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
-from bot import integrations
+from bot import ambient, integrations
 from bot.ai import images as image_settings
 from bot.ai.agent import Agent
 from bot.ai.budget import Budget
@@ -224,16 +224,11 @@ async def run() -> None:
             )
             if settings.ai_gate_enabled:
                 runtime.gate = Gate(settings, budget=runtime.budget)
-                channels = (
-                    "everywhere"
-                    if "*" in settings.ai_ambient_channels
-                    else ", ".join(sorted(settings.ai_ambient_channels)) or "nowhere"
-                )
                 logger.info(
-                    "gate enabled with %s at %s; ambient replies in %s (cooldown %ss)",
+                    "gate enabled with %s at %s; ambient replies %s (cooldown %ss)",
                     settings.ai_gate_model,
                     runtime.gate.jev.url,
-                    channels,
+                    ambient.describe(settings, db),
                     settings.ai_ambient_cooldown,
                 )
         except Exception:  # noqa: BLE001

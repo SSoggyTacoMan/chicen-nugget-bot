@@ -35,7 +35,7 @@ from urllib.parse import quote, urlencode, urlparse
 import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
-from bot import emoji_export, image_access, integrations
+from bot import ambient, emoji_export, image_access, integrations
 from bot.ai import images, tts
 from bot.ai.browser import BrowserError, BrowserManager
 from bot.ai.gate import Gate
@@ -1480,7 +1480,7 @@ class Toolbox:
             ),
             tool(
                 "bot_config",
-                "View or change bot runtime settings (recaps, recap_channel_id, recap_private_channel_id, daily_digest, personal_updates, welcomer, tier2, tier2_channel, admin_channel, ambient_ai, thread_followups, weather_location). Owner/admin only.",
+                "View or change bot runtime settings (recaps, recap_channel_id, recap_private_channel_id, daily_digest, personal_updates, welcomer, tier2, tier2_channel, admin_channel, ambient_ai, ambient_channels, thread_followups, weather_location). Owner/admin only. Use ambient_ai=off for ping-only mode (mentions, name calls, DMs and threads the bot is already in still work). ambient_channels is the unprompted-reply whitelist: channel ids or #names, '*' for everywhere, or 'none'. Setting a non-empty whitelist turns ambient replies on.",
                 {
                     "action": {
                         "type": "string",
@@ -1489,7 +1489,7 @@ class Toolbox:
                     },
                     "key": {
                         "type": "string",
-                        "description": "Setting name: 'recaps', 'recap_channel_id', 'recap_private_channel_id', 'daily_digest', 'personal_updates', 'welcomer', 'tier2', 'tier2_channel', 'admin_channel', 'ambient_ai', 'thread_followups', 'weather_location'.",
+                        "description": "Setting name: 'recaps', 'recap_channel_id', 'recap_private_channel_id', 'daily_digest', 'personal_updates', 'welcomer', 'tier2', 'tier2_channel', 'admin_channel', 'ambient_ai', 'ambient_channels', 'thread_followups', 'weather_location'.",
                     },
                     "value": {
                         "type": "string",
@@ -5658,6 +5658,10 @@ class Toolbox:
             "admin_chan": "admin_channel_id",
             "admin_channel_id": "admin_channel_id",
             "ambient": "ambient_ai",
+            "ambient_channels": "ambient_channels",
+            "ambient_channel": "ambient_channels",
+            "ambient_whitelist": "ambient_channels",
+            "ambient_allowed_channels": "ambient_channels",
             "weather": "weather_location",
             "updates": "personal_updates",
             "personal": "personal_updates",
@@ -5724,6 +5728,7 @@ class Toolbox:
             "access_channel_id",
             "admin_channel_id",
             "ambient_ai",
+            "ambient_channels",
             "thread_followups",
             "personal_updates",
             "weather_location",
@@ -5834,6 +5839,19 @@ class Toolbox:
 
         if action == "get":
             db_val = ctx.db.kv_get(f"config:{key}")
+            if key == "ambient_channels":
+                effective = ambient.channels(ctx.settings, ctx.db)
+                source = "default" if db_val is None else f"stored `{db_val}`"
+                return (
+                    f"ambient_channels is {source}; effective: "
+                    f"{ambient.describe(ctx.settings, ctx.db)}."
+                )
+            if key == "ambient_ai":
+                if db_val is None:
+                    return (
+                        "ambient_ai is not set (default on); effective: "
+                        f"{ambient.describe(ctx.settings, ctx.db)}."
+                    )
             if db_val is None:
                 return f"setting *{key}* is not set (using default)."
             if key in secret_keys:
@@ -5880,6 +5898,39 @@ class Toolbox:
                         if token and token not in ids:
                             ids.append(token)
                     normalized_val = ",".join(ids)
+            elif key == "ambient_channels":
+                if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0", "clear"}:
+                    normalized_val = ""
+                elif val_lower in {"all", "*", "everywhere"}:
+                    normalized_val = "*"
+                else:
+                    parts = [part.strip() for part in re.split(r"[,\s]+", value) if part.strip()]
+                    ids: list[str] = []
+                    for part in parts:
+                        match = re.search(r"[CG][A-Z0-9]{8,}", part, re.IGNORECASE)
+                        token = (
+                            match.group(0).upper()
+                            if match
+                            else await self._resolve_channel(ctx, part)
+                        )
+                        if token and token not in ids:
+                            ids.append(token)
+                    if not ids:
+                        return _error(
+                            f"could not resolve any channels in '{value}'. "
+                            "use channel ids or #names, '*' for everywhere, or 'none'."
+                        )
+                    normalized_val = ",".join(ids)
+            elif key == "ambient_ai":
+                if val_lower in {"off", "false", "no", "disable", "disabled", "0"}:
+                    normalized_val = "false"
+                elif val_lower in {"on", "true", "yes", "enable", "enabled", "1"}:
+                    normalized_val = "true"
+                else:
+                    return _error(
+                        "ambient_ai is 'on' or 'off'. to allow only certain channels, "
+                        "use ambient_channels with ids, #names, or '*'."
+                    )
             elif key == "admin_channel_id":
                 if val_lower in {"dm", "dms", "none", "off", "false", "no", "disable", "disabled", "0"}:
                     normalized_val = "dm"
@@ -5950,6 +6001,33 @@ class Toolbox:
                     return "auto-join cleared: i won't join any channels on startup."
                 mentions = ", ".join(f"<#{cid}>" for cid in normalized_val.split(",") if cid)
                 return f"i'll auto-join: {mentions}."
+
+            if key == "ambient_channels":
+                # Picking a whitelist is an explicit yes to ambient replies there.
+                if normalized_val:
+                    ctx.db.kv_set("config:ambient_ai", "true")
+                if not normalized_val:
+                    return (
+                        "ambient whitelist cleared: no unprompted replies anywhere. "
+                        "pings, DMs and threads i'm already in still work."
+                    )
+                if normalized_val == "*":
+                    return "ambient replies enabled everywhere unprompted."
+                mentions = ", ".join(
+                    f"<#{cid}>" for cid in normalized_val.split(",") if cid
+                )
+                return f"ambient replies enabled only in: {mentions}."
+
+            if key == "ambient_ai":
+                if normalized_val == "false":
+                    return (
+                        "ambient replies off. i'll only answer pings, name calls, "
+                        "DMs and threads i'm already in."
+                    )
+                return (
+                    "ambient replies on: "
+                    f"{ambient.describe(ctx.settings, ctx.db)}."
+                )
 
             if key in {
                 "ai_model",

@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from bot import integrations
+from bot import ambient, integrations
 from bot.api_keys import API_SERVICES, api_token, save_api_token
 from bot.google_oauth import (
     GoogleOAuthError,
@@ -183,6 +183,12 @@ CHAT_SETUP_AREAS: dict[str, SetupGuide] = {
                 "ambient_ai",
                 "should i ever chime in unprompted in channels?",
                 "on or off",
+            ),
+            SetupQuestion(
+                "ambient_channels",
+                "if ambient replies stay on, which channels may i chime in?",
+                "channel ids or #names, `*` for everywhere, or `none`",
+                required=False,
             ),
             SetupQuestion(
                 "welcomer",
@@ -368,6 +374,13 @@ def chat_setup_area(name: str) -> str | None:
 
 
 def _current_setting(key: str) -> str:
+    if key == "ambient_ai":
+        return "on" if ambient.enabled(runtime.db) else "off (ping-only)"
+    if key == "ambient_channels":
+        allowed = ambient.channels(runtime.settings, runtime.db)
+        if "*" in allowed:
+            return "everywhere"
+        return ", ".join(f"<#{channel}>" for channel in sorted(allowed)) or "(none)"
     db = runtime.db
     if db is not None:
         value = db.kv_get(f"config:{key}")
@@ -1118,6 +1131,10 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
             )
             if _current_bool(key, default)
         }
+        ambient_now = ambient.channels(settings, runtime.db)
+        ambient_initial = (
+            "*" if "*" in ambient_now else ", ".join(sorted(ambient_now))
+        )
         return _modal(
             "setup_ai",
             "AI and behavior",
@@ -1159,6 +1176,12 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
                         ("personal_updates", "owner digest and recap DMs"),
                     ],
                     selected,
+                ),
+                _input(
+                    "ambient_channels",
+                    "Ambient channels",
+                    placeholder="#general, #random, * for everywhere, or none",
+                    initial=ambient_initial,
                 ),
             ],
             submit="Save AI",
@@ -1752,6 +1775,23 @@ async def on_ai_submit(ack, body, view, client) -> None:
         if not raw:
             continue
         _set(key, "" if raw.strip() == "-" else raw.strip())
+    raw_ambient = values.get("ambient_channels", "").strip()
+    if raw_ambient:
+        lowered = raw_ambient.lower()
+        if lowered in {"-", "none", "off", "false", "no", "disable", "disabled", "0", "clear"}:
+            _set("ambient_channels", "")
+        elif lowered in {"all", "*", "everywhere"}:
+            _set("ambient_channels", "*")
+        else:
+            resolved: list[str] = []
+            for part in re.split(r"[\s,]+", raw_ambient):
+                if not part:
+                    continue
+                channel_id = await _resolve_channel(client, part)
+                if channel_id and channel_id not in resolved:
+                    resolved.append(channel_id)
+            if resolved:
+                _set("ambient_channels", ",".join(resolved))
     checked = _checked(view, "behavior")
     for key in ("recaps", "thread_followups", "ambient_ai", "welcomer", "personal_updates"):
         _set(key, "true" if key in checked else "false")

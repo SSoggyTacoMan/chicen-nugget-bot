@@ -245,3 +245,29 @@ def test_bot_config_accepts_welcome_and_watcher_keys():
         db.kv_set.assert_any_call("config:usergroup_id", "")
 
     asyncio.run(run())
+
+
+def test_bot_config_supports_ping_only_and_ambient_whitelist():
+    async def run():
+        db = MagicMock()
+        box = Toolbox(MagicMock())
+        ctx = _ctx(db=db)
+
+        out = await box.execute(
+            "bot_config",
+            {"action": "set", "key": "ambient_ai", "value": "off"},
+            ctx,
+        )
+        assert "only answer pings" in out
+        db.kv_set.assert_any_call("config:ambient_ai", "false")
+
+        out = await box.execute(
+            "bot_config",
+            {"action": "set", "key": "ambient_channel", "value": "*"},
+            ctx,
+        )
+        assert "everywhere" in out
+        db.kv_set.assert_any_call("config:ambient_channels", "*")
+        db.kv_set.assert_any_call("config:ambient_ai", "true")
+
+    asyncio.run(run())

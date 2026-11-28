@@ -9,7 +9,7 @@ import re
 import time
 from typing import Any
 
-from bot import emoji_export, image_access, integrations
+from bot import ambient, emoji_export, image_access, integrations
 from bot.ai.budget import utc_day
 from bot.ai.providers import fallback_provider
 from bot.features import retention
@@ -630,6 +630,10 @@ async def cmd_config(ack, command, client) -> None:
         "admin_chan": "admin_channel_id",
         "admin_channel_id": "admin_channel_id",
         "ambient": "ambient_ai",
+        "ambient_channels": "ambient_channels",
+        "ambient_channel": "ambient_channels",
+        "ambient_whitelist": "ambient_channels",
+        "ambient_allowed_channels": "ambient_channels",
         "weather": "weather_location",
         "updates": "personal_updates",
         "personal": "personal_updates",
@@ -697,6 +701,7 @@ async def cmd_config(ack, command, client) -> None:
         "access_channel_id",
         "admin_channel_id",
         "ambient_ai",
+        "ambient_channels",
         "thread_followups",
         "weather_location",
         "github_username",
@@ -889,6 +894,54 @@ async def cmd_config(ack, command, client) -> None:
                 )
                 return
             norm = ",".join(resolved)
+    elif key == "ambient_channels":
+        if val_lower in {"none", "off", "false", "no", "disable", "disabled", "0", "clear"}:
+            norm = ""
+        elif val_lower in {"all", "*", "everywhere"}:
+            norm = "*"
+        else:
+            tokens = [part for part in re.split(r"[\s,]+", raw_val) if part]
+            by_name: dict[str, str] = {}
+            if any(not re.search(r"[CG][A-Z0-9]{8,}", part, re.IGNORECASE) for part in tokens):
+                by_name = {
+                    (channel.get("name") or "").lower(): channel["id"]
+                    for channel in await all_channels(client)
+                    if channel.get("id") and channel.get("name")
+                }
+            resolved_ambient: list[str] = []
+            for part in tokens:
+                match = re.search(r"[CG][A-Z0-9]{8,}", part, re.IGNORECASE)
+                channel_id = (
+                    match.group(0).upper()
+                    if match
+                    else by_name.get(part.lstrip("#").lower())
+                )
+                if channel_id and channel_id not in resolved_ambient:
+                    resolved_ambient.append(channel_id)
+            if not resolved_ambient:
+                await _say(
+                    client,
+                    command,
+                    f"could not resolve any channels in `{raw_val}`. "
+                    "use channel ids or names like `#general`, `*` for everywhere, or `off`.",
+                    ephemeral=True,
+                )
+                return
+            norm = ",".join(resolved_ambient)
+    elif key == "ambient_ai":
+        if val_lower in {"off", "false", "no", "disable", "disabled", "0"}:
+            norm = "false"
+        elif val_lower in {"on", "true", "yes", "enable", "enabled", "1"}:
+            norm = "true"
+        else:
+            await _say(
+                client,
+                command,
+                "ambient is `on` or `off`. to allow only certain channels, use "
+                "`/nugget config ambient_channels #general,#random`.",
+                ephemeral=True,
+            )
+            return
     elif key == "admin_channel_id":
         if val_lower in {"dm", "dms", "none", "off", "false", "no", "disable", "disabled", "0"}:
             norm = "dm"
@@ -971,6 +1024,37 @@ async def cmd_config(ack, command, client) -> None:
         else:
             mentions = ", ".join(f"<#{cid}>" for cid in norm.split(",") if cid)
             msg = f":white_check_mark: will auto-join: {mentions}."
+        await _say(client, command, msg, ephemeral=True)
+        return
+
+    if key == "ambient_channels":
+        # Choosing a whitelist is an explicit yes to ambient replies there.
+        if norm and runtime.db:
+            runtime.db.kv_set("config:ambient_ai", "true")
+        if not norm:
+            msg = (
+                ":white_check_mark: ambient whitelist cleared: no unprompted replies "
+                "anywhere. pings, DMs and threads i'm already in still work."
+            )
+        elif norm == "*":
+            msg = ":white_check_mark: ambient replies enabled everywhere unprompted."
+        else:
+            mentions = ", ".join(f"<#{cid}>" for cid in norm.split(",") if cid)
+            msg = f":white_check_mark: ambient replies enabled only in: {mentions}."
+        await _say(client, command, msg, ephemeral=True)
+        return
+
+    if key == "ambient_ai":
+        if norm == "false":
+            msg = (
+                ":white_check_mark: ambient replies off. i'll only answer pings, "
+                "name calls, DMs and threads i'm already in."
+            )
+        else:
+            msg = (
+                ":white_check_mark: ambient replies on: "
+                f"{ambient.describe(runtime.settings, runtime.db)}."
+            )
         await _say(client, command, msg, ephemeral=True)
         return
 
