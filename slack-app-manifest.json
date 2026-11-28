@@ -40,15 +40,25 @@
   "oauth_config": {
     "scopes": {
       "user": [
+        "channels:history",
+        "channels:read",
         "channels:write",
         "channels:write.invites",
         "channels:write.topic",
         "chat:write",
+        "dnd:read",
+        "dnd:write",
         "emoji:read",
         "files:read",
+        "files:write",
+        "groups:history",
+        "groups:read",
         "groups:write",
         "groups:write.invites",
         "groups:write.topic",
+        "im:history",
+        "im:read",
+        "im:write",
         "mpim:history",
         "mpim:read",
         "mpim:write",
@@ -60,6 +70,8 @@
         "usergroups:write",
         "users.profile:read",
         "users.profile:write",
+        "users:read",
+        "users:read.email",
         "users:write"
       ],
       "bot": [

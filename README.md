@@ -66,6 +66,8 @@ you can split the credentials: `SLACK_USER_TOKEN` (ideally `xoxp`) handles api c
 
 treat `xoxc` and `xoxd` like passwords. they grant full access to the account, including private channels. to rotate them, sign out and back in, then update the env.
 
+if boi uses an `xoxp` token, install the app with the manifest so the user scopes include channel/IM history and read access, user lookups, DND, usergroups and file uploads. an `xoxc` web session already carries the account's own access.
+
 `AUTO_JOIN_CHANNELS` joins only the public channel ids you list, on startup. leave it empty and it joins nothing. no wildcard. `CHAT_CHUNK_DELAY_SECONDS` and `CHAT_CHUNK_MAX` control paragraph splitting. `QUIET_HOURS` and `PROACTIVE_DAILY_CAP` gate ambient replies.
 
 ### posting in the owner's name
