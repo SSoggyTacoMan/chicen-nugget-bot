@@ -10,8 +10,8 @@ import time
 from typing import Any
 
 from bot import ambient, emoji_export, image_access, integrations
-from bot.ai.budget import utc_day
 from bot.ai.providers import fallback_provider
+from bot.ai.quota import describe as quota_description
 from bot.features import retention
 from bot.features.stats import (
     build_digest,
@@ -558,14 +558,13 @@ async def cmd_budget(ack, command, client) -> None:
         if router
         else "not configured"
     )
-    if runtime.db.kv_get(f"quota:hcai:{utc_day()}"):
-        lines.append(
-            f"• hacai quota: *empty today* · 9router fallback {router_models}"
-        )
+    hacai_state = quota_description(runtime.db)
+    if hacai_state:
+        lines.append(f"• *{hacai_state}* · fallback {router_models}")
     elif router:
-        lines.append(f"• 9router fallback: {router_models} ready")
+        lines.append(f"• fallback ai: {router_models} ready")
     else:
-        lines.append("• 9router fallback: not configured (`/nugget setup fallback`)")
+        lines.append("• fallback ai: not configured (`/nugget setup fallback`)")
 
     rows = runtime.db.ai_usage(status.day, user_id=user)
     if rows:

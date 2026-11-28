@@ -393,7 +393,7 @@ def load_settings() -> Settings:
     router_models = _list("AI_ROUTER_MODELS")
     if not router_models:
         legacy = _str("AI_ROUTER_MODEL")
-        router_models = (legacy,) if legacy else ("kgw/kilo-auto/free",)
+        router_models = (legacy,) if legacy else ()
 
     return Settings(
         slack_bot_token=_str("SLACK_BOT_TOKEN"),
@@ -444,10 +444,7 @@ def load_settings() -> Settings:
             "TRANSCRIBE_FALLBACK_MODEL", "google/gemini-2.5-flash"
         )
         or "google/gemini-2.5-flash",
-        ai_router_base_url=_str(
-            "AI_ROUTER_BASE_URL", "https://router.ssoggy.me/v1"
-        )
-        or "https://router.ssoggy.me/v1",
+        ai_router_base_url=_str("AI_ROUTER_BASE_URL"),
         ai_router_api_key=_str("AI_ROUTER_API_KEY") or None,
         ai_router_models=router_models,
         ai_max_tokens=_int("AI_MAX_TOKENS", 1200),

@@ -14,10 +14,20 @@ from slack_sdk.web.async_client import AsyncWebClient
 from bot import integrations
 from bot.ai import images as image_settings
 from bot.ai import tts
-from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens, utc_day
+from bot.ai.budget import Budget, BudgetExceeded, estimate_tokens
 from bot.ai.gate import Gate
 from bot.ai.memory import MemoryIndex
 from bot.ai.providers import FallbackProvider, fallback_provider
+from bot.ai.quota import (
+    KIND_DAILY,
+    KIND_UNKNOWN,
+    KIND_UPSTREAM,
+    classify_quota_error,
+    clear_cooldown,
+    mark_unavailable,
+    notice_key,
+    primary_status,
+)
 from bot.ai.tools import Toolbox, ToolContext, format_now, get_user_memory_prompt
 from bot.config import Settings
 from bot.db import Database
@@ -97,19 +107,9 @@ def tool_call_signature(name: str, arguments: str | None) -> str:
 
 
 def is_quota_error(exc: Exception) -> bool:
-    text = str(exc).lower()
-    return any(
-        token in text
-        for token in (
-            "402",
-            "payment required",
-            "insufficient_quota",
-            "quota",
-            "spending limit",
-            "daily limit",
-            "daily budget",
-        )
-    )
+    """Backward-compatible wrapper for the quota classifier."""
+
+    return bool(classify_quota_error(exc))
 
 
 PRIVATE_DETAIL_RE = re.compile(
@@ -123,11 +123,18 @@ PRIVATE_DETAIL_RE = re.compile(
 
 
 class QuotaExhausted(RuntimeError):
-    """The primary quota is empty and the fallback could not answer either."""
+    """Hack Club AI is unavailable and the fallback could not answer either."""
 
-    def __init__(self, primary: str, fallback: str | None = None) -> None:
+    def __init__(
+        self,
+        primary: str,
+        fallback: str | None = None,
+        *,
+        kind: str = KIND_UNKNOWN,
+    ) -> None:
         self.primary = primary
         self.fallback = fallback
+        self.kind = kind or KIND_UNKNOWN
         detail = f"primary: {primary}"
         if fallback:
             detail += f"; fallback: {fallback}"
@@ -459,6 +466,7 @@ class Agent:
             extra_tools=extra_tools,
         )
         used_fallback = False
+        fallback_kind = ""
         seen_calls: dict[str, int] = {}
         rounds = 0
         stalled = False
@@ -477,6 +485,8 @@ class Agent:
                     ephemeral=secret is not None,
                     extra_tools=extra_tools,
                 )
+                if provider == "fallback" and not fallback_kind:
+                    fallback_kind = self._current_fallback_kind()
                 used_fallback = used_fallback or provider == "fallback"
                 message = response.choices[0].message
                 tool_calls = message.tool_calls or []
@@ -584,10 +594,7 @@ class Agent:
             logger.info("public veto: suppressed answer with internal details")
             return ""
         if used_fallback and answer.strip() not in {"", "[NO_REPLY]", "NO_REPLY"}:
-            answer = (
-                f"{answer}\n\n_(hack club ai quota empty · 9router free fallback · "
-                "resets 00:00 UTC)_"
-            )
+            answer = f"{answer}\n\n{self._fallback_footer(fallback_kind)}"
 
         if answer and answer.strip() not in {"[NO_REPLY]", "NO_REPLY"}:
             if secret is not None:
@@ -698,10 +705,7 @@ class Agent:
             )
             raw = (response.choices[0].message.content or "").strip()
             if provider == "fallback" and raw:
-                raw = (
-                    f"{raw}\n\n_(hack club ai quota empty · 9router free fallback · "
-                    "resets 00:00 UTC)_"
-                )
+                raw = f"{raw}\n\n{self._fallback_footer(self._current_fallback_kind())}"
             return format_mrkdwn(raw) or "i blanked. try again?"
         except BudgetExceeded as exc:
             logger.warning("ai budget exhausted: %s", exc)
@@ -822,29 +826,47 @@ class Agent:
             self._fallback_sig = signature
         return self._fallback_client, provider
 
-    def _quota_empty(self) -> bool:
-        return bool(
-            self.db and self.db.kv_get(f"quota:hcai:{utc_day()}")
-        )
+    def _current_fallback_kind(self) -> str:
+        _, kind = primary_status(self.db)
+        return kind or KIND_UNKNOWN
 
-    def _mark_quota_empty(self) -> None:
-        if self.db:
-            self.db.kv_set(f"quota:hcai:{utc_day()}", "empty")
+    def _fallback_footer(self, kind: str) -> str:
+        if kind == KIND_DAILY:
+            return "_(hack club ai quota empty · fallback ai · resets 00:00 UTC)_"
+        if kind == KIND_UPSTREAM:
+            return "_(hack club ai upstream outage · fallback ai · auto-retrying)_"
+        return "_(hack club ai unavailable · fallback ai)_"
 
-    async def _notify_quota_once(self, provider: FallbackProvider) -> None:
+    async def _notify_quota_once(
+        self, provider: FallbackProvider, kind: str
+    ) -> None:
         if not self.db:
             return
-        key = f"quota:hcai:notified:{utc_day()}"
+        key = notice_key(kind)
         if self.db.kv_get(key):
             return
         self.db.kv_set(key, "1")
         models = ", ".join(f"`{model}`" for model in provider.models)
-        text = (
-            "hack club ai quota is empty for today. "
-            f"i'm on the 9router fallback ({models}), so replies may be slower "
-            "and tool use is off. it resets at 00:00 UTC. voice, images and memory "
-            "search need HCAI quota."
-        )
+        if kind == KIND_DAILY:
+            text = (
+                "hack club ai's daily budget is used up for today. "
+                f"i'm on the fallback ({models}), so replies may be slower and "
+                "tool use is off. it resets at 00:00 UTC. voice, images and memory "
+                "search still need HCAI quota."
+            )
+        elif kind == KIND_UPSTREAM:
+            text = (
+                "hack club ai is having an upstream credits/billing problem — "
+                "that's not your daily $3 quota. "
+                f"i'm on the fallback ({models}) and will retry hacai automatically. "
+                "voice, images and memory search still need HCAI quota."
+            )
+        else:
+            text = (
+                "hack club ai is unavailable right now. "
+                f"i'm on the fallback ({models}) and will retry hacai automatically. "
+                "voice, images and memory search still need HCAI quota."
+            )
         try:
             await self.client.chat_postMessage(
                 channel=self.settings.owner_user_id, text=text
@@ -889,17 +911,23 @@ class Agent:
                 raise BudgetExceeded(self.budget.user_status(user_id), scope="user")
 
         fallback = self._fallback()
+        blocked, block_kind = primary_status(self.db)
         quota_error: Exception | None = None
+        quota_kind = block_kind
         providers: list[tuple[str, AsyncOpenAI, list[str]]] = []
-        if not self._quota_empty():
+        if not blocked:
             providers.append(("primary", self.llm, models))
         else:
-            quota_error = RuntimeError("hack club ai quota is empty")
+            quota_error = RuntimeError(
+                f"hack club ai unavailable ({block_kind or KIND_UNKNOWN})"
+            )
         if fallback is not None:
             providers.append(("fallback", fallback[0], list(fallback[1].models)))
         if not providers:
             raise QuotaExhausted(
-                "hack club ai quota is empty", "no fallback key configured"
+                "hack club ai is unavailable",
+                "no fallback endpoint configured",
+                kind=quota_kind or KIND_UNKNOWN,
             )
 
         last_error: Exception | None = None
@@ -915,7 +943,7 @@ class Agent:
                     {
                         "role": "system",
                         "content": (
-                            "The primary ai quota is empty. You are the free fallback "
+                            "The primary ai is unavailable. You are the fallback "
                             "model and have no tools. Answer briefly from the context "
                             "you already have. Do not claim to use tools."
                         ),
@@ -946,19 +974,25 @@ class Agent:
                         message.tool_calls or []
                     ):
                         raise RuntimeError("empty response")
+                    if provider_name == "primary":
+                        clear_cooldown(self.db)
+                        return response, provider_name
                     if provider_name == "fallback" and fallback is not None:
-                        self._mark_quota_empty()
-                        await self._notify_quota_once(fallback[1])
+                        await self._notify_quota_once(fallback[1], quota_kind)
                     return response, provider_name
                 except BudgetExceeded:
                     raise
                 except Exception as exc:  # noqa: BLE001 - provider errors are retried
                     last_error = exc
-                    if provider_name == "primary" and is_quota_error(exc):
+                    kind = classify_quota_error(exc)
+                    if provider_name == "primary" and kind:
                         quota_error = exc
-                        self._mark_quota_empty()
+                        quota_kind = kind
+                        mark_unavailable(self.db, kind, str(exc))
                         logger.warning(
-                            "primary ai quota exhausted: %s", str(exc)[:160]
+                            "primary ai unavailable (%s): %s",
+                            kind,
+                            str(exc)[:160],
                         )
                         break
                     if index + 1 < len(provider_models):
@@ -975,6 +1009,7 @@ class Agent:
             raise QuotaExhausted(
                 str(quota_error)[:160],
                 str(last_error)[:160] if last_error else None,
+                kind=quota_kind or KIND_UNKNOWN,
             )
         raise last_error or RuntimeError("no ai model configured")
 
@@ -1022,18 +1057,56 @@ class Agent:
         text = str(exc)
         lower = text.lower()
         if isinstance(exc, QuotaExhausted):
+            kind = getattr(exc, "kind", KIND_UNKNOWN)
+            if kind == KIND_DAILY:
+                if exc.fallback:
+                    return (
+                        "hack club ai quota is empty for today, and the fallback "
+                        "also failed. voice, images and memory search need hacai "
+                        "quota. it resets at 00:00 UTC."
+                    )
+                return (
+                    "hack club ai quota is empty for today. add a fallback endpoint "
+                    "with `/nugget setup fallback`, or wait until 00:00 UTC. voice, "
+                    "images and memory search need hacai quota."
+                )
+            if kind == KIND_UPSTREAM:
+                if exc.fallback:
+                    return (
+                        "hack club ai is down because its upstream credits are empty "
+                        "— that's on hacai's side, not your daily quota — and the "
+                        "fallback also failed. voice, images and memory search need "
+                        "hacai quota. i'll retry hacai automatically."
+                    )
+                return (
+                    "hack club ai is down because its upstream credits are empty "
+                    "(not your daily quota). add a fallback endpoint with "
+                    "`/nugget setup fallback`; i'll retry hacai automatically. "
+                    "voice, images and memory search need hacai quota."
+                )
             if exc.fallback:
                 return (
-                    "hack club ai quota is empty for today, and the 9router fallback "
-                    "also failed. voice, images and memory search need hacai quota. "
-                    "it resets at 00:00 UTC."
+                    "hack club ai is unavailable right now, and the fallback also "
+                    "failed. i'll retry hacai automatically. voice, images and "
+                    "memory search need hacai quota."
                 )
             return (
-                "hack club ai quota is empty for today. add a 9router fallback key "
-                "with `/nugget setup fallback`, or wait until 00:00 UTC. voice, "
+                "hack club ai is unavailable right now. add a fallback endpoint with "
+                "`/nugget setup fallback`; i'll retry hacai automatically. voice, "
                 "images and memory search need hacai quota."
             )
-        if "402" in text or "payment required" in lower or "spending limit" in lower or "budget" in lower:
+        if (
+            "daily spending limit" in lower
+            or "daily budget" in lower
+            or "spending limit" in lower
+        ):
+            return "my hack club ai daily budget is used up. it resets at 00:00 UTC."
+        if "402" in text or "payment required" in lower:
+            return (
+                "hack club ai is having a billing/credit problem upstream. "
+                "voice, images and memory search need hacai quota. try again in a bit."
+            )
+        if "budget" in lower:
             return "my hack club ai daily budget is used up. it resets at 00:00 UTC."
         if "api key" in lower or "401" in text or "unauthorized" in lower:
             return "my ai key got rejected. check AI_API_KEY / AI_BASE_URL in my .env."

@@ -32,7 +32,7 @@ if something feels off, `/nugget doctor` is the first stop. it checks scopes, to
 - custom welcome messages with per-channel overrides, thread replies and ping-group join/leave buttons
 - timers, alarms, reminders, tasks and durable notes for boi and the bot
 - post-huddle summaries from slack ai notes
-- ordered 9router fallback models when hack club ai quota runs out
+- ordered fallback models on any OpenAI-compatible endpoint when hack club ai is unavailable
 - `/nugget mute` stops every reply to you until you unmute. a message starting with `# ` is ignored, always, as a one-message opt-out
 
 ## how it fits
@@ -328,11 +328,13 @@ mcp servers aren't wired yet. for now it's these presets plus the built-in googl
 
 short/simple Boi messages use the quick model (`AI_ASSISTANT_FAST_MODEL`, default `anthropic/claude-haiku-5.5`), then luna (`AI_ASSISTANT_FAST_FALLBACK_MODEL`), then the main Boi model; anything that needs tools, code or a longer answer goes to the main Boi model. set it empty to disable the fast path. `AI_CODE_MODEL` is set by default. a `sandbox`, `github_write`, `browser`, `api_request`, `run_code`, `inspect_code` or `clone_repo` call switches the rest of that turn to the code model. normal chat stays on the identity model.
 
-### quota fallback
+### fallback ai
 
-when hack club ai returns a quota or payment error, the bot marks the UTC day as empty, DMs the owner once, and switches to the 9router fallback. fallback models are tried in order; set them with `/nugget setup fallback` or `AI_ROUTER_MODELS` (comma-separated, default `kgw/kilo-auto/free`). the fallback is text-only with tools disabled, so voice, images and memory search still need HCAI quota. it resets at 00:00 UTC.
+when hack club ai is unavailable, the bot can switch to any OpenAI-compatible chat endpoint: 9router, LiteLLM, OpenRouter, a local llama.cpp server, etc. configure it with `/nugget setup fallback` or `AI_ROUTER_BASE_URL`, `AI_ROUTER_API_KEY` and `AI_ROUTER_MODELS` (comma-separated; there is no default). models are tried in order. the fallback is text-only with tools disabled, so voice, images and memory search still need HCAI quota.
 
-set the 9router key with `/nugget setup fallback` or `AI_ROUTER_API_KEY`. the key is stored in SQLite, never in chat or git.
+the bot distinguishes a daily HCAI limit (a 429 `Daily spending limit ...`, blocked until 00:00 UTC) from HCAI's own upstream billing problems (402 OpenRouter/TypeSafe credits, retried every 5 minutes). it DMs the owner once per reason per UTC day.
+
+the API key is stored in SQLite, never in chat or git.
 
 semantic memory uses `AI_EMBEDDING_MODEL` (default `qwen/qwen3-embedding-8b`). new turns are embedded in the background, and `search_memory` searches by meaning. to index old history:
 

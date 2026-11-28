@@ -1,4 +1,8 @@
-"""Secondary AI provider used when Hack Club AI quota is empty."""
+"""Secondary OpenAI-compatible provider used when Hack Club AI is unavailable.
+
+9router is one example, but any endpoint that speaks the OpenAI chat
+completions API works: LiteLLM, OpenRouter, a local llama.cpp server, etc.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from dataclasses import dataclass
 from bot.config import Settings
 from bot.db import Database
 
-DEFAULT_MODELS: tuple[str, ...] = ("kgw/kilo-auto/free",)
+DEFAULT_MODELS: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -41,10 +45,21 @@ def _text(settings: Settings, name: str, default: str = "") -> str:
     return value.strip() if isinstance(value, str) and value.strip() else default
 
 
+def _models(settings: Settings, name: str) -> tuple[str, ...]:
+    value = getattr(settings, name, None)
+    if isinstance(value, str):
+        return parse_models(value)
+    if isinstance(value, (tuple, list)):
+        return tuple(
+            str(item).strip() for item in value if str(item).strip()
+        )
+    return ()
+
+
 def fallback_provider(
     settings: Settings, db: Database | None = None
 ) -> FallbackProvider | None:
-    """Effective 9router fallback, with SQLite overrides taking priority."""
+    """Effective fallback, with SQLite overrides taking priority."""
 
     def raw(key: str) -> str:
         value = db.kv_get(f"config:{key}") if db else None
@@ -56,12 +71,12 @@ def fallback_provider(
     if not configured:
         configured = parse_models(raw("ai_router_model"))
     if not configured:
-        configured = parse_models(_text(settings, "ai_router_models"))
+        configured = _models(settings, "ai_router_models")
     if not configured:
-        configured = parse_models(_text(settings, "ai_router_model"))
+        configured = _models(settings, "ai_router_model")
     if not configured:
         configured = DEFAULT_MODELS
-    if not base_url or not api_key:
+    if not base_url or not api_key or not configured:
         return None
     return FallbackProvider(
         base_url=base_url.rstrip("/"),

@@ -9,6 +9,12 @@ from bot.ai.budget import utc_day
 from bot.ai.providers import FallbackProvider
 from bot.db import Database
 
+UPSTREAM_ERROR = (
+    "Error code: 402 - {'error': {'message': 'Insufficient credits. "
+    "Add more using https://openrouter.ai/settings/credits', "
+    "'code': 402, 'metadata': {'limit_source': 'openrouter_credits'}}}"
+)
+
 
 def _settings(tmp_path):
     return SimpleNamespace(
@@ -43,7 +49,7 @@ def _settings(tmp_path):
         transcribe_fallback_model="audio-backup",
         ai_router_base_url="https://router.example/v1",
         ai_router_api_key="fallback-key",
-        ai_router_models=("kgw/kilo-auto/free",),
+        ai_router_models=("fallback-model",),
         data_dir=tmp_path,
         repo_url="https://github.com/repo",
         is_admin=lambda user_id: user_id == "U_OWNER",
@@ -67,21 +73,19 @@ def _agent(tmp_path):
     client = AsyncMock()
     agent = Agent(settings, db, client=client, user_client=None, bot_user_id="U_BOT")
     agent.llm = MagicMock()
-    agent.llm.chat.completions.create = AsyncMock(
-        side_effect=Exception("402 payment required")
-    )
+    agent.llm.chat.completions.create = AsyncMock(side_effect=Exception(UPSTREAM_ERROR))
     fallback_client = MagicMock()
     fallback_client.chat.completions.create = AsyncMock(return_value=_response())
     provider = FallbackProvider(
         base_url="https://router.example/v1",
         api_key="fallback-key",
-        models=("kgw/kilo-auto/free",),
+        models=("fallback-model",),
     )
     agent._fallback = lambda: (fallback_client, provider)
     return agent, db, fallback_client
 
 
-def test_chat_switches_to_9router_on_quota_error(tmp_path):
+def test_chat_switches_to_fallback_on_upstream_quota_error(tmp_path):
     agent, db, fallback_client = _agent(tmp_path)
 
     async def run():
@@ -96,10 +100,42 @@ def test_chat_switches_to_9router_on_quota_error(tmp_path):
     asyncio.run(run())
 
     _, kwargs = fallback_client.chat.completions.create.call_args
-    assert kwargs["model"] == "kgw/kilo-auto/free"
+    assert kwargs["model"] == "fallback-model"
     assert "tools" not in kwargs
-    assert db.kv_get(f"quota:hcai:{utc_day()}") == "empty"
+    # an upstream billing error is a short cooldown, not a day-long block
+    assert db.kv_get(f"quota:hcai:{utc_day()}") is None
+    assert db.kv_get("quota:hcai:cooldown")
+    assert db.kv_get("quota:hcai:kind") == "upstream"
     agent.client.chat_postMessage.assert_awaited_once()
+
+
+def test_chat_switches_to_fallback_on_daily_limit(tmp_path):
+    agent, db, _ = _agent(tmp_path)
+    agent.llm.chat.completions.create = AsyncMock(
+        side_effect=Exception("429 Daily spending limit of $3 reached")
+    )
+
+    async def run():
+        _, provider = await agent._chat(
+            [{"role": "user", "content": "hello"}], tools=False
+        )
+        assert provider == "fallback"
+
+    asyncio.run(run())
+    assert db.kv_get(f"quota:hcai:{utc_day()}") == "empty"
+    assert db.kv_get("quota:hcai:cooldown") is None
+
+
+def test_upstream_cooldown_skips_primary_on_the_next_turn(tmp_path):
+    agent, _, fallback_client = _agent(tmp_path)
+
+    async def run():
+        await agent._chat([{"role": "user", "content": "one"}], tools=False)
+        await agent._chat([{"role": "user", "content": "two"}], tools=False)
+
+    asyncio.run(run())
+    agent.llm.chat.completions.create.assert_awaited_once()
+    assert fallback_client.chat.completions.create.await_count == 2
 
 
 def test_chat_raises_quota_error_when_fallback_also_fails(tmp_path):
@@ -116,6 +152,7 @@ def test_chat_raises_quota_error_when_fallback_also_fails(tmp_path):
             )
         )
     assert "fallback model unavailable" in str(exc.value)
+    assert exc.value.kind == "upstream"
 
 
 def test_non_quota_primary_error_does_not_use_fallback(tmp_path):
@@ -135,7 +172,7 @@ def test_non_quota_primary_error_does_not_use_fallback(tmp_path):
     fallback_client.chat.completions.create.assert_not_awaited()
 
 
-def test_quota_notice_is_sent_once_per_day(tmp_path):
+def test_quota_notice_is_sent_once_per_reason_per_day(tmp_path):
     agent, db, _ = _agent(tmp_path)
 
     async def run():
@@ -144,7 +181,7 @@ def test_quota_notice_is_sent_once_per_day(tmp_path):
 
     asyncio.run(run())
     agent.client.chat_postMessage.assert_awaited_once()
-    assert db.kv_get(f"quota:hcai:notified:{utc_day()}") == "1"
+    assert db.kv_get(f"quota:hcai:notified:{utc_day()}:upstream") == "1"
 
 
 def test_fallback_provider_prefers_db_over_env(tmp_path):
@@ -156,7 +193,7 @@ def test_fallback_provider_prefers_db_over_env(tmp_path):
     provider = fallback_provider(settings, db)
     assert provider is not None
     assert provider.api_key == "fallback-key"
-    assert provider.model == "kgw/kilo-auto/free"
+    assert provider.model == "fallback-model"
 
     db.kv_set("config:ai_router_api_key", "db-key")
     db.kv_set("config:ai_router_models", "db-model,db-backup")
@@ -169,7 +206,7 @@ def test_fallback_provider_prefers_db_over_env(tmp_path):
     assert provider.base_url == "https://db.example/v1"
 
 
-def test_chat_tries_9router_models_in_order(tmp_path):
+def test_chat_tries_fallback_models_in_order(tmp_path):
     agent, _, fallback_client = _agent(tmp_path)
     fallback_client.chat.completions.create = AsyncMock(
         side_effect=[Exception("first unavailable"), _response("second answer")]

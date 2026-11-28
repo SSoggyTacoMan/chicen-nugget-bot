@@ -77,6 +77,11 @@ def price_for(model: str | None) -> Price:
     key = (model or "").strip().lower()
     if key in PRICES:
         return PRICES[key]
+    # OpenRouter-style (:free) and router-style (-free) model names are free
+    # fallbacks, not paid models. Charging them at DEFAULT_PRICE would let a
+    # free fallback eat a user's daily budget.
+    if key.endswith((":free", "-free")):
+        return Price(0.0, 0.0)
     for name in sorted(PRICES, key=len, reverse=True):
         if key.startswith(name):
             return PRICES[name]

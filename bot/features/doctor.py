@@ -84,8 +84,8 @@ async def cmd_doctor(ack, command, client) -> None:
         lines.append(f"{warn} voice: {exc}")
 
     try:
-        from bot.ai.budget import utc_day
         from bot.ai.providers import fallback_provider
+        from bot.ai.quota import describe as quota_description
 
         router = fallback_provider(settings, runtime.db)
         if router:
@@ -93,8 +93,9 @@ async def cmd_doctor(ack, command, client) -> None:
             lines.append(f"{ok} fallback ai: {models} at `{router.base_url}`")
         else:
             lines.append(f"{warn} fallback ai: not configured")
-        if runtime.db and runtime.db.kv_get(f"quota:hcai:{utc_day()}"):
-            lines.append(f"{warn} hacai quota: empty today (fallback active)")
+        hacai_state = quota_description(runtime.db)
+        if hacai_state:
+            lines.append(f"{warn} {hacai_state}")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"{warn} fallback ai: {exc}")
 

@@ -257,7 +257,10 @@ CHAT_SETUP_AREAS: dict[str, SetupGuide] = {
     ),
     "fallback": SetupGuide(
         title="fallback AI",
-        intro="only used when the main provider returns a quota or payment error.",
+        intro=(
+            "only used when the main provider is unavailable. any "
+            "OpenAI-compatible endpoint works."
+        ),
         questions=(
             SetupQuestion(
                 "ai_router_base_url",
@@ -355,6 +358,10 @@ CHAT_SETUP_ALIASES: dict[str, str] = {
     "imagine": "images",
     "fallback": "fallback",
     "9router": "fallback",
+    "router": "fallback",
+    "litellm": "fallback",
+    "openrouter": "fallback",
+    "openai_compatible": "fallback",
     "watchers": "watchers",
     "watcher": "watchers",
     "storage": "storage",
@@ -830,7 +837,7 @@ def _usage() -> str:
         "• `/nugget setup voice` - qwen3 tts voice, language and style\n"
         "• `/nugget setup images` - nano banana model, fallback and budget cost\n"
         "• `/nugget setup welcome` - welcome messages, watched channels and ping group\n"
-        "• `/nugget setup fallback` - 9router key and model for empty HCAI quota\n"
+        "• `/nugget setup fallback` - any OpenAI-compatible endpoint for when HCAI is unavailable\n"
         "• `/nugget setup watchers` - CI, notifications, email, URLs\n"
         "• `/nugget setup storage` - retention and cleanup\n"
         "• `/nugget setup channels` - auto-join public channels\n"
@@ -1402,25 +1409,25 @@ def _config_modal(integration: str) -> dict[str, Any] | None:
             "Fallback AI",
             [
                 _note(
-                    "used only when hack club ai returns a quota/payment error. models are tried top to bottom. 9router is text-only here; voice, images and memory search still need HCAI quota."
+                    "used only when hack club ai is unavailable. any OpenAI-compatible endpoint works (9router, LiteLLM, OpenRouter, a local server). models are tried top to bottom. the fallback is text-only; voice, images and memory search still need HCAI quota."
                 ),
                 _input(
                     "ai_router_base_url",
-                    "9router base URL",
+                    "Fallback base URL",
                     initial=_current("ai_router_base_url", settings.ai_router_base_url),
                     max_length=300,
                 ),
                 _input(
                     "ai_router_models",
                     "Fallback models (in order)",
-                    placeholder="kgw/kilo-auto/free\nother/model\nbackup/model",
+                    placeholder="provider/model-a\nprovider/model-b",
                     initial=initial_models,
                     multiline=True,
                     max_length=1000,
                 ),
                 _input(
                     "ai_router_api_key",
-                    "9router API key",
+                    "Fallback API key",
                     placeholder="paste the key; blank keeps the current one",
                     max_length=300,
                 ),

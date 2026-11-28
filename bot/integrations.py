@@ -388,7 +388,7 @@ def setup_panel_blocks(requested: str | None = None) -> list[dict[str, Any]]:
         "voice": ("Voice", "Qwen3 TTS voice, language and style"),
         "images": ("Images", "Nano Banana model, fallback and cost"),
         "welcome": ("Welcome", "Messages, watched channels and ping group"),
-        "fallback": ("Fallback AI", "9router key for when HCAI quota is empty"),
+        "fallback": ("Fallback AI", "OpenAI-compatible endpoint for when HCAI is unavailable"),
         "watchers": ("Watchers", "CI, notifications, email, URLs"),
         "storage": ("Storage", "Retention and cleanup"),
         "channels": ("Auto-join", "Channels to join on boot"),

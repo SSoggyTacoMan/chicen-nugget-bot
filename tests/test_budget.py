@@ -55,6 +55,18 @@ def test_unknown_model_uses_a_pessimistic_default():
     assert price_for(None) == DEFAULT_PRICE
 
 
+def test_free_model_suffixes_cost_nothing():
+    for model in (
+        "oc/deepseek-v4.1-flash-free",
+        "openrouter/qwen/qwen3.8-27b:free",
+        "bzl/auto:free",
+    ):
+        price = price_for(model)
+        assert price.input_per_million == 0.0
+        assert price.output_per_million == 0.0
+        assert estimate_cost(model, 10_000, 1_000) == 0.0
+
+
 def test_estimate_cost_math():
     # 1M input + 1M output at luna prices
     assert estimate_cost("openai/gpt-5.6-luna", 1_000_000, 1_000_000) == pytest.approx(1.4)
