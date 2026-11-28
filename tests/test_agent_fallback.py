@@ -7,6 +7,7 @@ import pytest
 from bot.ai.agent import Agent, QuotaExhausted
 from bot.ai.budget import utc_day
 from bot.ai.providers import FallbackProvider
+from bot.ai.quota import back_notified_key
 from bot.db import Database
 
 UPSTREAM_ERROR = (
@@ -125,6 +126,25 @@ def test_chat_switches_to_fallback_on_daily_limit(tmp_path):
     asyncio.run(run())
     assert db.kv_get(f"quota:hcai:{utc_day()}") == "empty"
     assert db.kv_get("quota:hcai:cooldown") is None
+
+
+def test_primary_success_after_outage_pings_owner(tmp_path):
+    agent, db, _ = _agent(tmp_path)
+    db.kv_set("quota:hcai:cooldown", "0")
+    db.kv_set("quota:hcai:outage", "upstream")
+    agent.llm.chat.completions.create = AsyncMock(return_value=_response("back"))
+
+    async def run():
+        response, provider = await agent._chat(
+            [{"role": "user", "content": "hello"}], tools=False
+        )
+        assert response.choices[0].message.content == "back"
+        assert provider == "primary"
+
+    asyncio.run(run())
+    agent.client.chat_postMessage.assert_awaited_once()
+    assert db.kv_get("quota:hcai:outage") is None
+    assert db.kv_get(back_notified_key()) == "1"
 
 
 def test_upstream_cooldown_skips_primary_on_the_next_turn(tmp_path):

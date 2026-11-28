@@ -20,6 +20,7 @@ DAY_PREFIX = "quota:hcai:"
 COOLDOWN_KEY = "quota:hcai:cooldown"
 KIND_KEY = "quota:hcai:kind"
 REASON_KEY = "quota:hcai:reason"
+OUTAGE_KEY = "quota:hcai:outage"
 
 KIND_DAILY = "daily"
 KIND_UPSTREAM = "upstream"
@@ -62,6 +63,8 @@ def classify_quota_error(exc: Exception | str) -> str:
         "quota exceeded",
         "user_daily",
         "daily_user",
+        "openrouter_free_tier_daily",
+        "free-models-per-day",
     )
     if any(marker in lower for marker in daily_markers):
         return KIND_DAILY
@@ -89,8 +92,10 @@ def mark_unavailable(db: Database | None, kind: str, reason: str = "") -> None:
     if kind == KIND_DAILY:
         db.kv_set(f"{DAY_PREFIX}{utc_day()}", "empty")
         db.kv_del(COOLDOWN_KEY)
+        db.kv_del(OUTAGE_KEY)
     else:
         db.kv_set(COOLDOWN_KEY, str(time.time() + retry_seconds(kind)))
+        db.kv_set(OUTAGE_KEY, kind or KIND_UNKNOWN)
     db.kv_set(KIND_KEY, kind or KIND_UNKNOWN)
     if reason:
         db.kv_set(REASON_KEY, reason[:300])
@@ -104,6 +109,13 @@ def clear_cooldown(db: Database | None) -> None:
     db.kv_del(COOLDOWN_KEY)
     db.kv_del(KIND_KEY)
     db.kv_del(REASON_KEY)
+    db.kv_del(OUTAGE_KEY)
+
+
+def outage(db: Database | None) -> str:
+    """The persistent reason a known outage is still being watched."""
+
+    return (db.kv_get(OUTAGE_KEY) if db else "") or ""
 
 
 def primary_status(db: Database | None) -> tuple[bool, str]:
@@ -145,7 +157,12 @@ def describe(db: Database | None) -> str:
 
     blocked, kind = primary_status(db)
     if not blocked:
-        return ""
+        kind = outage(db)
+        if not kind:
+            return ""
+        if kind == KIND_UPSTREAM:
+            return "hacai: upstream billing outage, retry pending"
+        return "hacai: unavailable, retry pending"
     if kind == KIND_DAILY:
         return "hacai quota: empty today"
     minutes = max(1, (retry_after_seconds(db) + 59) // 60)
@@ -160,15 +177,24 @@ def notice_key(kind: str) -> str:
     return f"{DAY_PREFIX}notified:{utc_day()}:{kind or KIND_UNKNOWN}"
 
 
+def back_notified_key() -> str:
+    """At most one 'hacai is back' ping per UTC day."""
+
+    return f"{DAY_PREFIX}back_notified:{utc_day()}"
+
+
 __all__ = [
     "KIND_DAILY",
     "KIND_UNKNOWN",
     "KIND_UPSTREAM",
+    "OUTAGE_KEY",
+    "back_notified_key",
     "classify_quota_error",
     "clear_cooldown",
     "describe",
     "mark_unavailable",
     "notice_key",
+    "outage",
     "primary_status",
     "retry_after_seconds",
     "retry_seconds",

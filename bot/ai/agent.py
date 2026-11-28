@@ -26,8 +26,10 @@ from bot.ai.quota import (
     clear_cooldown,
     mark_unavailable,
     notice_key,
+    outage,
     primary_status,
 )
+from bot.ai.quota_watch import notify_back
 from bot.ai.tools import Toolbox, ToolContext, format_now, get_user_memory_prompt
 from bot.config import Settings
 from bot.db import Database
@@ -985,7 +987,14 @@ class Agent:
                     ):
                         raise RuntimeError("empty response")
                     if provider_name == "primary":
+                        was_outage = outage(self.db)
                         clear_cooldown(self.db)
+                        if was_outage:
+                            await notify_back(
+                                settings=self.settings,
+                                db=self.db,
+                                client=self.client,
+                            )
                         return response, provider_name
                     if provider_name == "fallback" and fallback is not None:
                         await self._notify_quota_once(fallback[1], quota_kind)

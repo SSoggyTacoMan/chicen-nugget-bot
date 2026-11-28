@@ -13,6 +13,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from bot import ambient, integrations
 from bot.ai import images as image_settings
+from bot.ai import quota_watch
 from bot.ai.agent import Agent
 from bot.ai.budget import Budget
 from bot.ai.gate import Gate
@@ -235,6 +236,9 @@ async def run() -> None:
             logger.exception("failed to initialise the ai agent; continuing without it")
             runtime.agent = None
 
+    if runtime.agent is not None:
+        quota_watch.start()
+
     register(app)
 
     if settings.access_enabled:
@@ -307,6 +311,7 @@ async def run() -> None:
             if browser is not None:
                 with suppress(Exception):
                     await browser.shutdown()
+        await quota_watch.stop()
         await scheduler.stop()
         with suppress(Exception):
             db.close()

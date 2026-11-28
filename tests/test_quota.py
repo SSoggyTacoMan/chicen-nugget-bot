@@ -5,9 +5,11 @@ from bot.ai.quota import (
     KIND_UNKNOWN,
     KIND_UPSTREAM,
     classify_quota_error,
+    clear_cooldown,
     describe,
     mark_unavailable,
     notice_key,
+    outage,
     primary_status,
 )
 from bot.db import Database
@@ -39,6 +41,14 @@ def test_classify_upstream_billing():
     )
 
 
+def test_classify_free_tier_daily_limit():
+    text = (
+        "429 Rate limit exceeded: free-models-per-day-high-balance. "
+        "limit_source=openrouter_free_tier_daily"
+    )
+    assert classify_quota_error(text) == KIND_DAILY
+
+
 def test_classify_unknown_quota_and_non_quota():
     assert classify_quota_error("some quota problem") == KIND_UNKNOWN
     assert classify_quota_error("model not found") == ""
@@ -63,6 +73,18 @@ def test_upstream_uses_a_short_cooldown(tmp_path):
     assert kind == KIND_UPSTREAM
     assert db.kv_get(f"quota:hcai:{utc_day()}") is None
     assert "upstream billing outage" in describe(db)
+
+
+def test_outage_marker_survives_cooldown_expiry(tmp_path):
+    db = _db(tmp_path)
+    mark_unavailable(db, KIND_UPSTREAM)
+    db.kv_set(COOLDOWN_KEY, "0")
+
+    assert primary_status(db) == (False, "")
+    assert outage(db) == KIND_UPSTREAM
+
+    clear_cooldown(db)
+    assert outage(db) == ""
 
 
 def test_expired_cooldown_unblocks_primary(tmp_path):
