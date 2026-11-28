@@ -840,6 +840,7 @@ def test_inspect_code_tool():
     async def run():
         lst = await box.execute("inspect_code", {"action": "list", "path": "prompts"}, ctx)
         assert "prompts/system.md" in lst
+        assert "prompts/ops.md" in lst
 
         rd = await box.execute("inspect_code", {"action": "read", "path": "prompts/system.md", "limit": 5}, ctx)
         assert "1: # who you are" in rd
@@ -2022,6 +2023,8 @@ def test_agent_active_identity_injection(tmp_path):
         )
         assert "Chicen Nugget Bot (workspace bot app)" in captured_system_messages[-1]
         assert "U0BOT0001" in captured_system_messages[-1]
+        # public owner mention stays personality-first, without the ops manual
+        assert "# ops manual" not in captured_system_messages[-1]
 
         # Call via user_client (Boi)
         await agent.reply(
@@ -2035,6 +2038,8 @@ def test_agent_active_identity_injection(tmp_path):
         )
         assert "Chicen Nugget Boi (personal assistant user account)" in captured_system_messages[-1]
         assert "U0BOI0001" in captured_system_messages[-1]
+        # owner DMs get the detailed manual appended
+        assert "# ops manual" in captured_system_messages[-1]
 
     asyncio.run(run())
 

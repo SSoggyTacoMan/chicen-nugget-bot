@@ -1,6 +1,12 @@
 import re
 
-from bot.ai.agent import PROMPT_PATH, TRIGGER_TEXT, sync_prompt_digest
+from bot.ai.agent import (
+    OPS_PATH,
+    PROMPT_PATH,
+    TRIGGER_TEXT,
+    include_ops_manual,
+    sync_prompt_digest,
+)
 from bot.db import Database
 
 REQUIRED = {
@@ -37,9 +43,41 @@ REQUIRED = {
 def test_prompt_placeholders_are_known():
     """Every {placeholder} must be one the agent actually fills in."""
     text = PROMPT_PATH.read_text(encoding="utf-8")
+    text += "\n" + OPS_PATH.read_text(encoding="utf-8")
     found = set(re.findall(r"\{([a-z_]+)\}", text))
     assert found <= REQUIRED, f"unfilled placeholders: {sorted(found - REQUIRED)}"
     assert REQUIRED <= found, f"prompt lost placeholders: {sorted(REQUIRED - found)}"
+
+
+def test_ops_manual_is_referenced_and_static():
+    """The core points at the manual, and inspect_code can read it raw."""
+    core = PROMPT_PATH.read_text(encoding="utf-8")
+    ops = OPS_PATH.read_text(encoding="utf-8")
+    assert "prompts/ops.md" in core
+    assert "github_write" in ops
+    assert "sandbox" in ops
+    assert not re.findall(r"\{[a-z_]+\}", ops)
+
+
+def test_ops_manual_only_loads_for_operator_turns():
+    assert include_ops_manual(
+        is_owner=True, is_admin=True, secret=False, is_dm=True, trigger="dm"
+    )
+    assert include_ops_manual(
+        is_owner=False, is_admin=True, secret=False, is_dm=True, trigger="dm"
+    )
+    assert include_ops_manual(
+        is_owner=True, is_admin=False, secret=False, is_dm=False, trigger="reaction"
+    )
+    assert not include_ops_manual(
+        is_owner=True, is_admin=False, secret=False, is_dm=False, trigger="mention"
+    )
+    assert not include_ops_manual(
+        is_owner=False, is_admin=False, secret=False, is_dm=True, trigger="dm"
+    )
+    assert not include_ops_manual(
+        is_owner=True, is_admin=True, secret=True, is_dm=True, trigger="dm"
+    )
 
 
 def test_prompt_keeps_the_persona():

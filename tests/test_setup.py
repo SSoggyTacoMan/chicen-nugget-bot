@@ -334,14 +334,16 @@ def test_calendar_freebusy_returns_busy_blocks():
 
 
 def test_setup_route_and_prompt():
-    from bot.ai.agent import PROMPT_PATH
+    from bot.ai.agent import OPS_PATH, PROMPT_PATH
     from bot.features import router
 
     handler, rest = router.resolve("setup status")
     assert handler is router.cmd_setup
     assert rest == "status"
 
-    text = PROMPT_PATH.read_text(encoding="utf-8").lower()
+    text = PROMPT_PATH.read_text(encoding="utf-8") + "\n"
+    text += OPS_PATH.read_text(encoding="utf-8")
+    text = text.lower()
     assert "setup from chat" in text
     assert "integration_setup" in text
     assert "daily_briefing" in text

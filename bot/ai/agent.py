@@ -41,6 +41,7 @@ from bot.utils.tz import tzinfo
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system.md"
+OPS_PATH = Path(__file__).resolve().parents[2] / "prompts" / "ops.md"
 PROMPT_DIGEST_KEY = "persona_digest"
 MAX_TOOL_ROUNDS = 6
 MAX_IDENTICAL_TOOL_CALLS = 2
@@ -181,6 +182,15 @@ DATA_HINT_RE = re.compile(
 )
 
 
+def include_ops_manual(
+    *, is_owner: bool, is_admin: bool, secret: bool, is_dm: bool, trigger: str
+) -> bool:
+    """Operator DMs and explicit tool requests get the manual, not public chat."""
+    if secret or not (is_owner or is_admin):
+        return False
+    return is_dm or trigger in {"reaction", "shortcut"}
+
+
 def sync_prompt_digest(db: Database, template: str) -> int:
     """Clear old chat turns when the persona changes.
 
@@ -248,7 +258,10 @@ class Agent:
         self.memory = MemoryIndex(settings, self.llm)
         self._embedding_tasks: set[asyncio.Task] = set()
         self.system_template = PROMPT_PATH.read_text(encoding="utf-8")
-        sync_prompt_digest(self.db, self.system_template)
+        self.ops_template = OPS_PATH.read_text(encoding="utf-8")
+        sync_prompt_digest(
+            self.db, f"{self.system_template}\n\n{self.ops_template}"
+        )
 
     def _remember(
         self,
@@ -353,41 +366,55 @@ class Agent:
             bot_model=bot_model,
             assistant_model=assistant_model,
         )
-        system = (
-            self.system_template.replace("{bot_name}", self.settings.bot_name)
-            .replace("{bot_user_id}", self.bot_user_id or "unknown")
-            .replace("{assistant_user_id}", assistant_id)
-            .replace("{active_identity_user_id}", active_identity_id)
-            .replace("{active_identity}", active_identity)
-            .replace("{now}", format_now(self.settings))
-            .replace("{user_id}", user_id)
-            .replace("{is_owner}", "yes" if role == "owner" else "no")
-            .replace("{is_admin}", "yes" if self.settings.is_admin(user_id) else "no")
-            .replace(
-                "{is_moderator}",
-                "yes" if self.settings.is_moderator(user_id) else "no",
-            )
-            .replace("{owner_id}", self.settings.owner_user_id)
-            .replace("{location}", location)
-            .replace("{trigger}", TRIGGER_TEXT.get(trigger, TRIGGER_TEXT["mention"]))
-            .replace("{jev}", jev or "no extra classification")
-            .replace("{memory}", memory)
-            .replace("{integrations}", integrations_text)
-            .replace("{ai_model}", bot_model)
-            .replace("{ai_fallback_model}", bot_fallback or "none")
-            .replace("{ai_assistant_model}", assistant_model)
-            .replace("{ai_assistant_fast_model}", fast_model)
-            .replace("{ai_assistant_fallback_model}", assistant_fallback or "none")
-            .replace(
-                "{ai_code_model}",
-                code_model or "not set (tool-heavy turns use the chat model)",
-            )
-            .replace("{ai_code_fallback_model}", code_fallback or "none")
-            .replace("{imagine_model}", imagine_model)
-            .replace("{tts_model}", tts_model)
-            .replace("{gate_model}", self.settings.ai_gate_model or "none")
-            .replace("{repo_url}", self.settings.repo_url)
+        values = {
+            "{bot_name}": self.settings.bot_name,
+            "{bot_user_id}": self.bot_user_id or "unknown",
+            "{assistant_user_id}": assistant_id,
+            "{active_identity_user_id}": active_identity_id,
+            "{active_identity}": active_identity,
+            "{now}": format_now(self.settings),
+            "{user_id}": user_id,
+            "{is_owner}": "yes" if role == "owner" else "no",
+            "{is_admin}": "yes" if self.settings.is_admin(user_id) else "no",
+            "{is_moderator}": "yes" if self.settings.is_moderator(user_id) else "no",
+            "{owner_id}": self.settings.owner_user_id,
+            "{location}": location,
+            "{trigger}": TRIGGER_TEXT.get(trigger, TRIGGER_TEXT["mention"]),
+            "{jev}": jev or "no extra classification",
+            "{memory}": memory,
+            "{integrations}": integrations_text,
+            "{ai_model}": bot_model,
+            "{ai_fallback_model}": bot_fallback or "none",
+            "{ai_assistant_model}": assistant_model,
+            "{ai_assistant_fast_model}": fast_model,
+            "{ai_assistant_fallback_model}": assistant_fallback or "none",
+            "{ai_code_model}": code_model
+            or "not set (tool-heavy turns use the chat model)",
+            "{ai_code_fallback_model}": code_fallback or "none",
+            "{imagine_model}": imagine_model,
+            "{tts_model}": tts_model,
+            "{gate_model}": self.settings.ai_gate_model or "none",
+            "{repo_url}": self.settings.repo_url,
+        }
+
+        def render(template: str) -> str:
+            for key, value in values.items():
+                template = template.replace(key, value)
+            return template
+
+        core_system = render(self.system_template)
+        include_ops = include_ops_manual(
+            is_owner=role == "owner",
+            is_admin=self.settings.is_admin(user_id),
+            secret=secret is not None,
+            is_dm=is_dm,
+            trigger=trigger,
         )
+        template = self.system_template
+        if include_ops:
+            template = f"{template.rstrip()}\n\n{self.ops_template}"
+        system = render(template)
+        logger.debug("prompt mode: %s", "core+ops" if include_ops else "core")
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         if secret is not None:
@@ -486,6 +513,7 @@ class Agent:
                     is_owner=ctx.is_owner or ctx.is_admin,
                     ephemeral=secret is not None,
                     extra_tools=extra_tools,
+                    fallback_system=core_system,
                 )
                 if provider == "fallback" and not fallback_kind:
                     fallback_kind = self._current_fallback_kind()
@@ -890,6 +918,7 @@ class Agent:
         is_owner: bool = True,
         ephemeral: bool = False,
         extra_tools: frozenset[str] = frozenset(),
+        fallback_system: str | None = None,
     ) -> tuple[Any, str]:
         models = self._models_for(is_user_identity, code=code, fast=fast)
 
@@ -941,6 +970,12 @@ class Agent:
             if provider_name == "fallback":
                 provider_kwargs.pop("tools", None)
                 provider_kwargs.pop("tool_choice", None)
+                provider_messages = list(messages)
+                if fallback_system is not None and provider_messages:
+                    provider_messages[0] = {
+                        "role": "system",
+                        "content": fallback_system,
+                    }
                 reason = {
                     KIND_UPSTREAM: (
                         "Hack Club AI's upstream credits are empty; there is no ETA"
@@ -949,7 +984,7 @@ class Agent:
                         "the daily Hack Club AI quota is used up until 00:00 UTC"
                     ),
                 }.get(quota_kind, "Hack Club AI is unavailable; there is no ETA")
-                provider_messages = messages + [
+                provider_messages.append(
                     {
                         "role": "system",
                         "content": (
@@ -960,7 +995,7 @@ class Agent:
                             "do not claim or imply that you did."
                         ),
                     }
-                ]
+                )
                 provider_kwargs["messages"] = provider_messages
 
             for index, model in enumerate(provider_models):

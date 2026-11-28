@@ -753,6 +753,14 @@ tests/                     pytest suite
 .github/workflows/         deploy
 ```
 
+## prompt layout
+
+`prompts/system.md` is the always-loaded core. it holds the persona, voice, when-to-speak rules, public self-veto, safety and conduct, truth rules, permissions, and compact tool policy. keep it personality-first.
+
+`prompts/ops.md` is the detailed manual. it holds the full tool catalog, setup flows, sandboxes, github work, boi mode, artifacts, and worked examples. it is attached automatically for owner/admin DMs and explicit reaction or shortcut tool requests. public and guest turns get the core only. if an owner/admin turn needs the manual but it is not attached, the core tells the model to read `prompts/ops.md` with `inspect_code`.
+
+editing either file changes the persona digest, so stored chat history clears once on the next start. deploy both files together.
+
 ## development
 
 ```bash

@@ -47,6 +47,8 @@ jobs:
             echo '--- prompt ---'
             md5sum ~/$DEPLOY_PATH/prompts/system.md 2>/dev/null || true
             head -n 6 ~/$DEPLOY_PATH/prompts/system.md 2>/dev/null || true
+            md5sum ~/$DEPLOY_PATH/prompts/ops.md 2>/dev/null || true
+            head -n 6 ~/$DEPLOY_PATH/prompts/ops.md 2>/dev/null || true
             echo '--- env ---'
             grep -E '^(AI_MODEL|AI_FALLBACK_MODEL|AI_USER_DAILY_BUDGET_USD|AI_DAILY_BUDGET_USD)=' ~/$DEPLOY_PATH/.env 2>/dev/null || true
             echo '--- log ---'

@@ -111,6 +111,26 @@ def test_chat_switches_to_fallback_on_upstream_quota_error(tmp_path):
     agent.client.chat_postMessage.assert_awaited_once()
 
 
+def test_fallback_strips_the_ops_manual(tmp_path):
+    agent, _, fallback_client = _agent(tmp_path)
+    messages = [
+        {"role": "system", "content": "core prompt\n\nops manual"},
+        {"role": "user", "content": "hello"},
+    ]
+
+    async def run():
+        await agent._chat(
+            messages,
+            tools=True,
+            fallback_system="core prompt",
+        )
+
+    asyncio.run(run())
+    _, kwargs = fallback_client.chat.completions.create.call_args
+    assert kwargs["messages"][0]["content"] == "core prompt"
+    assert "upstream credits are empty" in kwargs["messages"][-1]["content"]
+
+
 def test_chat_switches_to_fallback_on_daily_limit(tmp_path):
     agent, db, _ = _agent(tmp_path)
     agent.llm.chat.completions.create = AsyncMock(
