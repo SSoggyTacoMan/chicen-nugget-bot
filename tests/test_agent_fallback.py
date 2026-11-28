@@ -102,6 +102,7 @@ def test_chat_switches_to_fallback_on_upstream_quota_error(tmp_path):
     _, kwargs = fallback_client.chat.completions.create.call_args
     assert kwargs["model"] == "fallback-model"
     assert "tools" not in kwargs
+    assert "upstream credits are empty" in kwargs["messages"][-1]["content"]
     # an upstream billing error is a short cooldown, not a day-long block
     assert db.kv_get(f"quota:hcai:{utc_day()}") is None
     assert db.kv_get("quota:hcai:cooldown")

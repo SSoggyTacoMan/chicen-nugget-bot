@@ -939,15 +939,23 @@ class Agent:
             if provider_name == "fallback":
                 provider_kwargs.pop("tools", None)
                 provider_kwargs.pop("tool_choice", None)
+                reason = {
+                    KIND_UPSTREAM: (
+                        "Hack Club AI's upstream credits are empty; there is no ETA"
+                    ),
+                    KIND_DAILY: (
+                        "the daily Hack Club AI quota is used up until 00:00 UTC"
+                    ),
+                }.get(quota_kind, "Hack Club AI is unavailable; there is no ETA")
                 provider_messages = messages + [
                     {
                         "role": "system",
                         "content": (
-                            "The primary ai is unavailable. You are the fallback "
-                            "model and have no tools. Answer briefly from the context "
-                            "you already have. Do not claim to use tools. You cannot "
-                            "inspect the repository, commit log, or live status; do "
-                            "not claim or imply that you did."
+                            f"The primary ai is unavailable ({reason}). You are the "
+                            "fallback model and have no tools. Answer briefly from the "
+                            "context you already have. Do not claim to use tools. You "
+                            "cannot inspect the repository, commit log, or live status; "
+                            "do not claim or imply that you did."
                         ),
                     }
                 ]
