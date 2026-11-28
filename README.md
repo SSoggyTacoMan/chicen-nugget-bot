@@ -70,7 +70,7 @@ treat `xoxc` and `xoxd` like passwords. they grant full access to the account, i
 
 ### posting in the owner's name
 
-`as_user=true` on `send_dm` or `post_message` posts with the owner's display name and avatar, then adds a small muted `Sent by` line.
+`as_user=true` on `send_dm` or `post_message` posts with the owner's display name and avatar, then adds a small muted `Sent by` line. pass `signature=false` to skip that line when the owner explicitly asks.
 
 - default: the bot app does it with slack's `chat:write.customize` scope. no personal token is needed. the message keeps the small `APP` badge; that's expected.
 - native: if the owner adds their own user token with `/nugget setup slack`, the same call posts from their real profile with no badge.

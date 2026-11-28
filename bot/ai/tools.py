@@ -863,6 +863,10 @@ class Toolbox:
                         "type": "boolean",
                         "description": "Post under the owner's display name and profile picture (Slack chat:write.customize), with a small 'Sent by @assistant' signature. It stays a bot message with the app badge. If the owner configured their own user token, it posts natively instead. Only use when the owner explicitly asked or gave permission to post in their name. Default false (bot app).",
                     },
+                    "signature": {
+                        "type": "boolean",
+                        "description": "Append the small 'Sent by @assistant' line when as_user is true. Default true. Set false only when the owner explicitly asked to post without the signature.",
+                    },
                 },
                 ["user", "text"],
             ),
@@ -946,6 +950,10 @@ class Toolbox:
                     "as_user": {
                         "type": "boolean",
                         "description": "Post under the owner's display name and profile picture (Slack chat:write.customize), with a small 'Sent by @assistant' signature. It stays a bot message with the app badge. If the owner configured their own user token, it posts natively instead. Only use when the owner explicitly asked or gave permission to post in their name. Default false (bot app).",
+                    },
+                    "signature": {
+                        "type": "boolean",
+                        "description": "Append the small 'Sent by @assistant' line when as_user is true. Default true. Set false only when the owner explicitly asked to post without the signature.",
                     },
                     "thread_ts": {
                         "type": "string",
@@ -2645,6 +2653,7 @@ class Toolbox:
         query = str(args.get("user") or "").strip()
         text = str(args.get("text") or "").strip()
         as_user = bool(args.get("as_user", False))
+        signature = args.get("signature") is not False
         if not query:
             return _error("which user?")
         if not text:
@@ -2668,11 +2677,11 @@ class Toolbox:
             logger.debug("conversations_open failed for %s: %s", user_id, error_code(exc))
         formatted = disarm_broadcasts(format_mrkdwn(text))
         blocks = None
-        if as_user:
-            signature = _posted_by_signature(ctx)
+        if as_user and signature:
+            signature_text = _posted_by_signature(ctx)
             if "sent by <@" not in formatted.lower():
-                blocks = _owner_message_blocks(formatted, signature)
-                formatted = f"{formatted}\n\n{signature}"
+                blocks = _owner_message_blocks(formatted, signature_text)
+                formatted = f"{formatted}\n\n{signature_text}"
         if not await post(
             target_client, target, formatted, blocks=blocks, **(route.customize or {})
         ):
@@ -2926,6 +2935,7 @@ class Toolbox:
         channel_value = str(args.get("channel") or "here").strip()
         text = str(args.get("text") or "").strip()
         as_user = bool(args.get("as_user", False))
+        signature = args.get("signature") is not False
         if not text:
             return _error("message text is required")
         channel_id = await self._resolve_channel(ctx, channel_value)
@@ -2937,11 +2947,11 @@ class Toolbox:
         thread_ts = str(args.get("thread_ts") or "").strip() or None
         formatted = disarm_broadcasts(format_mrkdwn(text))
         blocks = None
-        if as_user:
-            signature = _posted_by_signature(ctx)
+        if as_user and signature:
+            signature_text = _posted_by_signature(ctx)
             if "sent by <@" not in formatted.lower():
-                blocks = _owner_message_blocks(formatted, signature)
-                formatted = f"{formatted}\n\n{signature}"
+                blocks = _owner_message_blocks(formatted, signature_text)
+                formatted = f"{formatted}\n\n{signature_text}"
         result = await post(
             route.client,
             channel_id,

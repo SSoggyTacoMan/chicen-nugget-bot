@@ -1642,7 +1642,7 @@ def _integration_modal(integration: str) -> dict[str, Any] | None:
                     "posting in your name needs *no personal token*. the bot app posts with "
                     "your *display name and profile picture* (Slack `chat:write.customize`), "
                     "so it looks like you and still carries the small `APP` badge plus a "
-                    "`Sent by` line.\n"
+                    "`Sent by` line (`signature=false` skips it only when asked).\n"
                     "if Slack shows the bot's own name/avatar instead, the app needs a "
                     "reinstall so the scope takes effect. the fields below are advanced and "
                     "optional: add *your own* user token only if you want a fully native "
@@ -2071,7 +2071,7 @@ async def on_slack_submit(ack, body, view, client) -> None:
         user_id or "",
         f"native owner posting enabled as <@{result.user_id}>. messages posted with "
         "`as_user=true` now come from your real profile with no app badge, plus the "
-        "small `Sent by` line.",
+        "small `Sent by` line (`signature=false` skips it only when asked).",
     )
 
 

@@ -184,7 +184,7 @@ async def cmd_accounts(ack, command, client) -> None:
             if owner_posting
             else "  - posting in your name: the bot app shows your display name + avatar on a bot message (app badge)."
         ),
-        "  - `as_user=true` adds a small \"Sent by <@assistant>\" line either way.",
+        "  - `as_user=true` adds a small \"Sent by <@assistant>\" line either way; `signature=false` skips it only when asked.",
         "  - add your own user token with `/nugget setup slack` for a native post; Boi's token can never post as you.",
         "",
         "• *shared brain*: the bot app and Boi use the same code, SQLite memory, notes, tasks, and runtime config.",

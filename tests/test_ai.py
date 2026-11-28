@@ -1800,6 +1800,24 @@ def test_send_dm_and_post_message_as_user():
         assert "Sent by <@U_BOT>" in kwargs_dm["blocks"][-1]["elements"][0]["text"]
         owner_client.chat_postMessage.assert_not_called()
 
+        # 2b. signature=false suppresses the line when explicitly requested
+        bot_client.chat_postMessage.reset_mock()
+        res_dm_quiet = await box.execute(
+            "send_dm",
+            {
+                "user": "U123456789",
+                "text": "quiet owner dm",
+                "as_user": True,
+                "signature": False,
+            },
+            ctx,
+        )
+        assert "your name and avatar" in res_dm_quiet
+        _, kwargs_quiet = bot_client.chat_postMessage.call_args
+        assert kwargs_quiet["text"] == "quiet owner dm"
+        assert kwargs_quiet["blocks"] is None
+        owner_client.chat_postMessage.assert_not_called()
+
         # 3. post_message default (as bot)
         bot_client.chat_postMessage.reset_mock()
         res_post_bot = await box.execute(
@@ -1836,6 +1854,23 @@ def test_send_dm_and_post_message_as_user():
         assert "_Sent by <@U_BOT>_" in kwargs_native["text"]
         bot_client.chat_postMessage.assert_not_called()
         user_client.chat_postMessage.assert_not_called()
+
+        # 5b. signature=false also suppresses it on native posts
+        owner_client.chat_postMessage.reset_mock()
+        res_native_quiet = await box.execute(
+            "post_message",
+            {
+                "channel": "C123456789",
+                "text": "native quiet",
+                "as_user": True,
+                "signature": False,
+            },
+            native_ctx,
+        )
+        assert "native post" in res_native_quiet
+        _, kwargs_native_quiet = owner_client.chat_postMessage.call_args
+        assert kwargs_native_quiet["text"] == "native quiet"
+        assert kwargs_native_quiet["blocks"] is None
 
         # 6. profile lookup failure is a clear error, not a silent fallback
         bot_client.chat_postMessage.reset_mock()
