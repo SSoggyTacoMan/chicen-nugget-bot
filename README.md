@@ -332,7 +332,7 @@ short/simple Boi messages use the quick model (`AI_ASSISTANT_FAST_MODEL`, defaul
 
 when hack club ai is unavailable, the bot can switch to any OpenAI-compatible chat endpoint: 9router, LiteLLM, OpenRouter, a local llama.cpp server, etc. configure it with `/nugget setup fallback` or `AI_ROUTER_BASE_URL`, `AI_ROUTER_API_KEY` and `AI_ROUTER_MODELS` (comma-separated; there is no default). models are tried in order. the fallback is text-only with tools disabled, so voice, images and memory search still need HCAI quota.
 
-the bot distinguishes a daily HCAI limit (a 429 `Daily spending limit ...`, blocked until 00:00 UTC) from HCAI's own upstream billing problems (402 OpenRouter/TypeSafe credits, retried every 5 minutes). it DMs the owner once per reason per UTC day, and `/nugget status` plus `/nugget doctor` show the current reason. free models (`:free`, `-free`) are priced at zero in the budget tracker.
+the bot distinguishes a daily HCAI limit (a 429 `Daily spending limit ...`, blocked until 00:00 UTC) from HCAI's own upstream billing problems (402 OpenRouter/TypeSafe credits, retried silently every 5 minutes with no ETA). it DMs the owner once per reason per UTC day, and `/nugget status` plus `/nugget doctor` show the current reason. free models (`:free`, `-free`) are priced at zero in the budget tracker.
 
 the API key is stored in SQLite, never in chat or git.
 

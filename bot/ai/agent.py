@@ -834,7 +834,7 @@ class Agent:
         if kind == KIND_DAILY:
             return "_(hack club ai quota empty · fallback ai · resets 00:00 UTC)_"
         if kind == KIND_UPSTREAM:
-            return "_(hack club ai upstream outage · fallback ai · auto-retrying)_"
+            return "_(hack club ai upstream outage · fallback ai · retrying every 5m, no eta)_"
         return "_(hack club ai unavailable · fallback ai)_"
 
     async def _notify_quota_once(
@@ -945,7 +945,9 @@ class Agent:
                         "content": (
                             "The primary ai is unavailable. You are the fallback "
                             "model and have no tools. Answer briefly from the context "
-                            "you already have. Do not claim to use tools."
+                            "you already have. Do not claim to use tools. You cannot "
+                            "inspect the repository, commit log, or live status; do "
+                            "not claim or imply that you did."
                         ),
                     }
                 ]
