@@ -66,6 +66,10 @@ PRICES: dict[str, Price] = {
     "jev-latest": Price(0.042, 0.0),
     "jev-": Price(0.042, 0.0),
     "kgw/kilo-auto/free": Price(0.0, 0.0),
+    # Free models on the owner's router. Keep these at zero so a fallback
+    # outage cannot spend someone's daily budget.
+    "ag/gemini-3.8-flash": Price(0.0, 0.0),
+    "cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast": Price(0.0, 0.0),
 }
 
 # If we don't know a model, assume it's expensive. Under-counting is how a

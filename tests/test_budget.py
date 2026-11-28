@@ -55,6 +55,15 @@ def test_unknown_model_uses_a_pessimistic_default():
     assert price_for(None) == DEFAULT_PRICE
 
 
+def test_known_free_router_models_cost_nothing():
+    for model in (
+        "ag/gemini-3.8-flash",
+        "cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    ):
+        assert price_for(model).input_per_million == 0.0
+        assert price_for(model).output_per_million == 0.0
+
+
 def test_free_model_suffixes_cost_nothing():
     for model in (
         "oc/deepseek-v4.1-flash-free",
